@@ -1012,6 +1012,7 @@ class ROS2BridgeClient: ObservableObject {
 
         let queueStats = publishQueueStats
         let transportProfile = ROS2BridgeTransportProfile.current
+        let currentWiFiTelemetryManager = CurrentWiFiTelemetryManager.shared
         let advertisedTopics = topicRegistry.advertisedTopics().map { definition in
             [
                 "id": definition.id.rawValue,
@@ -1032,6 +1033,7 @@ class ROS2BridgeClient: ObservableObject {
             "enabled_streams": snapshot.enabledStreams,
             "advertised_topics": advertisedTopics,
             "radio_channels": RadioTelemetryCatalog.shared.rosMessage,
+            "current_wifi_telemetry": currentWiFiTelemetryManager.sessionMetadata,
             "started_at": iso8601String(snapshot.startedAt),
             "ended_at": iso8601String(snapshot.endedAt),
             "app": [
@@ -1077,6 +1079,7 @@ class ROS2BridgeClient: ObservableObject {
         let geoTilePublisher = GeoTilePublisher.shared
         let indoorLocalizationManager = IndoorLocalizationManager.shared
         let transportProfile = ROS2BridgeTransportProfile.current
+        let currentWiFiTelemetryManager = CurrentWiFiTelemetryManager.shared
         let enabledStreams = MappingSensorStream.allCases
             .filter { topicRegistry.isStreamEnabled($0) }
             .map(\.rawValue)
@@ -1167,6 +1170,12 @@ class ROS2BridgeClient: ObservableObject {
                         "vertical_accuracy": String(indoorLocalizationManager.lastVerticalAccuracy),
                         "last_error": indoorLocalizationManager.lastError ?? ""
                     ]
+                ),
+                diagnosticStatus(
+                    name: "reconstructor/current_wifi",
+                    level: currentWiFiTelemetryManager.diagnosticLevel,
+                    message: currentWiFiTelemetryManager.diagnosticMessage,
+                    values: currentWiFiTelemetryManager.diagnosticValues
                 )
             ]
         ]

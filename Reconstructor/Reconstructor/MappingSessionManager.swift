@@ -84,6 +84,7 @@ final class MappingSessionManager: ObservableObject {
     private let bridge: ROS2BridgeClient
     private let geoTilePublisher: GeoTilePublisher
     private let indoorLocalizationManager: IndoorLocalizationManager
+    private let currentWiFiTelemetryManager: CurrentWiFiTelemetryManager
 
     var isActive: Bool {
         state == .active
@@ -121,12 +122,14 @@ final class MappingSessionManager: ObservableObject {
         bridge: ROS2BridgeClient? = nil,
         geoTilePublisher: GeoTilePublisher? = nil,
         indoorLocalizationManager: IndoorLocalizationManager? = nil,
+        currentWiFiTelemetryManager: CurrentWiFiTelemetryManager? = nil,
         recorderURL: String = "ws://192.168.1.100:9090",
         enabledStreams: Set<MappingSensorStream>? = nil
     ) {
         self.bridge = bridge ?? ROS2BridgeClient.shared
         self.geoTilePublisher = geoTilePublisher ?? GeoTilePublisher.shared
         self.indoorLocalizationManager = indoorLocalizationManager ?? IndoorLocalizationManager.shared
+        self.currentWiFiTelemetryManager = currentWiFiTelemetryManager ?? CurrentWiFiTelemetryManager.shared
         self.recorderURL = recorderURL
         self.enabledStreams = enabledStreams ?? Self.defaultStreams
     }
@@ -168,6 +171,7 @@ final class MappingSessionManager: ObservableObject {
         bridge.connect(to: self.recorderURL)
         geoTilePublisher.start()
         indoorLocalizationManager.start()
+        currentWiFiTelemetryManager.start()
         state = .active
         publishSessionMetadata(event: "started")
     }
@@ -178,6 +182,7 @@ final class MappingSessionManager: ObservableObject {
         publishSessionMetadata(event: "stopped")
         geoTilePublisher.stop()
         indoorLocalizationManager.stop()
+        currentWiFiTelemetryManager.stop()
         bridge.disconnect(after: 0.25)
     }
 

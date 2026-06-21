@@ -132,6 +132,10 @@ The current ROS topic namespace remains `/reconstructor` for compatibility with 
 
 Transport decision: MapEverything continues to use `rosbridge_suite` over WebSocket in this build. A native binary bridge is not enabled until there is a maintained iOS ROS2/DDS client or companion ROS2 binary receiver and a throughput benchmark showing rosbridge is insufficient. The app publishes its active bridge profile on `/reconstructor/session` and `/reconstructor/status`.
 
+### Radio Telemetry Notes
+
+Current Wi-Fi signal quality uses Apple's public `NEHotspotNetwork.fetchCurrent` API. It only reports the network the device is already associated with, requires Location permission, and requires the app target's `com.apple.developer.networking.wifi-info` entitlement. MapEverything now includes that entitlement file and publishes the entitlement, permission, last fetch, and normalized signal-strength state through session metadata and `/reconstructor/status`; broad Wi-Fi scans are not available through normal iOS public APIs.
+
 ### ROS2 WebSocket Topic Directory
 
 | Topic Name | ROS 2 Message Type | Update Rate | Description |
