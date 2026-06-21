@@ -1,7 +1,7 @@
 The purpose of this project is the use the sensors in the iPhone to reconstruct static environments and provide an interface so that the user can easily plan, map, reconstruct, and visualize any environment
 
 
-    1 # 3D Environment Reconstruction Plan for Reconstructor
+    1 # 3D Environment Reconstruction Plan for MapEverything
     2
     3 ## Objective
     4 Develop an iOS application using LiDAR and ARKit to manually reconstruct static environments for specific use cases such as home remodeling and landscape
@@ -10,7 +10,7 @@ The purpose of this project is the use the sensors in the iPhone to reconstruct 
       customization.
     5
     6 ## Key Files & Context
-    7 *   `ReconstructorApp.swift`: May require modifications for managing the ARSession lifecycle and passing data between different views.
+    7 *   `MapEverythingApp.swift`: May require modifications for managing the ARSession lifecycle and passing data between different views.
     8 *   `ContentView.swift`: Will undergo significant changes to integrate `ARView` (or `ARSCNView`), display reconstructed data, and handle user interactions related
       to the scanning, visualization of proposed changes, and placement of build points.
     9 *   New Swift files/modules: These will be introduced to encapsulate logic for `ARSessionDelegate` handling, point cloud processing, optional mesh generation,
