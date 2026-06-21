@@ -31,6 +31,8 @@
 	</dict>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>This app uses your location for indoor localization, global registration, satellite imagery, and DEM tiles while recording robotics mapping data.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>MapEverything connects to a local ROS2 recorder to publish mapping data and measure recorder endpoint health.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

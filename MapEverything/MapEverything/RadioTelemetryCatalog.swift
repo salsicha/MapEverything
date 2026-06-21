@@ -135,12 +135,17 @@ final class RadioTelemetryCatalog {
             observationFields: [
                 "recorder_url",
                 "round_trip_time_ms",
+                "throughput_bytes_per_second",
+                "throughput_payload_bytes",
+                "throughput_message_count",
+                "throughput_elapsed_ms",
                 "success",
                 "error",
                 "timestamp"
             ],
             limitations: [
-                "Measures application-path latency to the recorder, not raw link-layer latency."
+                "Measures application-path latency to the recorder, not raw link-layer latency.",
+                "Throughput probe measures bounded rosbridge upload write rate, not sustained bidirectional bandwidth."
             ],
             isPublicAPIBacked: true
         ),

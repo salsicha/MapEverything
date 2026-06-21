@@ -1014,6 +1014,7 @@ class ROS2BridgeClient: ObservableObject {
         let transportProfile = ROS2BridgeTransportProfile.current
         let currentWiFiTelemetryManager = CurrentWiFiTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
+        let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
         let advertisedTopics = topicRegistry.advertisedTopics().map { definition in
             [
                 "id": definition.id.rawValue,
@@ -1036,6 +1037,7 @@ class ROS2BridgeClient: ObservableObject {
             "radio_channels": RadioTelemetryCatalog.shared.rosMessage,
             "current_wifi_telemetry": currentWiFiTelemetryManager.sessionMetadata,
             "network_path_diagnostics": networkPathDiagnosticsManager.sessionMetadata,
+            "recorder_endpoint_probe": recorderEndpointProbeManager.sessionMetadata,
             "started_at": iso8601String(snapshot.startedAt),
             "ended_at": iso8601String(snapshot.endedAt),
             "app": [
@@ -1083,6 +1085,7 @@ class ROS2BridgeClient: ObservableObject {
         let transportProfile = ROS2BridgeTransportProfile.current
         let currentWiFiTelemetryManager = CurrentWiFiTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
+        let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
         let enabledStreams = MappingSensorStream.allCases
             .filter { topicRegistry.isStreamEnabled($0) }
             .map(\.rawValue)
@@ -1185,6 +1188,12 @@ class ROS2BridgeClient: ObservableObject {
                     level: networkPathDiagnosticsManager.diagnosticLevel,
                     message: networkPathDiagnosticsManager.diagnosticMessage,
                     values: networkPathDiagnosticsManager.diagnosticValues
+                ),
+                diagnosticStatus(
+                    name: "reconstructor/recorder_probe",
+                    level: recorderEndpointProbeManager.diagnosticLevel,
+                    message: recorderEndpointProbeManager.diagnosticMessage,
+                    values: recorderEndpointProbeManager.diagnosticValues
                 )
             ]
         ]

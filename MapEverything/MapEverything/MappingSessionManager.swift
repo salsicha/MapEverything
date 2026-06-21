@@ -86,6 +86,7 @@ final class MappingSessionManager: ObservableObject {
     private let indoorLocalizationManager: IndoorLocalizationManager
     private let currentWiFiTelemetryManager: CurrentWiFiTelemetryManager
     private let networkPathDiagnosticsManager: NetworkPathDiagnosticsManager
+    private let recorderEndpointProbeManager: RecorderEndpointProbeManager
 
     var isActive: Bool {
         state == .active
@@ -125,6 +126,7 @@ final class MappingSessionManager: ObservableObject {
         indoorLocalizationManager: IndoorLocalizationManager? = nil,
         currentWiFiTelemetryManager: CurrentWiFiTelemetryManager? = nil,
         networkPathDiagnosticsManager: NetworkPathDiagnosticsManager? = nil,
+        recorderEndpointProbeManager: RecorderEndpointProbeManager? = nil,
         recorderURL: String = "ws://192.168.1.100:9090",
         enabledStreams: Set<MappingSensorStream>? = nil
     ) {
@@ -133,6 +135,7 @@ final class MappingSessionManager: ObservableObject {
         self.indoorLocalizationManager = indoorLocalizationManager ?? IndoorLocalizationManager.shared
         self.currentWiFiTelemetryManager = currentWiFiTelemetryManager ?? CurrentWiFiTelemetryManager.shared
         self.networkPathDiagnosticsManager = networkPathDiagnosticsManager ?? NetworkPathDiagnosticsManager.shared
+        self.recorderEndpointProbeManager = recorderEndpointProbeManager ?? RecorderEndpointProbeManager.shared
         self.recorderURL = recorderURL
         self.enabledStreams = enabledStreams ?? Self.defaultStreams
     }
@@ -176,6 +179,7 @@ final class MappingSessionManager: ObservableObject {
         indoorLocalizationManager.start()
         currentWiFiTelemetryManager.start()
         networkPathDiagnosticsManager.start()
+        recorderEndpointProbeManager.start(recorderURL: self.recorderURL)
         state = .active
         publishSessionMetadata(event: "started")
     }
@@ -188,6 +192,7 @@ final class MappingSessionManager: ObservableObject {
         indoorLocalizationManager.stop()
         currentWiFiTelemetryManager.stop()
         networkPathDiagnosticsManager.stop()
+        recorderEndpointProbeManager.stop()
         bridge.disconnect(after: 0.25)
     }
 
