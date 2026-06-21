@@ -5,13 +5,9 @@
 ![ARKit](https://img.shields.io/badge/ARKit-LiDAR-black.svg?style=for-the-badge&logo=arkit)
 ![ROS2](https://img.shields.io/badge/ROS2-Humble%2FIron-green.svg?style=for-the-badge&logo=ros)
 
-**MapEverything** is a robotics-first mapping payload for iOS. It is designed to turn a LiDAR-equipped iPhone or iPad Pro into a mobile ROS2 sensor node that captures device pose, IMU, camera context, LiDAR point clouds, reconstructed mesh, GPS, radio signal observations, satellite imagery, DEM/elevation tiles, and diagnostics for recording on another ROS2 device.
+**MapEverything** is a robotics-first mapping payload for iOS. It turns a LiDAR-equipped iPhone or iPad Pro into a mobile ROS2 sensor node that captures device pose, IMU, camera context, LiDAR point clouds, reconstructed mesh, GPS, radio signal observations, satellite imagery, DEM/elevation tiles, and diagnostics for recording on another ROS2 device.
 
-The current app already streams raw color feeds, dense point clouds, 6-DOF pose frames (`/tf`), IMU data, and parametric RoomPlan cubes to a remote robotics workstation or simulator over a WebSocket ROS2 bridge. The roadmap now prioritizes robust field mapping, geospatial context, radio telemetry, and recorder-side rosbag workflows over consumer remodeling features.
-
-## Robotics Mapping Pivot
-
-The next product direction is to focus MapEverything fully on robotics mapping. The app should become an iPhone-based ROS2 sensor payload that records pose, IMU, GPS, LiDAR point clouds, reconstructed mesh, radio signal observations, satellite imagery, DEM/elevation tiles, and diagnostics for recording on another ROS2 device.
+The app streams raw color feeds, dense point clouds, 6-DOF pose frames (`/tf`), IMU data, geospatial context, radio telemetry, DEM/elevation tiles, satellite imagery, and parametric RoomPlan cubes to a remote robotics workstation or simulator over a WebSocket ROS2 bridge.
 
 MapEverything is intentionally a single record-mode publisher. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. The app should not create local session recordings beyond transient buffers and caches needed to publish reliably.
 
