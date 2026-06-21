@@ -1013,6 +1013,7 @@ class ROS2BridgeClient: ObservableObject {
         let queueStats = publishQueueStats
         let transportProfile = ROS2BridgeTransportProfile.current
         let currentWiFiTelemetryManager = CurrentWiFiTelemetryManager.shared
+        let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
         let advertisedTopics = topicRegistry.advertisedTopics().map { definition in
@@ -1036,6 +1037,7 @@ class ROS2BridgeClient: ObservableObject {
             "advertised_topics": advertisedTopics,
             "radio_channels": RadioTelemetryCatalog.shared.rosMessage,
             "current_wifi_telemetry": currentWiFiTelemetryManager.sessionMetadata,
+            "ble_beacon_telemetry": bleBeaconTelemetryManager.sessionMetadata,
             "network_path_diagnostics": networkPathDiagnosticsManager.sessionMetadata,
             "recorder_endpoint_probe": recorderEndpointProbeManager.sessionMetadata,
             "started_at": iso8601String(snapshot.startedAt),
@@ -1084,6 +1086,7 @@ class ROS2BridgeClient: ObservableObject {
         let indoorLocalizationManager = IndoorLocalizationManager.shared
         let transportProfile = ROS2BridgeTransportProfile.current
         let currentWiFiTelemetryManager = CurrentWiFiTelemetryManager.shared
+        let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
         let enabledStreams = MappingSensorStream.allCases
@@ -1182,6 +1185,12 @@ class ROS2BridgeClient: ObservableObject {
                     level: currentWiFiTelemetryManager.diagnosticLevel,
                     message: currentWiFiTelemetryManager.diagnosticMessage,
                     values: currentWiFiTelemetryManager.diagnosticValues
+                ),
+                diagnosticStatus(
+                    name: "reconstructor/ble_beacons",
+                    level: bleBeaconTelemetryManager.diagnosticLevel,
+                    message: bleBeaconTelemetryManager.diagnosticMessage,
+                    values: bleBeaconTelemetryManager.diagnosticValues
                 ),
                 diagnosticStatus(
                     name: "reconstructor/network_path",

@@ -28,7 +28,7 @@
 - [x] Add Access WiFi Information entitlement notes and permission handling for current Wi-Fi signal quality.
 - [x] Add Network.framework path diagnostics for interface type, constrained state, expensive state, and reachability.
 - [x] Add endpoint latency and throughput probes against the ROS2 recorder.
-- [ ] Add CoreBluetooth scanning for configured BLE beacon RSSI.
+- [x] Add CoreBluetooth scanning for configured BLE beacon RSSI.
 - [ ] Define `reconstructor_msgs/RadioObservation`.
 - [ ] Publish radio observations on `/reconstructor/radio`.
 - [ ] Document iOS restrictions: no broad Wi-Fi scans and no reliable public cellular RSSI/RSRP stream.

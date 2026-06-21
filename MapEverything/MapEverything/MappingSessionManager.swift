@@ -85,6 +85,7 @@ final class MappingSessionManager: ObservableObject {
     private let geoTilePublisher: GeoTilePublisher
     private let indoorLocalizationManager: IndoorLocalizationManager
     private let currentWiFiTelemetryManager: CurrentWiFiTelemetryManager
+    private let bleBeaconTelemetryManager: BLEBeaconTelemetryManager
     private let networkPathDiagnosticsManager: NetworkPathDiagnosticsManager
     private let recorderEndpointProbeManager: RecorderEndpointProbeManager
 
@@ -125,6 +126,7 @@ final class MappingSessionManager: ObservableObject {
         geoTilePublisher: GeoTilePublisher? = nil,
         indoorLocalizationManager: IndoorLocalizationManager? = nil,
         currentWiFiTelemetryManager: CurrentWiFiTelemetryManager? = nil,
+        bleBeaconTelemetryManager: BLEBeaconTelemetryManager? = nil,
         networkPathDiagnosticsManager: NetworkPathDiagnosticsManager? = nil,
         recorderEndpointProbeManager: RecorderEndpointProbeManager? = nil,
         recorderURL: String = "ws://192.168.1.100:9090",
@@ -134,6 +136,7 @@ final class MappingSessionManager: ObservableObject {
         self.geoTilePublisher = geoTilePublisher ?? GeoTilePublisher.shared
         self.indoorLocalizationManager = indoorLocalizationManager ?? IndoorLocalizationManager.shared
         self.currentWiFiTelemetryManager = currentWiFiTelemetryManager ?? CurrentWiFiTelemetryManager.shared
+        self.bleBeaconTelemetryManager = bleBeaconTelemetryManager ?? BLEBeaconTelemetryManager.shared
         self.networkPathDiagnosticsManager = networkPathDiagnosticsManager ?? NetworkPathDiagnosticsManager.shared
         self.recorderEndpointProbeManager = recorderEndpointProbeManager ?? RecorderEndpointProbeManager.shared
         self.recorderURL = recorderURL
@@ -178,6 +181,7 @@ final class MappingSessionManager: ObservableObject {
         geoTilePublisher.start()
         indoorLocalizationManager.start()
         currentWiFiTelemetryManager.start()
+        bleBeaconTelemetryManager.start()
         networkPathDiagnosticsManager.start()
         recorderEndpointProbeManager.start(recorderURL: self.recorderURL)
         state = .active
@@ -191,6 +195,7 @@ final class MappingSessionManager: ObservableObject {
         geoTilePublisher.stop()
         indoorLocalizationManager.stop()
         currentWiFiTelemetryManager.stop()
+        bleBeaconTelemetryManager.stop()
         networkPathDiagnosticsManager.stop()
         recorderEndpointProbeManager.stop()
         bridge.disconnect(after: 0.25)

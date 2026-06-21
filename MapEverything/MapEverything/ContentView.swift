@@ -793,6 +793,10 @@ struct SettingsView: View {
     @AppStorage("boundingBoxSize") private var boundingBoxSize: Double = 20.0
     @AppStorage("ros2Enabled") private var ros2Enabled: Bool = false
     @AppStorage("ros2WebSocketURL") private var ros2WebSocketURL: String = "ws://192.168.1.100:9090"
+    @AppStorage("bleBeaconServiceUUIDs") private var bleBeaconServiceUUIDs: String = ""
+    @AppStorage("bleBeaconPeripheralIDs") private var bleBeaconPeripheralIDs: String = ""
+    @AppStorage("bleBeaconLocalNamePrefixes") private var bleBeaconLocalNamePrefixes: String = ""
+    @AppStorage("bleBeaconAllowDuplicateAdvertisements") private var bleBeaconAllowDuplicateAdvertisements: Bool = true
     @AppStorage("useRoomPlan") private var useRoomPlan: Bool = false
     @AppStorage("useImperialUnits") private var useImperialUnits: Bool = false
     @Environment(\.dismiss) private var dismiss
@@ -834,6 +838,15 @@ struct SettingsView: View {
                     Label("Changes to voxel density, max points, and bounding box take effect on the next scan.", systemImage: "info.circle")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                }
+                Section(header: Text("BLE Beacon Filters")) {
+                    TextField("Service UUIDs", text: $bleBeaconServiceUUIDs)
+                        .autocapitalization(.none)
+                    TextField("Peripheral UUIDs", text: $bleBeaconPeripheralIDs)
+                        .autocapitalization(.none)
+                    TextField("Local name prefixes", text: $bleBeaconLocalNamePrefixes)
+                        .autocapitalization(.none)
+                    Toggle("Allow Duplicate Advertisements", isOn: $bleBeaconAllowDuplicateAdvertisements)
                 }
                 Section(header: Text("ROS2 Recorder")) {
                     Toggle("Enable Mapping Stream", isOn: $ros2Enabled)

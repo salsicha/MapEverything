@@ -91,6 +91,9 @@ final class RadioTelemetryCatalog {
                 "service_uuids",
                 "rssi_dbm",
                 "advertisement_data",
+                "tx_power_level_dbm",
+                "is_connectable",
+                "manufacturer_data_bytes",
                 "timestamp"
             ],
             limitations: [
