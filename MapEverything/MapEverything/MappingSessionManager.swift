@@ -88,6 +88,7 @@ final class MappingSessionManager: ObservableObject {
     private let bleBeaconTelemetryManager: BLEBeaconTelemetryManager
     private let networkPathDiagnosticsManager: NetworkPathDiagnosticsManager
     private let recorderEndpointProbeManager: RecorderEndpointProbeManager
+    private let radioObservationPublisher: RadioObservationPublisher
 
     var isActive: Bool {
         state == .active
@@ -129,6 +130,7 @@ final class MappingSessionManager: ObservableObject {
         bleBeaconTelemetryManager: BLEBeaconTelemetryManager? = nil,
         networkPathDiagnosticsManager: NetworkPathDiagnosticsManager? = nil,
         recorderEndpointProbeManager: RecorderEndpointProbeManager? = nil,
+        radioObservationPublisher: RadioObservationPublisher? = nil,
         recorderURL: String = "ws://192.168.1.100:9090",
         enabledStreams: Set<MappingSensorStream>? = nil
     ) {
@@ -139,6 +141,7 @@ final class MappingSessionManager: ObservableObject {
         self.bleBeaconTelemetryManager = bleBeaconTelemetryManager ?? BLEBeaconTelemetryManager.shared
         self.networkPathDiagnosticsManager = networkPathDiagnosticsManager ?? NetworkPathDiagnosticsManager.shared
         self.recorderEndpointProbeManager = recorderEndpointProbeManager ?? RecorderEndpointProbeManager.shared
+        self.radioObservationPublisher = radioObservationPublisher ?? RadioObservationPublisher.shared
         self.recorderURL = recorderURL
         self.enabledStreams = enabledStreams ?? Self.defaultStreams
     }
@@ -184,6 +187,7 @@ final class MappingSessionManager: ObservableObject {
         bleBeaconTelemetryManager.start()
         networkPathDiagnosticsManager.start()
         recorderEndpointProbeManager.start(recorderURL: self.recorderURL)
+        radioObservationPublisher.start(sessionID: sessionID)
         state = .active
         publishSessionMetadata(event: "started")
     }
@@ -198,6 +202,7 @@ final class MappingSessionManager: ObservableObject {
         bleBeaconTelemetryManager.stop()
         networkPathDiagnosticsManager.stop()
         recorderEndpointProbeManager.stop()
+        radioObservationPublisher.stop()
         bridge.disconnect(after: 0.25)
     }
 
@@ -273,6 +278,7 @@ final class MappingSessionManager: ObservableObject {
         .pointCloud,
         .mesh,
         .gps,
+        .radio,
         .satelliteImagery,
         .dem,
         .diagnostics,

@@ -36,7 +36,7 @@ final class RadioObservationMessageSchema {
         "geometry_msgs/msg/Point"
     ]
     let supportedChannelIDs = RadioTelemetryChannelID.allCases.map(\.rawValue).sorted()
-    let unsetNumericValue = "NaN"
+    let unsetNumericValue = "0.0"
     let unsetStringValue = ""
     let unsetArrayValue = "[]"
     let unsetBooleanValue = "false"
@@ -179,7 +179,7 @@ final class RadioObservationMessageSchema {
             name: "map_position",
             type: "geometry_msgs/Point",
             description: "Optional local map position at observation time.",
-            unsetValue: "x/y/z = NaN"
+            unsetValue: "x/y/z = 0.0"
         ),
         RadioObservationMessageField(
             name: "geodetic_position_available",
@@ -191,19 +191,19 @@ final class RadioObservationMessageSchema {
             name: "latitude",
             type: "float64",
             description: "Optional WGS84 latitude in degrees.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "longitude",
             type: "float64",
             description: "Optional WGS84 longitude in degrees.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "altitude",
             type: "float64",
             description: "Optional WGS84 altitude in meters.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "ssid",
@@ -221,7 +221,7 @@ final class RadioObservationMessageSchema {
             name: "signal_strength_normalized",
             type: "float64",
             description: "iOS-normalized current Wi-Fi signal strength in the 0.0 to 1.0 range.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "is_secure",
@@ -281,37 +281,37 @@ final class RadioObservationMessageSchema {
             name: "frequency_hz",
             type: "float64",
             description: "Carrier, channel, or adapter frequency in hertz when known.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "rssi_dbm",
             type: "float64",
             description: "Raw received signal strength in dBm for BLE or external adapters.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "snr_db",
             type: "float64",
             description: "Signal-to-noise ratio in dB for external adapters.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "quality",
             type: "float64",
             description: "Normalized or provider-defined radio quality score.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "round_trip_time_ms",
             type: "float64",
             description: "Recorder endpoint WebSocket ping/pong round-trip time in milliseconds.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "throughput_bytes_per_second",
             type: "float64",
             description: "Bounded recorder endpoint upload write-rate probe in bytes per second.",
-            unsetValue: "NaN"
+            unsetValue: "0.0"
         ),
         RadioObservationMessageField(
             name: "success",

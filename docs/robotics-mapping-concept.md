@@ -157,7 +157,7 @@ Initial messages:
 - `MeshSnapshot.msg`
 - `PublisherStats.msg`
 
-`RadioObservation.msg` is schema version 1 and uses `std_msgs/Header` plus optional `geometry_msgs/Point` map position fields. The stable fields include session ID, channel ID, observation kind, source API, source ID, radio type, optional geodetic position, Wi-Fi SSID/BSSID/normalized signal strength, BLE peripheral/service/RSSI fields, Network.framework path fields, recorder probe RTT/throughput fields, external-adapter frequency/RSSI/SNR/quality fields, success/error, and `metadata_json` for channel-specific payloads. Unset numeric fields use `NaN`; unset strings and arrays are empty.
+`RadioObservation.msg` is schema version 1 and uses `std_msgs/Header` plus optional `geometry_msgs/Point` map position fields. The stable fields include session ID, channel ID, observation kind, source API, source ID, radio type, optional geodetic position, Wi-Fi SSID/BSSID/normalized signal strength, BLE peripheral/service/RSSI fields, Network.framework path fields, recorder probe RTT/throughput fields, external-adapter frequency/RSSI/SNR/quality fields, success/error, and `metadata_json` for channel-specific payloads. Unset numeric fields use `0.0` for rosbridge JSON compatibility; unset strings and arrays are empty.
 
 The recorder device must build this package before recording custom topics with `rosbag2`.
 

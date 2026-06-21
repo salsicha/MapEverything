@@ -980,6 +980,15 @@ class ROS2BridgeClient: ObservableObject {
         send(op: "publish", topic: topicRegistry.topic(.indoorLocalization), msg: msg)
     }
 
+    func publishRadioObservation(_ observation: RadioObservationMessage) {
+        guard isConnected, topicRegistry.isStreamEnabled(.radio) else { return }
+
+        var msg = observation.fields
+        msg["header"] = createHeader(frameId: observation.frameID, date: observation.timestamp)
+
+        send(op: "publish", topic: topicRegistry.topic(.radio), msg: msg)
+    }
+
     private func createGeoTileInfoMessage(_ tile: GeoTilePayload, timestamp: TimeInterval) -> [String: Any] {
         var msg: [String: Any] = [
             "header": createHeader(frameId: "earth", timestamp: timestamp),

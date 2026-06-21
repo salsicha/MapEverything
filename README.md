@@ -142,7 +142,7 @@ Network path diagnostics use `NWPathMonitor` to report reachability, active and 
 
 Recorder endpoint probes use a bounded disposable rosbridge WebSocket connection to measure ping/pong round-trip latency and a short upload write-rate probe on `/reconstructor/probe/throughput`. Results are published through session metadata and `/reconstructor/status`; the probe measures application-path recorder health rather than sustained bidirectional network bandwidth.
 
-The `reconstructor_msgs/RadioObservation` schema is defined in-app for the future `/reconstructor/radio` publisher and is included in `/reconstructor/session` metadata. It covers current Wi-Fi, BLE advertisements, Network.framework path state, recorder endpoint probes, and optional external adapters; unset numeric fields use `NaN`, unset strings are empty, unset arrays are empty, and channel-specific details go in `metadata_json`.
+The app publishes `reconstructor_msgs/RadioObservation` messages on `/reconstructor/radio` for fresh radio samples and includes the schema in `/reconstructor/session` metadata. It covers current Wi-Fi, BLE advertisements, Network.framework path state, recorder endpoint probes, and optional external adapters; unset numeric fields use `0.0` for rosbridge JSON compatibility, unset strings are empty, unset arrays are empty, and channel-specific details go in `metadata_json`.
 
 ### ROS2 WebSocket Topic Directory
 
@@ -154,6 +154,7 @@ The `reconstructor_msgs/RadioObservation` schema is defined in-app for the futur
 | `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~10 Hz | Point cloud payloads downsampled to a sparse 10cm grid. Color values are packed into a single 32-bit integer (`rgb`). |
 | `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | ~10 Hz | JPEG-compressed image stream rotated to match current mobile screen orientation. |
 | `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |
+| `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
 
 ---
 

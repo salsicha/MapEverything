@@ -106,6 +106,7 @@ final class ROS2TopicRegistry {
         .pointCloud,
         .mesh,
         .gps,
+        .radio,
         .satelliteImagery,
         .dem,
         .diagnostics,
@@ -208,7 +209,7 @@ final class ROS2TopicRegistry {
             topic: "/reconstructor/radio",
             messageType: "reconstructor_msgs/msg/RadioObservation",
             defaultRateHz: 2,
-            isImplemented: false
+            isImplemented: true
         ),
         ROS2TopicDefinition(
             id: .indoorLocalization,

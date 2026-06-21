@@ -143,11 +143,42 @@ struct MapEverythingTests {
         #expect(schema.messageType == "reconstructor_msgs/msg/RadioObservation")
         #expect(schema.topic == "/reconstructor/radio")
         #expect(schema.schemaVersion == 1)
+        #expect(schema.unsetNumericValue == "0.0")
         #expect(schema.supportedChannelIDs == catalogChannelIDs)
         #expect(schema.messageDefinition.contains("std_msgs/Header header"))
         #expect(schema.messageDefinition.contains("geometry_msgs/Point map_position"))
         #expect(fieldNames.contains("channel_id"))
         #expect(fieldNames.contains("rssi_dbm"))
         #expect(fieldNames.contains("metadata_json"))
+    }
+
+    @Test("RadioObservation messages sanitize non-finite values for rosbridge JSON")
+    func testRadioObservationMessageIsJSONEncodable() throws {
+        let observation = RadioObservationMessage(
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            sessionID: "session-1",
+            channelID: .bleAdvertisement,
+            observationKind: "ble_advertisement",
+            sourceAPI: "CoreBluetooth.CBCentralManager",
+            sourceID: "peripheral-1",
+            radioType: "ble",
+            metadata: [
+                "bad_number": Double.nan
+            ],
+            values: [
+                "rssi_dbm": Double.nan
+            ]
+        )
+
+        #expect(observation.fields["rssi_dbm"] as? Double == 0.0)
+        #expect((observation.fields["metadata_json"] as? String)?.contains("\"bad_number\":0") == true)
+
+        let payload: [String: Any] = [
+            "op": "publish",
+            "topic": RadioObservationMessageSchema.shared.topic,
+            "msg": observation.fields
+        ]
+        #expect(JSONSerialization.isValidJSONObject(payload))
+        _ = try JSONSerialization.data(withJSONObject: payload, options: [])
     }
 }
