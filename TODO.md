@@ -31,7 +31,7 @@
 - [x] Add CoreBluetooth scanning for configured BLE beacon RSSI.
 - [x] Define `reconstructor_msgs/RadioObservation`.
 - [x] Publish radio observations on `/reconstructor/radio`.
-- [ ] Document iOS restrictions: no broad Wi-Fi scans and no reliable public cellular RSSI/RSRP stream.
+- [x] Document iOS restrictions: no broad Wi-Fi scans and no reliable public cellular RSSI/RSRP stream.
 
 ## P1 - Satellite Imagery and DEM Tiles
 

@@ -181,4 +181,23 @@ struct MapEverythingTests {
         #expect(JSONSerialization.isValidJSONObject(payload))
         _ = try JSONSerialization.data(withJSONObject: payload, options: [])
     }
+
+    @Test("Radio telemetry catalog documents iOS platform restrictions")
+    func testRadioTelemetryPlatformRestrictions() {
+        let restrictions = RadioTelemetryCatalog.shared.platformRestrictions
+        let restrictionIDs = Set(restrictions.map(\.id))
+        let message = RadioTelemetryCatalog.shared.platformRestrictionsMessage
+
+        #expect(restrictionIDs.contains("ios_no_broad_wifi_scans"))
+        #expect(restrictionIDs.contains("ios_no_reliable_public_cellular_rf_metrics"))
+        #expect(restrictions.contains { restriction in
+            restriction.affectedChannelIDs.contains(.currentWiFiNetwork)
+                && restriction.summary.localizedCaseInsensitiveContains("scan")
+        })
+        #expect(restrictions.contains { restriction in
+            restriction.affectedChannelIDs.contains(.externalAdapter)
+                && restriction.operatorGuidance.localizedCaseInsensitiveContains("cellular")
+        })
+        #expect(JSONSerialization.isValidJSONObject(message))
+    }
 }

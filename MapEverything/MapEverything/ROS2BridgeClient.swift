@@ -1045,6 +1045,7 @@ class ROS2BridgeClient: ObservableObject {
             "enabled_streams": snapshot.enabledStreams,
             "advertised_topics": advertisedTopics,
             "radio_channels": RadioTelemetryCatalog.shared.rosMessage,
+            "radio_platform_restrictions": RadioTelemetryCatalog.shared.platformRestrictionsMessage,
             "radio_observation_schema": RadioObservationMessageSchema.shared.rosMessage,
             "current_wifi_telemetry": currentWiFiTelemetryManager.sessionMetadata,
             "ble_beacon_telemetry": bleBeaconTelemetryManager.sessionMetadata,

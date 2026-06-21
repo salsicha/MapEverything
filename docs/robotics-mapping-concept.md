@@ -74,6 +74,7 @@ Restricted or external-data targets:
 - Full Wi-Fi access-point scans are not available through normal App Store public APIs.
 - Cellular RSRP/RSRQ/RSSI is not reliably available through public iOS APIs.
 - For cellular or spectrum-grade radio mapping, use an external sensor, router API, SDR, or companion ROS2 node and fuse by timestamp.
+- The implementation publishes these constraints as `radio_platform_restrictions` in `/reconstructor/session`; see `docs/ios-radio-restrictions.md`.
 
 Recommended ROS output:
 

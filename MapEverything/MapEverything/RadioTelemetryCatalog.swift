@@ -37,17 +37,46 @@ struct RadioTelemetryChannelDefinition: Identifiable, Codable, Hashable {
     }
 }
 
+struct RadioTelemetryPlatformRestriction: Identifiable, Codable, Hashable {
+    let id: String
+    let title: String
+    let affectedChannelIDs: [RadioTelemetryChannelID]
+    let summary: String
+    let operatorGuidance: String
+    let sourceURLs: [String]
+
+    var rosMessage: [String: Any] {
+        [
+            "id": id,
+            "title": title,
+            "affected_channel_ids": affectedChannelIDs.map(\.rawValue),
+            "summary": summary,
+            "operator_guidance": operatorGuidance,
+            "source_urls": sourceURLs
+        ]
+    }
+}
+
 final class RadioTelemetryCatalog {
     static let shared = RadioTelemetryCatalog()
 
     let channels: [RadioTelemetryChannelDefinition]
+    let platformRestrictions: [RadioTelemetryPlatformRestriction]
 
-    init(channels: [RadioTelemetryChannelDefinition] = RadioTelemetryCatalog.defaultChannels) {
+    init(
+        channels: [RadioTelemetryChannelDefinition] = RadioTelemetryCatalog.defaultChannels,
+        platformRestrictions: [RadioTelemetryPlatformRestriction] = RadioTelemetryCatalog.defaultPlatformRestrictions
+    ) {
         self.channels = channels
+        self.platformRestrictions = platformRestrictions
     }
 
     var rosMessage: [[String: Any]] {
         channels.map(\.rosMessage)
+    }
+
+    var platformRestrictionsMessage: [[String: Any]] {
+        platformRestrictions.map(\.rosMessage)
     }
 
     private static let defaultChannels: [RadioTelemetryChannelDefinition] = [
@@ -175,6 +204,49 @@ final class RadioTelemetryCatalog {
                 "Used for cellular, spectrum, or router metrics unavailable through normal iOS APIs."
             ],
             isPublicAPIBacked: false
+        )
+    ]
+
+    private static let defaultPlatformRestrictions: [RadioTelemetryPlatformRestriction] = [
+        RadioTelemetryPlatformRestriction(
+            id: "ios_no_broad_wifi_scans",
+            title: "No Broad Wi-Fi Scans",
+            affectedChannelIDs: [
+                .currentWiFiNetwork
+            ],
+            summary: "Public iOS APIs expose the current associated Wi-Fi network when entitlement and permission gates are satisfied, but they do not provide general nearby access-point scan lists for App Store apps.",
+            operatorGuidance: "Treat MapEverything Wi-Fi observations as current-network quality only. For AP survey heatmaps, use an external Wi-Fi scanner, router/controller API, or companion ROS2 node and fuse by timestamp.",
+            sourceURLs: [
+                "https://developer.apple.com/documentation/networkextension/nehotspotnetwork",
+                "https://developer.apple.com/documentation/networkextension/nehotspotnetwork/fetchcurrent(completionhandler:)",
+                "https://developer.apple.com/documentation/networkextension/nehotspothelper"
+            ]
+        ),
+        RadioTelemetryPlatformRestriction(
+            id: "ios_no_reliable_public_cellular_rf_metrics",
+            title: "No Reliable Public Cellular RSSI/RSRP Stream",
+            affectedChannelIDs: [
+                .networkPath,
+                .externalAdapter
+            ],
+            summary: "Core Telephony and Network.framework can identify cellular service or network path characteristics, but public iOS APIs do not provide a dependable raw cellular RSSI, RSRP, RSRQ, or SINR stream for field mapping.",
+            operatorGuidance: "Use MapEverything network-path observations for reachability and interface state only. For cellular RF surveys, record modem/router telemetry, an external cellular scanner, SDR output, or a companion ROS2 node.",
+            sourceURLs: [
+                "https://developer.apple.com/documentation/coretelephony",
+                "https://developer.apple.com/documentation/network/nwpathmonitor"
+            ]
+        ),
+        RadioTelemetryPlatformRestriction(
+            id: "ios_scoped_ble_scanning",
+            title: "Scoped BLE Scanning",
+            affectedChannelIDs: [
+                .bleAdvertisement
+            ],
+            summary: "CoreBluetooth can report BLE advertisement RSSI for discovered peripherals, but scans should be scoped to configured service UUIDs, known peripherals, or local-name prefixes, and background scanning is constrained by iOS policy.",
+            operatorGuidance: "Configure beacon filters before field recording and validate behavior on a physical device in the foreground for repeatable radio maps.",
+            sourceURLs: [
+                "https://developer.apple.com/documentation/corebluetooth/cbcentralmanager"
+            ]
         )
     ]
 }

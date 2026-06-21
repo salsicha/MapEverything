@@ -134,6 +134,8 @@ Transport decision: MapEverything continues to use `rosbridge_suite` over WebSoc
 
 ### Radio Telemetry Notes
 
+See [docs/ios-radio-restrictions.md](docs/ios-radio-restrictions.md) for operator-facing iOS radio API constraints and external-adapter guidance.
+
 Current Wi-Fi signal quality uses Apple's public `NEHotspotNetwork.fetchCurrent` API. It only reports the network the device is already associated with, requires Location permission, and requires the app target's `com.apple.developer.networking.wifi-info` entitlement. MapEverything now includes that entitlement file and publishes the entitlement, permission, last fetch, and normalized signal-strength state through session metadata and `/reconstructor/status`; broad Wi-Fi scans are not available through normal iOS public APIs.
 
 BLE beacon telemetry uses Apple's public `CoreBluetooth.CBCentralManager` API and only scans after service UUIDs, peripheral UUIDs, or local-name prefixes are configured in Settings. It reports Bluetooth permission state, scan state, configured filters, recent beacon RSSI values, and summarized advertisement metadata through session metadata and `/reconstructor/status`.
@@ -143,6 +145,8 @@ Network path diagnostics use `NWPathMonitor` to report reachability, active and 
 Recorder endpoint probes use a bounded disposable rosbridge WebSocket connection to measure ping/pong round-trip latency and a short upload write-rate probe on `/reconstructor/probe/throughput`. Results are published through session metadata and `/reconstructor/status`; the probe measures application-path recorder health rather than sustained bidirectional network bandwidth.
 
 The app publishes `reconstructor_msgs/RadioObservation` messages on `/reconstructor/radio` for fresh radio samples and includes the schema in `/reconstructor/session` metadata. It covers current Wi-Fi, BLE advertisements, Network.framework path state, recorder endpoint probes, and optional external adapters; unset numeric fields use `0.0` for rosbridge JSON compatibility, unset strings are empty, unset arrays are empty, and channel-specific details go in `metadata_json`.
+
+iOS does not expose broad Wi-Fi access-point scan results or a dependable public cellular RSSI/RSRP/RSRQ/SINR stream to normal apps. MapEverything publishes these platform restrictions in `/reconstructor/session` as `radio_platform_restrictions`; use external adapters, network equipment APIs, SDRs, or companion ROS2 nodes for those survey channels.
 
 ### ROS2 WebSocket Topic Directory
 
