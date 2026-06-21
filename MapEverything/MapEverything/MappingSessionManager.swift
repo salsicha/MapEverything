@@ -85,6 +85,7 @@ final class MappingSessionManager: ObservableObject {
     private let geoTilePublisher: GeoTilePublisher
     private let indoorLocalizationManager: IndoorLocalizationManager
     private let currentWiFiTelemetryManager: CurrentWiFiTelemetryManager
+    private let networkPathDiagnosticsManager: NetworkPathDiagnosticsManager
 
     var isActive: Bool {
         state == .active
@@ -123,6 +124,7 @@ final class MappingSessionManager: ObservableObject {
         geoTilePublisher: GeoTilePublisher? = nil,
         indoorLocalizationManager: IndoorLocalizationManager? = nil,
         currentWiFiTelemetryManager: CurrentWiFiTelemetryManager? = nil,
+        networkPathDiagnosticsManager: NetworkPathDiagnosticsManager? = nil,
         recorderURL: String = "ws://192.168.1.100:9090",
         enabledStreams: Set<MappingSensorStream>? = nil
     ) {
@@ -130,6 +132,7 @@ final class MappingSessionManager: ObservableObject {
         self.geoTilePublisher = geoTilePublisher ?? GeoTilePublisher.shared
         self.indoorLocalizationManager = indoorLocalizationManager ?? IndoorLocalizationManager.shared
         self.currentWiFiTelemetryManager = currentWiFiTelemetryManager ?? CurrentWiFiTelemetryManager.shared
+        self.networkPathDiagnosticsManager = networkPathDiagnosticsManager ?? NetworkPathDiagnosticsManager.shared
         self.recorderURL = recorderURL
         self.enabledStreams = enabledStreams ?? Self.defaultStreams
     }
@@ -172,6 +175,7 @@ final class MappingSessionManager: ObservableObject {
         geoTilePublisher.start()
         indoorLocalizationManager.start()
         currentWiFiTelemetryManager.start()
+        networkPathDiagnosticsManager.start()
         state = .active
         publishSessionMetadata(event: "started")
     }
@@ -183,6 +187,7 @@ final class MappingSessionManager: ObservableObject {
         geoTilePublisher.stop()
         indoorLocalizationManager.stop()
         currentWiFiTelemetryManager.stop()
+        networkPathDiagnosticsManager.stop()
         bridge.disconnect(after: 0.25)
     }
 

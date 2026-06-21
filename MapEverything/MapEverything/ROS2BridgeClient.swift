@@ -1013,6 +1013,7 @@ class ROS2BridgeClient: ObservableObject {
         let queueStats = publishQueueStats
         let transportProfile = ROS2BridgeTransportProfile.current
         let currentWiFiTelemetryManager = CurrentWiFiTelemetryManager.shared
+        let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let advertisedTopics = topicRegistry.advertisedTopics().map { definition in
             [
                 "id": definition.id.rawValue,
@@ -1034,6 +1035,7 @@ class ROS2BridgeClient: ObservableObject {
             "advertised_topics": advertisedTopics,
             "radio_channels": RadioTelemetryCatalog.shared.rosMessage,
             "current_wifi_telemetry": currentWiFiTelemetryManager.sessionMetadata,
+            "network_path_diagnostics": networkPathDiagnosticsManager.sessionMetadata,
             "started_at": iso8601String(snapshot.startedAt),
             "ended_at": iso8601String(snapshot.endedAt),
             "app": [
@@ -1080,6 +1082,7 @@ class ROS2BridgeClient: ObservableObject {
         let indoorLocalizationManager = IndoorLocalizationManager.shared
         let transportProfile = ROS2BridgeTransportProfile.current
         let currentWiFiTelemetryManager = CurrentWiFiTelemetryManager.shared
+        let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let enabledStreams = MappingSensorStream.allCases
             .filter { topicRegistry.isStreamEnabled($0) }
             .map(\.rawValue)
@@ -1176,6 +1179,12 @@ class ROS2BridgeClient: ObservableObject {
                     level: currentWiFiTelemetryManager.diagnosticLevel,
                     message: currentWiFiTelemetryManager.diagnosticMessage,
                     values: currentWiFiTelemetryManager.diagnosticValues
+                ),
+                diagnosticStatus(
+                    name: "reconstructor/network_path",
+                    level: networkPathDiagnosticsManager.diagnosticLevel,
+                    message: networkPathDiagnosticsManager.diagnosticMessage,
+                    values: networkPathDiagnosticsManager.diagnosticValues
                 )
             ]
         ]

@@ -110,11 +110,13 @@ final class RadioTelemetryCatalog {
             observationFields: [
                 "status",
                 "interface_types",
+                "available_interfaces",
                 "is_expensive",
                 "is_constrained",
                 "supports_ipv4",
                 "supports_ipv6",
                 "supports_dns",
+                "unsatisfied_reason",
                 "timestamp"
             ],
             limitations: [
