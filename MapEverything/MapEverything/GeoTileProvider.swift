@@ -11,6 +11,34 @@ enum GeoTileLayerKind: String {
     case dem = "dem"
 }
 
+enum GeoTileCredentialRequirement: String, Codable, Hashable {
+    case none
+    case userAPIKey = "user_api_key"
+    case userLogin = "user_login"
+    case commercialAccount = "commercial_account"
+}
+
+struct GeoTileSourcePolicy: Codable, Hashable {
+    let recordableByDefault: Bool
+    let transientCacheOnly: Bool
+    let attributionURL: String
+    let credentialRequirement: GeoTileCredentialRequirement
+
+    var requiresCredentials: Bool {
+        credentialRequirement != .none
+    }
+
+    var rosMessage: [String: Any] {
+        [
+            "recordable_by_default": recordableByDefault,
+            "transient_cache_only": transientCacheOnly,
+            "attribution_url": attributionURL,
+            "credential_requirement": credentialRequirement.rawValue,
+            "requires_credentials": requiresCredentials
+        ]
+    }
+}
+
 struct GeoTileCoordinate: Hashable {
     let z: Int
     let x: Int
@@ -149,6 +177,7 @@ struct GeoTileProvider {
     let tileSizePixels: Int
     let attribution: String
     let license: String
+    let sourcePolicy: GeoTileSourcePolicy
     let dateOffsetDays: Int?
     let makeURL: (GeoTileCoordinate, String?) -> URL?
 
@@ -177,6 +206,12 @@ struct GeoTileProvider {
         tileSizePixels: 256,
         attribution: "NASA Global Imagery Browse Services (GIBS)",
         license: "NASA Earthdata open-data guidance; retain GIBS attribution and layer/date metadata",
+        sourcePolicy: GeoTileSourcePolicy(
+            recordableByDefault: true,
+            transientCacheOnly: false,
+            attributionURL: "https://www.earthdata.nasa.gov/engage/open-data-services-software-policies/data-information-guidance",
+            credentialRequirement: .none
+        ),
         dateOffsetDays: -2
     ) { coordinate, time in
         guard let time else { return nil }
@@ -196,6 +231,12 @@ struct GeoTileProvider {
         tileSizePixels: 256,
         attribution: "Mapzen Terrain Tiles; source data includes USGS, SRTM, and other regional DEM sources",
         license: "Mapzen Terrain Tiles attribution requirements; underlying source attribution varies by region",
+        sourcePolicy: GeoTileSourcePolicy(
+            recordableByDefault: true,
+            transientCacheOnly: false,
+            attributionURL: "https://github.com/tilezen/joerd/blob/master/docs/attribution.md",
+            credentialRequirement: .none
+        ),
         dateOffsetDays: nil
     ) { coordinate, _ in
         URL(string: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/\(coordinate.z)/\(coordinate.x)/\(coordinate.y).png")

@@ -200,4 +200,29 @@ struct MapEverythingTests {
         })
         #expect(JSONSerialization.isValidJSONObject(message))
     }
+
+    @Test("Default geo tile providers expose source policy metadata")
+    func testGeoTileProviderSourcePolicyMetadata() throws {
+        let satellite = GeoTileProvider.defaultSatellite
+        let dem = GeoTileProvider.defaultDEM
+
+        #expect(satellite.sourcePolicy.recordableByDefault)
+        #expect(!satellite.sourcePolicy.transientCacheOnly)
+        #expect(satellite.sourcePolicy.credentialRequirement == .none)
+        #expect(!satellite.sourcePolicy.requiresCredentials)
+        #expect(satellite.sourcePolicy.attributionURL.contains("earthdata"))
+
+        #expect(dem.sourcePolicy.recordableByDefault)
+        #expect(!dem.sourcePolicy.transientCacheOnly)
+        #expect(dem.sourcePolicy.credentialRequirement == .none)
+        #expect(!dem.sourcePolicy.requiresCredentials)
+        #expect(dem.sourcePolicy.attributionURL.contains("joerd"))
+
+        let payload: [String: Any] = [
+            "satellite": satellite.sourcePolicy.rosMessage,
+            "dem": dem.sourcePolicy.rosMessage
+        ]
+        #expect(JSONSerialization.isValidJSONObject(payload))
+        _ = try JSONSerialization.data(withJSONObject: payload, options: [])
+    }
 }

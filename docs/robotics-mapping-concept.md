@@ -216,7 +216,7 @@ The recorder device must build this package before recording custom topics with 
 ### Phase 3: Satellite and DEM Ingestion
 
 - Add provider interfaces for satellite imagery and DEM tiles.
-- Add source-policy metadata for provider attribution, credential requirements, cache policy, and recordable-by-default status.
+- Publish source-policy metadata for provider attribution, credential requirements, cache policy, and recordable-by-default status.
 - Add USGS 3DEP as the preferred US DEM provider while retaining Mapzen Terrain Tiles as the global fallback.
 - Add tile cache with attribution and license metadata.
 - Add geospatial tile publishing with compressed image and metadata topics.

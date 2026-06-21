@@ -1006,6 +1006,7 @@ class ROS2BridgeClient: ObservableObject {
             "source_url": tile.sourceURL.absoluteString,
             "attribution": tile.provider.attribution,
             "license": tile.provider.license,
+            "source_policy": tile.provider.sourcePolicy.rosMessage,
             "is_cached": tile.isCached
         ]
 

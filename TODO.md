@@ -38,7 +38,7 @@
 - [x] Add `GeoTileProvider` abstraction for satellite imagery and DEM sources.
 - [x] Select initial satellite imagery provider after checking cache, recording, attribution, and redistribution terms.
 - [x] Select initial DEM provider after checking datum, resolution, region support, cache, and recording terms.
-- [ ] Add source-policy metadata to `GeoTileProvider` for recordable-by-default, transient-cache-only, attribution URL, and credential requirement.
+- [x] Add source-policy metadata to `GeoTileProvider` for recordable-by-default, transient-cache-only, attribution URL, and credential requirement.
 - [ ] Add USGS 3DEP provider and prefer it for US DEM tiles, with Mapzen Terrain Tiles as the global fallback.
 - [ ] Add user credential/configuration slots for optional Copernicus Data Space, OpenTopography, USGS EROS/Earthdata, and commercial provider integrations.
 - [x] Add tile fetch by current GPS location, radius, zoom, and bounding box.
