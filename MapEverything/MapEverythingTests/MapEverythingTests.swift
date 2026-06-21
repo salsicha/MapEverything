@@ -133,4 +133,21 @@ struct MapEverythingTests {
         #expect(map.data[2] == 3.0)
         #expect(map.data[3] == 5.0)
     }
+
+    @Test("RadioObservation schema covers every radio telemetry channel")
+    func testRadioObservationSchemaDefinition() {
+        let schema = RadioObservationMessageSchema.shared
+        let fieldNames = Set(schema.fields.map(\.name))
+        let catalogChannelIDs = RadioTelemetryChannelID.allCases.map(\.rawValue).sorted()
+
+        #expect(schema.messageType == "reconstructor_msgs/msg/RadioObservation")
+        #expect(schema.topic == "/reconstructor/radio")
+        #expect(schema.schemaVersion == 1)
+        #expect(schema.supportedChannelIDs == catalogChannelIDs)
+        #expect(schema.messageDefinition.contains("std_msgs/Header header"))
+        #expect(schema.messageDefinition.contains("geometry_msgs/Point map_position"))
+        #expect(fieldNames.contains("channel_id"))
+        #expect(fieldNames.contains("rssi_dbm"))
+        #expect(fieldNames.contains("metadata_json"))
+    }
 }

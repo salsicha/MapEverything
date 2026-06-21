@@ -142,6 +142,8 @@ Network path diagnostics use `NWPathMonitor` to report reachability, active and 
 
 Recorder endpoint probes use a bounded disposable rosbridge WebSocket connection to measure ping/pong round-trip latency and a short upload write-rate probe on `/reconstructor/probe/throughput`. Results are published through session metadata and `/reconstructor/status`; the probe measures application-path recorder health rather than sustained bidirectional network bandwidth.
 
+The `reconstructor_msgs/RadioObservation` schema is defined in-app for the future `/reconstructor/radio` publisher and is included in `/reconstructor/session` metadata. It covers current Wi-Fi, BLE advertisements, Network.framework path state, recorder endpoint probes, and optional external adapters; unset numeric fields use `NaN`, unset strings are empty, unset arrays are empty, and channel-specific details go in `metadata_json`.
+
 ### ROS2 WebSocket Topic Directory
 
 | Topic Name | ROS 2 Message Type | Update Rate | Description |
