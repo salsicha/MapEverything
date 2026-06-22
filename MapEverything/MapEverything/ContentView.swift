@@ -799,6 +799,36 @@ struct SettingsView: View {
     @AppStorage("bleBeaconAllowDuplicateAdvertisements") private var bleBeaconAllowDuplicateAdvertisements: Bool = true
     @AppStorage("useRoomPlan") private var useRoomPlan: Bool = false
     @AppStorage("useImperialUnits") private var useImperialUnits: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("enabled", .copernicusDataSpace)) private var copernicusEnabled: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("endpointURL", .copernicusDataSpace)) private var copernicusEndpointURL: String = GeoTileOptionalProviderID.copernicusDataSpace.defaultEndpointURL
+    @AppStorage(GeoTileProviderConfigurationStore.key("credentialReference", .copernicusDataSpace)) private var copernicusCredentialReference: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("hasCredentialMaterial", .copernicusDataSpace)) private var copernicusHasCredentialMaterial: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("recordingAllowed", .copernicusDataSpace)) private var copernicusRecordingAllowed: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("attributionOverride", .copernicusDataSpace)) private var copernicusAttributionOverride: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("enabled", .openTopography)) private var openTopographyEnabled: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("endpointURL", .openTopography)) private var openTopographyEndpointURL: String = GeoTileOptionalProviderID.openTopography.defaultEndpointURL
+    @AppStorage(GeoTileProviderConfigurationStore.key("credentialReference", .openTopography)) private var openTopographyCredentialReference: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("hasCredentialMaterial", .openTopography)) private var openTopographyHasCredentialMaterial: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("recordingAllowed", .openTopography)) private var openTopographyRecordingAllowed: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("attributionOverride", .openTopography)) private var openTopographyAttributionOverride: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("enabled", .usgsEROS)) private var usgsEROSEnabled: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("endpointURL", .usgsEROS)) private var usgsEROSEndpointURL: String = GeoTileOptionalProviderID.usgsEROS.defaultEndpointURL
+    @AppStorage(GeoTileProviderConfigurationStore.key("credentialReference", .usgsEROS)) private var usgsEROSCredentialReference: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("hasCredentialMaterial", .usgsEROS)) private var usgsEROSHasCredentialMaterial: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("recordingAllowed", .usgsEROS)) private var usgsEROSRecordingAllowed: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("attributionOverride", .usgsEROS)) private var usgsEROSAttributionOverride: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("enabled", .commercialImagery)) private var commercialImageryEnabled: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("endpointURL", .commercialImagery)) private var commercialImageryEndpointURL: String = GeoTileOptionalProviderID.commercialImagery.defaultEndpointURL
+    @AppStorage(GeoTileProviderConfigurationStore.key("credentialReference", .commercialImagery)) private var commercialImageryCredentialReference: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("hasCredentialMaterial", .commercialImagery)) private var commercialImageryHasCredentialMaterial: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("recordingAllowed", .commercialImagery)) private var commercialImageryRecordingAllowed: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("attributionOverride", .commercialImagery)) private var commercialImageryAttributionOverride: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("enabled", .commercialTerrain)) private var commercialTerrainEnabled: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("endpointURL", .commercialTerrain)) private var commercialTerrainEndpointURL: String = GeoTileOptionalProviderID.commercialTerrain.defaultEndpointURL
+    @AppStorage(GeoTileProviderConfigurationStore.key("credentialReference", .commercialTerrain)) private var commercialTerrainCredentialReference: String = ""
+    @AppStorage(GeoTileProviderConfigurationStore.key("hasCredentialMaterial", .commercialTerrain)) private var commercialTerrainHasCredentialMaterial: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("recordingAllowed", .commercialTerrain)) private var commercialTerrainRecordingAllowed: Bool = false
+    @AppStorage(GeoTileProviderConfigurationStore.key("attributionOverride", .commercialTerrain)) private var commercialTerrainAttributionOverride: String = ""
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
@@ -848,6 +878,53 @@ struct SettingsView: View {
                         .autocapitalization(.none)
                     Toggle("Allow Duplicate Advertisements", isOn: $bleBeaconAllowDuplicateAdvertisements)
                 }
+                Section(header: Text("Optional Geospatial Providers")) {
+                    optionalProviderSlot(
+                        GeoTileOptionalProviderID.copernicusDataSpace,
+                        isEnabled: $copernicusEnabled,
+                        endpointURL: $copernicusEndpointURL,
+                        credentialReference: $copernicusCredentialReference,
+                        hasCredentialMaterial: $copernicusHasCredentialMaterial,
+                        recordingAllowed: $copernicusRecordingAllowed,
+                        attributionOverride: $copernicusAttributionOverride
+                    )
+                    optionalProviderSlot(
+                        GeoTileOptionalProviderID.openTopography,
+                        isEnabled: $openTopographyEnabled,
+                        endpointURL: $openTopographyEndpointURL,
+                        credentialReference: $openTopographyCredentialReference,
+                        hasCredentialMaterial: $openTopographyHasCredentialMaterial,
+                        recordingAllowed: $openTopographyRecordingAllowed,
+                        attributionOverride: $openTopographyAttributionOverride
+                    )
+                    optionalProviderSlot(
+                        GeoTileOptionalProviderID.usgsEROS,
+                        isEnabled: $usgsEROSEnabled,
+                        endpointURL: $usgsEROSEndpointURL,
+                        credentialReference: $usgsEROSCredentialReference,
+                        hasCredentialMaterial: $usgsEROSHasCredentialMaterial,
+                        recordingAllowed: $usgsEROSRecordingAllowed,
+                        attributionOverride: $usgsEROSAttributionOverride
+                    )
+                    optionalProviderSlot(
+                        GeoTileOptionalProviderID.commercialImagery,
+                        isEnabled: $commercialImageryEnabled,
+                        endpointURL: $commercialImageryEndpointURL,
+                        credentialReference: $commercialImageryCredentialReference,
+                        hasCredentialMaterial: $commercialImageryHasCredentialMaterial,
+                        recordingAllowed: $commercialImageryRecordingAllowed,
+                        attributionOverride: $commercialImageryAttributionOverride
+                    )
+                    optionalProviderSlot(
+                        GeoTileOptionalProviderID.commercialTerrain,
+                        isEnabled: $commercialTerrainEnabled,
+                        endpointURL: $commercialTerrainEndpointURL,
+                        credentialReference: $commercialTerrainCredentialReference,
+                        hasCredentialMaterial: $commercialTerrainHasCredentialMaterial,
+                        recordingAllowed: $commercialTerrainRecordingAllowed,
+                        attributionOverride: $commercialTerrainAttributionOverride
+                    )
+                }
                 Section(header: Text("ROS2 Recorder")) {
                     Toggle("Enable Mapping Stream", isOn: $ros2Enabled)
                     if ros2Enabled {
@@ -886,6 +963,46 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func optionalProviderSlot(
+        _ providerID: GeoTileOptionalProviderID,
+        isEnabled: Binding<Bool>,
+        endpointURL: Binding<String>,
+        credentialReference: Binding<String>,
+        hasCredentialMaterial: Binding<Bool>,
+        recordingAllowed: Binding<Bool>,
+        attributionOverride: Binding<String>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(providerID.displayName, isOn: isEnabled)
+            if isEnabled.wrappedValue {
+                TextField("Endpoint URL", text: endpointURL)
+                    .autocapitalization(.none)
+                    .keyboardType(.URL)
+                TextField("Credential reference (not secret)", text: credentialReference)
+                    .autocapitalization(.none)
+                Toggle("\(providerID.credentialLabel) configured", isOn: hasCredentialMaterial)
+                Toggle("Recording rights confirmed", isOn: recordingAllowed)
+                TextField("Attribution override", text: attributionOverride)
+                    .autocapitalization(.none)
+                Text(providerSlotStatus(providerID, hasCredentialMaterial: hasCredentialMaterial.wrappedValue, recordingAllowed: recordingAllowed.wrappedValue))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func providerSlotStatus(
+        _ providerID: GeoTileOptionalProviderID,
+        hasCredentialMaterial: Bool,
+        recordingAllowed: Bool
+    ) -> String {
+        let credentialState = hasCredentialMaterial ? "credentials present" : "credentials missing"
+        let recordingState = recordingAllowed ? "recording allowed" : "recording disabled"
+        return "\(providerID.credentialLabel); \(credentialState); \(recordingState)"
     }
 }
 

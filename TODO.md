@@ -40,7 +40,7 @@
 - [x] Select initial DEM provider after checking datum, resolution, region support, cache, and recording terms.
 - [x] Add source-policy metadata to `GeoTileProvider` for recordable-by-default, transient-cache-only, attribution URL, and credential requirement.
 - [x] Add USGS 3DEP provider and prefer it for US DEM tiles, with Mapzen Terrain Tiles as the global fallback.
-- [ ] Add user credential/configuration slots for optional Copernicus Data Space, OpenTopography, USGS EROS/Earthdata, and commercial provider integrations.
+- [x] Add user credential/configuration slots for optional Copernicus Data Space, OpenTopography, USGS EROS/Earthdata, and commercial provider integrations.
 - [x] Add tile fetch by current GPS location, radius, zoom, and bounding box.
 - [x] Add local tile cache with provider, layer, CRS, zoom, tile coordinate, timestamp, attribution, and license metadata.
 - [x] Publish satellite imagery as `sensor_msgs/CompressedImage`.

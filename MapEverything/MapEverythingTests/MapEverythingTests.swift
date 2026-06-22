@@ -366,4 +366,48 @@ struct MapEverythingTests {
         #expect(urlString.contains("pixelType=F32"))
         #expect(urlString.contains("f=image"))
     }
+
+    @Test("Optional geo provider configuration slots do not expose secret values")
+    func testOptionalGeoProviderConfigurationSlots() throws {
+        let suiteName = "GeoTileProviderConfigurationTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(true, forKey: GeoTileProviderConfigurationStore.key("enabled", .copernicusDataSpace))
+        defaults.set("keychain://copernicus-token", forKey: GeoTileProviderConfigurationStore.key("credentialReference", .copernicusDataSpace))
+        defaults.set(true, forKey: GeoTileProviderConfigurationStore.key("hasCredentialMaterial", .copernicusDataSpace))
+        defaults.set(false, forKey: GeoTileProviderConfigurationStore.key("recordingAllowed", .copernicusDataSpace))
+        defaults.set("https://example.invalid/copernicus", forKey: GeoTileProviderConfigurationStore.key("endpointURL", .copernicusDataSpace))
+        defaults.set("Copernicus attribution", forKey: GeoTileProviderConfigurationStore.key("attributionOverride", .copernicusDataSpace))
+
+        defaults.set(true, forKey: GeoTileProviderConfigurationStore.key("enabled", .openTopography))
+        defaults.set(true, forKey: GeoTileProviderConfigurationStore.key("hasCredentialMaterial", .openTopography))
+        defaults.set(true, forKey: GeoTileProviderConfigurationStore.key("recordingAllowed", .openTopography))
+
+        let configurations = GeoTileProviderConfigurationStore.load(from: defaults)
+        let copernicus = try #require(configurations.first { $0.id == .copernicusDataSpace })
+        let openTopography = try #require(configurations.first { $0.id == .openTopography })
+        let commercialImagery = try #require(configurations.first { $0.id == .commercialImagery })
+
+        #expect(configurations.count == GeoTileOptionalProviderID.allCases.count)
+        #expect(copernicus.id.credentialRequirement == .userLogin)
+        #expect(copernicus.statusLabel == "recording_not_allowed")
+        #expect(!copernicus.isConfigured)
+        #expect((copernicus.rosMessage["credential_reference"] as? String) == "keychain://copernicus-token")
+        #expect(copernicus.rosMessage["has_credential_material"] as? Bool == true)
+        #expect(copernicus.rosMessage["credential_value"] == nil)
+
+        #expect(openTopography.id.credentialRequirement == .userAPIKey)
+        #expect(openTopography.isConfigured)
+        #expect(openTopography.endpointURL == GeoTileOptionalProviderID.openTopography.defaultEndpointURL)
+
+        #expect(commercialImagery.id.credentialRequirement == .commercialAccount)
+        #expect(commercialImagery.statusLabel == "disabled")
+
+        let payload: [String: Any] = [
+            "optional_geo_provider_configurations": configurations.map(\.rosMessage)
+        ]
+        #expect(JSONSerialization.isValidJSONObject(payload))
+        _ = try JSONSerialization.data(withJSONObject: payload, options: [])
+    }
 }

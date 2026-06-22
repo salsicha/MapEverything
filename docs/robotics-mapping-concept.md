@@ -113,6 +113,7 @@ Provider decision:
 - Use USGS 3DEP as the preferred authoritative DEM source for US coverage.
 - Keep Mapzen Terrain Tiles as the built-in global DEM convenience fallback because it is available through AWS Open Data without an account and works with the current tiled fetcher.
 - Treat OpenTopography, Copernicus DEM, USGS EROS/Earthdata downloads, and commercial terrain APIs as user-login or user-key providers.
+- Expose optional provider configuration slots for credential reference, endpoint URL, attribution override, and explicit recording-rights confirmation. Recorder metadata should report configured status without publishing raw secrets.
 
 Provider requirements:
 

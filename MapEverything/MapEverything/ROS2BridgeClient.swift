@@ -1097,6 +1097,7 @@ class ROS2BridgeClient: ObservableObject {
         let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
+        let optionalGeoProviderConfigurations = GeoTileProviderConfigurationStore.load()
         let advertisedTopics = topicRegistry.advertisedTopics().map { definition in
             [
                 "id": definition.id.rawValue,
@@ -1121,6 +1122,7 @@ class ROS2BridgeClient: ObservableObject {
             "radio_observation_schema": RadioObservationMessageSchema.shared.rosMessage,
             "mesh_snapshot_schema": MeshSnapshotMessageSchema.shared.rosMessage,
             "stream_payload_metrics": streamPayloadMetrics.rosMessage,
+            "optional_geo_provider_configurations": optionalGeoProviderConfigurations.map(\.rosMessage),
             "current_wifi_telemetry": currentWiFiTelemetryManager.sessionMetadata,
             "ble_beacon_telemetry": bleBeaconTelemetryManager.sessionMetadata,
             "network_path_diagnostics": networkPathDiagnosticsManager.sessionMetadata,
@@ -1174,6 +1176,7 @@ class ROS2BridgeClient: ObservableObject {
         let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
+        let optionalGeoProviderDiagnosticValues = GeoTileProviderConfigurationStore.diagnosticValues
         let payloadMetricSnapshots = streamPayloadMetrics.allSnapshots()
         let enabledStreams = MappingSensorStream.allCases
             .filter { topicRegistry.isStreamEnabled($0) }
@@ -1244,6 +1247,12 @@ class ROS2BridgeClient: ObservableObject {
                         "last_published_at": geoTilePublisher.lastPublishedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
                         "publish_interval_seconds": String(Int(GeoTilePublisher.Configuration.default.publishInterval))
                     ]
+                ),
+                diagnosticStatus(
+                    name: "reconstructor/geotile_optional_providers",
+                    level: 0,
+                    message: "Optional geospatial provider configuration slots available",
+                    values: optionalGeoProviderDiagnosticValues
                 ),
                 diagnosticStatus(
                     name: "reconstructor/gps_quality",

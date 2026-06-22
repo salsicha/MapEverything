@@ -37,6 +37,7 @@ MapEverything should only bake provider defaults that are practical for a ROS2 r
 - Provider definitions for NASA GIBS, USGS 3DEP, and Mapzen Terrain Tiles.
 - A provider registry with endpoint templates, tile schemes, CRS, encoding, zoom defaults, attribution text, license/source URL, credential requirement, cache policy, and whether the source is recordable by default.
 - Source-policy metadata in each provider definition, including recordable-by-default, transient-cache-only, attribution URL, credential requirement, and whether credentials are required.
+- User configuration slots for optional Copernicus Data Space, OpenTopography, USGS EROS/Earthdata, commercial imagery, and commercial terrain providers. Slots track endpoint URL, credential reference, credential presence, recording-rights confirmation, and attribution override, but do not publish raw secret values.
 - Attribution, license, and source-policy metadata in every `GeoTileInfo` and `GeoRasterTile` message.
 - Conservative default zoom/radius/fetch cadence settings.
 - Tiny test fixtures or sample tiles for automated tests only.
