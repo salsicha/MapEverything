@@ -193,10 +193,10 @@ The recorder device must build this package before recording custom topics with 
 
 ### Data Model Changes
 
-- Add `MappingSessionModel` with start/end time, device info, coordinate frame config, provider config, and remote recorder URL.
-- Add `SensorStreamModel` for publisher status, publish rate, message counts, and last error.
-- Add `GeoTileModel` for satellite and DEM cache records.
-- Add transient radio observation buffering if publishing is interrupted.
+- `MappingSessionModel` stores session metadata, coordinate-frame config, provider config, remote recorder URL, session directory path, lifecycle timestamps, and last error.
+- `SensorStreamModel` stores topic identity, publisher status, target and observed publish rates, message counters, retry/drop/failure counters, last publish time, and last error.
+- `GeoTileModel` stores satellite and DEM cache records, bounds, source URL, source policy, attribution, cache path, byte count, and access timestamps.
+- Radio observations use a bounded transient buffer when publishing is interrupted by bridge disconnection.
 
 ## Implementation Phases
 

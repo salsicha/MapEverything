@@ -11,9 +11,7 @@ import SwiftData
 @main
 struct MapEverythingApp: App {
     var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            EnvironmentModel.self
-        ])
+        let schema = MapEverythingModelSchema.schema
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
         do {

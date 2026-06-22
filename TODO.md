@@ -72,12 +72,12 @@
 
 ## P2 - Data Model and Persistence
 
-- [ ] Add `MappingSessionModel` for session metadata and recorder configuration.
-- [ ] Add `SensorStreamModel` for publisher status, publish rate, message counts, and last error.
-- [ ] Add `GeoTileModel` for satellite and DEM cache records.
-- [ ] Add transient radio observation buffering for network loss.
-- [ ] Add migration tests for existing `EnvironmentModel` data.
-- [ ] Add cleanup logic for orphaned point-cloud, mesh, imagery, DEM, and session files.
+- [x] Add `MappingSessionModel` for session metadata and recorder configuration.
+- [x] Add `SensorStreamModel` for publisher status, publish rate, message counts, and last error.
+- [x] Add `GeoTileModel` for satellite and DEM cache records.
+- [x] Add transient radio observation buffering for network loss.
+- [x] Add migration tests for existing `EnvironmentModel` data.
+- [x] Add cleanup logic for orphaned point-cloud, mesh, imagery, DEM, and session files.
 
 ## P2 - Validation
 

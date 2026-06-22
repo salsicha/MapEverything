@@ -10,6 +10,7 @@ import Foundation
 import simd
 import CoreVideo
 import CoreLocation
+import SwiftData
 @testable import MapEverything
 
 struct MapEverythingTests {
@@ -409,5 +410,213 @@ struct MapEverythingTests {
         ]
         #expect(JSONSerialization.isValidJSONObject(payload))
         _ = try JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
+    @Test("Expanded SwiftData schema preserves EnvironmentModel and stores mapping records")
+    @MainActor
+    func testMappingPersistenceModelsAndEnvironmentMigration() throws {
+        let schema = MapEverythingModelSchema.schema
+        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+
+        let environment = EnvironmentModel(
+            id: UUID(),
+            name: "Existing Environment",
+            creationDate: Date(timeIntervalSince1970: 1_700_000_000),
+            filePathToPointCloudData: "existing_scan.ply",
+            meshPath: "existing_mesh.usdz"
+        )
+        context.insert(environment)
+
+        let sessionID = UUID()
+        let snapshot = MappingSessionSnapshot(
+            event: "started",
+            sessionID: sessionID,
+            state: "Active",
+            recorderURL: "ws://127.0.0.1:9090",
+            enabledStreams: ["pose", "radio"],
+            startedAt: Date(timeIntervalSince1970: 1_700_000_010),
+            endedAt: nil,
+            lastError: nil
+        )
+        let session = MappingSessionModel(snapshot: snapshot, metadataJSON: "{\"test\":true}")
+        session.sessionDirectoryPath = "Sessions/\(sessionID.uuidString)"
+        context.insert(session)
+
+        let topic = ROS2TopicRegistry().definition(.radio)
+        let stream = SensorStreamModel(topic: topic, isEnabled: true)
+        stream.apply(
+            stats: PublishQueueStats(
+                capacity: 10,
+                sentMessages: 7,
+                droppedMessages: 1,
+                retriedMessages: 2,
+                failedMessages: 1,
+                lastError: "last radio error",
+                lastErrorAt: Date(timeIntervalSince1970: 1_700_000_020)
+            )
+        )
+        context.insert(stream)
+
+        let provider = GeoTileProvider.usgs3DEPDEM
+        let coordinate = GeoTileCoordinate(z: 12, x: 818, y: 1583)
+        let bounds = GeoTileBounds.webMercatorBounds(for: coordinate)
+        let deviceLocation = GeoTileDeviceLocation(
+            latitude: 39.7392,
+            longitude: -104.9903,
+            altitude: 1609,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 8,
+            timestamp: Date(timeIntervalSince1970: 1_700_000_030),
+            pixel: GeoTilePixelCoordinate(x: 100, y: 120, width: 256, height: 256)
+        )
+        let payload = GeoTilePayload(
+            provider: provider,
+            coordinate: coordinate,
+            bounds: bounds,
+            deviceLocation: deviceLocation,
+            time: nil,
+            data: Data([1, 2, 3, 4]),
+            sourceURL: try #require(provider.makeURL(coordinate, nil)),
+            fetchedAt: Date(timeIntervalSince1970: 1_700_000_040),
+            isCached: false
+        )
+        let cache = GeoTileCache()
+        let tile = GeoTileModel(
+            payload: payload,
+            cachePath: cache.relativePath(provider: provider, coordinate: coordinate, time: nil)
+        )
+        context.insert(tile)
+
+        try context.save()
+
+        let environments = try context.fetch(FetchDescriptor<EnvironmentModel>())
+        let sessions = try context.fetch(FetchDescriptor<MappingSessionModel>())
+        let streams = try context.fetch(FetchDescriptor<SensorStreamModel>())
+        let tiles = try context.fetch(FetchDescriptor<GeoTileModel>())
+
+        #expect(environments.count == 1)
+        #expect(environments.first?.name == "Existing Environment")
+        #expect(environments.first?.filePathToPointCloudData == "existing_scan.ply")
+
+        #expect(sessions.count == 1)
+        #expect(sessions.first?.sessionID == sessionID)
+        #expect(sessions.first?.recorderURL == "ws://127.0.0.1:9090")
+        #expect(sessions.first?.enabledStreams == ["pose", "radio"])
+        #expect(sessions.first?.providerConfigJSON.hasPrefix("[") == true)
+
+        #expect(streams.count == 1)
+        #expect(streams.first?.topic == "/reconstructor/radio")
+        #expect(streams.first?.sentMessages == 7)
+        #expect(streams.first?.droppedMessages == 1)
+        #expect(streams.first?.lastError == "last radio error")
+
+        #expect(tiles.count == 1)
+        #expect(tiles.first?.providerName == "USGS 3DEP")
+        #expect(tiles.first?.kind == GeoTileLayerKind.dem.rawValue)
+        #expect(tiles.first?.byteCount == 4)
+        #expect(tiles.first?.cachePath.contains("USGS_3DEP") == true)
+    }
+
+    @Test("Transient radio observation buffer deduplicates and drops oldest observations")
+    func testRadioObservationTransientBuffer() {
+        var buffer = RadioObservationTransientBuffer(capacity: 2)
+        let first = makeRadioObservation(timestamp: 1, sourceID: "first")
+        let second = makeRadioObservation(timestamp: 2, sourceID: "second")
+        let third = makeRadioObservation(timestamp: 3, sourceID: "third")
+
+        buffer.enqueue(first)
+        buffer.enqueue(second)
+        buffer.enqueue(first)
+        buffer.enqueue(third)
+
+        #expect(buffer.count == 2)
+
+        let flushed = buffer.flush()
+        #expect(flushed.map(\.deduplicationKey) == [second.deduplicationKey, third.deduplicationKey])
+        #expect(buffer.count == 0)
+    }
+
+    @Test("Cleanup removes orphaned point-cloud mesh imagery DEM and session files")
+    func testMappingFileCleanupRemovesOrphans() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("MapEverythingCleanup-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let referencedPaths: Set<String> = [
+            "kept_scan.ply",
+            "kept_mesh.usdz",
+            "kept_satellite.jpg",
+            "kept_dem.tif",
+            "kept_session.mcap"
+        ]
+        let orphanPaths = [
+            "orphan_scan.ply",
+            "orphan_mesh.obj",
+            "orphan_satellite.png",
+            "orphan_dem.tiff",
+            "orphan_session.db3"
+        ]
+        let ignoredPath = "operator_notes.txt"
+
+        for path in referencedPaths.union(orphanPaths).union([ignoredPath]) {
+            let url = root.appendingPathComponent(path)
+            try Data(path.utf8).write(to: url)
+        }
+
+        let result = MappingFileCleanupManager.removeOrphanedDocumentFiles(
+            in: root,
+            referencedPaths: referencedPaths,
+            fileManager: fileManager
+        )
+
+        #expect(Set(result.removedFiles) == Set(orphanPaths))
+        for path in referencedPaths {
+            #expect(fileManager.fileExists(atPath: root.appendingPathComponent(path).path))
+        }
+        for path in orphanPaths {
+            #expect(!fileManager.fileExists(atPath: root.appendingPathComponent(path).path))
+        }
+        #expect(fileManager.fileExists(atPath: root.appendingPathComponent(ignoredPath).path))
+
+        let cacheRoot = root.appendingPathComponent("Cache", isDirectory: true)
+        let keptTilePath = "USGS_3DEP/3DEPElevation/static/12/818/1583.tif"
+        let orphanTilePath = "GeoTiles/USGS_3DEP/3DEPElevation/static/12/818/1584.tif"
+        let keptTileURL = cacheRoot
+            .appendingPathComponent("GeoTiles", isDirectory: true)
+            .appendingPathComponent(keptTilePath)
+        let orphanTileURL = cacheRoot.appendingPathComponent(orphanTilePath)
+        try fileManager.createDirectory(at: keptTileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: orphanTileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1]).write(to: keptTileURL)
+        try Data([2]).write(to: orphanTileURL)
+
+        let cacheResult = MappingFileCleanupManager.removeOrphanedCacheFiles(
+            in: cacheRoot,
+            referencedPaths: [keptTilePath],
+            fileManager: fileManager
+        )
+
+        #expect(cacheResult.removedFiles == [orphanTilePath])
+        #expect(fileManager.fileExists(atPath: keptTileURL.path))
+        #expect(!fileManager.fileExists(atPath: orphanTileURL.path))
+    }
+
+    private func makeRadioObservation(timestamp: TimeInterval, sourceID: String) -> RadioObservationMessage {
+        RadioObservationMessage(
+            timestamp: Date(timeIntervalSince1970: timestamp),
+            sessionID: "session",
+            channelID: .networkPath,
+            observationKind: "network_path_state",
+            sourceAPI: "unit_test",
+            sourceID: sourceID,
+            radioType: "network_path",
+            values: [
+                "success": true
+            ]
+        )
     }
 }

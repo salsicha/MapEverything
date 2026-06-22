@@ -143,12 +143,56 @@ struct RadioObservationMessage {
     }
 }
 
+struct RadioObservationTransientBuffer {
+    let capacity: Int
+    private(set) var observations: [RadioObservationMessage] = []
+    private var observationKeys = Set<String>()
+
+    init(capacity: Int = 200) {
+        self.capacity = max(1, capacity)
+    }
+
+    var count: Int {
+        observations.count
+    }
+
+    mutating func enqueue(_ observation: RadioObservationMessage) {
+        guard observationKeys.insert(observation.deduplicationKey).inserted else { return }
+
+        observations.append(observation)
+        while observations.count > capacity {
+            let dropped = observations.removeFirst()
+            observationKeys.remove(dropped.deduplicationKey)
+        }
+    }
+
+    mutating func enqueue(contentsOf newObservations: [RadioObservationMessage]) {
+        newObservations.forEach { enqueue($0) }
+    }
+
+    mutating func flush() -> [RadioObservationMessage] {
+        let flushedObservations = observations
+        observations.removeAll()
+        observationKeys.removeAll()
+        return flushedObservations
+    }
+
+    mutating func removeAll() {
+        observations.removeAll()
+        observationKeys.removeAll()
+    }
+}
+
 @MainActor
 final class RadioObservationPublisher {
     struct Configuration {
         let publishInterval: TimeInterval
+        let maxBufferedObservations: Int
 
-        static let `default` = Configuration(publishInterval: 0.5)
+        static let `default` = Configuration(
+            publishInterval: 0.5,
+            maxBufferedObservations: 200
+        )
     }
 
     static let shared = RadioObservationPublisher()
@@ -164,6 +208,7 @@ final class RadioObservationPublisher {
     private var sessionID = ""
     private var publishTimer: DispatchSourceTimer?
     private var publishedObservationKeys = Set<String>()
+    private var transientBuffer: RadioObservationTransientBuffer
 
     init(
         bridge: ROS2BridgeClient? = nil,
@@ -179,11 +224,15 @@ final class RadioObservationPublisher {
         self.networkPathDiagnosticsManager = networkPathDiagnosticsManager ?? NetworkPathDiagnosticsManager.shared
         self.recorderEndpointProbeManager = recorderEndpointProbeManager ?? RecorderEndpointProbeManager.shared
         self.configuration = configuration ?? Configuration.default
+        self.transientBuffer = RadioObservationTransientBuffer(
+            capacity: self.configuration.maxBufferedObservations
+        )
     }
 
     func start(sessionID: UUID?) {
         self.sessionID = sessionID?.uuidString ?? ""
         publishedObservationKeys.removeAll()
+        transientBuffer.removeAll()
 
         guard !isRunning else {
             publishFreshObservations()
@@ -200,6 +249,7 @@ final class RadioObservationPublisher {
         publishTimer?.cancel()
         publishTimer = nil
         publishedObservationKeys.removeAll()
+        transientBuffer.removeAll()
     }
 
     private func schedulePublishTimer() {
@@ -217,7 +267,28 @@ final class RadioObservationPublisher {
     private func publishFreshObservations() {
         guard isRunning, ROS2TopicRegistry.shared.isStreamEnabled(.radio) else { return }
 
-        for observation in currentObservations() {
+        let observations = currentObservations()
+        guard bridge.isConnected else {
+            transientBuffer.enqueue(
+                contentsOf: observations.filter { !publishedObservationKeys.contains($0.deduplicationKey) }
+            )
+            return
+        }
+
+        flushBufferedObservations()
+
+        for observation in observations {
+            guard publishedObservationKeys.insert(observation.deduplicationKey).inserted else {
+                continue
+            }
+            bridge.publishRadioObservation(observation)
+        }
+    }
+
+    private func flushBufferedObservations() {
+        guard bridge.isConnected else { return }
+
+        for observation in transientBuffer.flush() {
             guard publishedObservationKeys.insert(observation.deduplicationKey).inserted else {
                 continue
             }

@@ -422,18 +422,23 @@ final class GeoTileCache {
         try data.write(to: url, options: .atomic)
     }
 
-    private func fileURL(provider: GeoTileProvider, coordinate: GeoTileCoordinate, time: String?) -> URL {
-        let safeProvider = provider.name.sanitizedPathComponent
-        let safeLayer = provider.layer.sanitizedPathComponent
-        let timeComponent = time?.sanitizedPathComponent ?? "static"
+    func relativePath(provider: GeoTileProvider, coordinate: GeoTileCoordinate, time: String?) -> String {
+        [
+            provider.name.sanitizedPathComponent,
+            provider.layer.sanitizedPathComponent,
+            time?.sanitizedPathComponent ?? "static",
+            String(coordinate.z),
+            String(coordinate.x),
+            "\(coordinate.y).\(provider.fileExtension)"
+        ].joined(separator: "/")
+    }
 
-        return rootURL
-            .appendingPathComponent(safeProvider, isDirectory: true)
-            .appendingPathComponent(safeLayer, isDirectory: true)
-            .appendingPathComponent(timeComponent, isDirectory: true)
-            .appendingPathComponent(String(coordinate.z), isDirectory: true)
-            .appendingPathComponent(String(coordinate.x), isDirectory: true)
-            .appendingPathComponent("\(coordinate.y).\(provider.fileExtension)")
+    private func fileURL(provider: GeoTileProvider, coordinate: GeoTileCoordinate, time: String?) -> URL {
+        relativePath(provider: provider, coordinate: coordinate, time: time)
+            .split(separator: "/")
+            .reduce(rootURL) { url, component in
+                url.appendingPathComponent(String(component), isDirectory: false)
+            }
     }
 }
 
