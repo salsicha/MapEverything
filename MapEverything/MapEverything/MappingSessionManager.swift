@@ -100,6 +100,10 @@ final class MappingSessionManager: ObservableObject {
             "bridge_transport": ROS2BridgeTransportProfile.current.kind.rawValue,
             "bridge_transport_decision": ROS2BridgeTransportProfile.current.decision,
             "state": state.label,
+            "active_mapping_mode": AdaptiveMappingModeController.shared.activeMode.rawValue,
+            "adaptive_mapping_confidence": String(format: "%.3f", AdaptiveMappingModeController.shared.recommendation.confidence),
+            "adaptive_mapping_operator_override": AdaptiveMappingModeController.shared.operatorOverride.rawValue,
+            "adaptive_mapping_reasons": AdaptiveMappingModeController.shared.recommendation.reasons.map(\.rawValue).joined(separator: ","),
             "enabled_streams": enabledStreams
                 .map(\.rawValue)
                 .sorted()
@@ -258,6 +262,10 @@ final class MappingSessionManager: ObservableObject {
         )
 
         bridge.publishSessionMetadata(snapshot, timestamp: ProcessInfo.processInfo.systemUptime)
+    }
+
+    func publishSessionUpdate(event: String) {
+        publishSessionMetadata(event: event)
     }
 
     private func isValidRecorderURL(_ value: String) -> Bool {

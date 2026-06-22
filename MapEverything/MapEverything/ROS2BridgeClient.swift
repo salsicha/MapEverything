@@ -1134,6 +1134,7 @@ class ROS2BridgeClient: ObservableObject {
         let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
+        let adaptiveMappingController = AdaptiveMappingModeController.shared
         let optionalGeoProviderConfigurations = GeoTileProviderConfigurationStore.load()
         let advertisedTopics = topicRegistry.advertisedTopics().map { definition in
             [
@@ -1171,6 +1172,7 @@ class ROS2BridgeClient: ObservableObject {
             "mesh_snapshot_schema": rosJSONString(MeshSnapshotMessageSchema.shared.rosMessage),
             "stream_payload_metrics": rosJSONString(streamPayloadMetrics.rosMessage),
             "optional_geo_provider_configurations": rosJSONString(optionalGeoProviderConfigurations.map(\.rosMessage), fallback: "[]"),
+            "adaptive_mapping": rosJSONString(adaptiveMappingController.sessionMetadata),
             "current_wifi_telemetry": rosJSONString(currentWiFiTelemetryManager.sessionMetadata),
             "ble_beacon_telemetry": rosJSONString(bleBeaconTelemetryManager.sessionMetadata),
             "network_path_diagnostics": rosJSONString(networkPathDiagnosticsManager.sessionMetadata),
@@ -1212,6 +1214,7 @@ class ROS2BridgeClient: ObservableObject {
         let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
+        let adaptiveMappingController = AdaptiveMappingModeController.shared
         let optionalGeoProviderDiagnosticValues = GeoTileProviderConfigurationStore.diagnosticValues
         let payloadMetricSnapshots = streamPayloadMetrics.allSnapshots()
         let enabledStreams = MappingSensorStream.allCases
@@ -1273,6 +1276,12 @@ class ROS2BridgeClient: ObservableObject {
                     level: 0,
                     message: payloadMetricSnapshots.isEmpty ? "No camera, point-cloud, or mesh payloads published yet" : "Stream payload metrics nominal",
                     values: streamPayloadDiagnosticValues(payloadMetricSnapshots)
+                ),
+                diagnosticStatus(
+                    name: "reconstructor/adaptive_mapping",
+                    level: adaptiveMappingController.diagnosticLevel,
+                    message: adaptiveMappingController.diagnosticMessage,
+                    values: adaptiveMappingController.diagnosticValues
                 ),
                 diagnosticStatus(
                     name: "reconstructor/geotiles",

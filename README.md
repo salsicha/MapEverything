@@ -11,7 +11,7 @@ The app streams raw color feeds, dense point clouds, 6-DOF pose frames (`/tf`), 
 
 MapEverything is intentionally a single record-mode publisher. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. The app should not create local session recordings beyond transient buffers and caches needed to publish reliably.
 
-The mapping architecture separates capture engines from mode selection. Today the operator can choose LiDAR + Depth Anything point-cloud capture or RoomPlan parametric capture; planned work adds an adaptive policy that can prefer RoomPlan for enclosed interiors and switch to outdoor LiDAR + Depth Anything mapping with GPS, satellite, and DEM context when room semantics are not reliable.
+The mapping architecture separates capture engines from mode selection. An adaptive policy prefers RoomPlan for enclosed interiors and switches to outdoor LiDAR + Depth Anything mapping with GPS, satellite, and DEM context when room semantics are not reliable.
 
 See [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md) for the implementation concept and [TODO.md](TODO.md) for the phased task list.
 
@@ -28,7 +28,7 @@ See [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md) for the
              |                           |
              v                           v
   Adaptive Mapping Policy         MappingSessionModel
-        (planned)                 SensorStreamModel
+                                  SensorStreamModel
              |                    GeoTileModel
     +--------+--------+
     |                 |
@@ -49,7 +49,7 @@ parametrics     dense geometry
 ### 1. Mapping Engines and Mode Routing
 * **LiDAR + Depth Anything Mapping:** Projects the camera's YCbCr frames onto metric 3D depth coordinates derived from ARKit LiDAR and Depth Anything dense relative depth. Points are buffered in a custom `PointCloudManager` actor off the main thread, downsampled using **Voxel Grid filters**, and cleared of noise using a spatial **Radius Outlier Removal (ROR)** algorithm.
 * **Parametric RoomPlan Mapping:** Uses Apple's local Core ML scene understanding to isolate indoor surfaces (walls, windows, doors) and objects (tables, sofas, chairs), then publishes clean parametric bounding boxes alongside regular pose and sensor streams.
-* **Adaptive Mapping Policy (planned):** A future router will score RoomPlan suitability, outdoor GPS context, LiDAR confidence, Depth Anything availability, thermal pressure, and operator override state. It should prefer RoomPlan inside enclosed rooms and switch to LiDAR + Depth Anything outdoors or in spaces where room semantics are weak.
+* **Adaptive Mapping Policy:** Scores RoomPlan suitability, outdoor GPS context, LiDAR confidence, Depth Anything availability, thermal pressure, and operator override state. It prefers RoomPlan inside enclosed rooms and switches to LiDAR + Depth Anything outdoors or in spaces where room semantics are weak.
 * **Geospatial Context:** GPS, heading, ENU frame registration, satellite imagery, and DEM/elevation tiles run alongside either mapping engine so outdoor datasets carry terrain and map context rather than only local AR geometry.
 
 ### 2. Multi-Format Serialization & Export
@@ -267,12 +267,12 @@ Configure your RViz2 workspace using the settings below:
 ### Mapping Mode Architecture
 `MappingSessionManager` owns the record-mode lifecycle, enabled streams, recorder URL, bridge transport, and session metadata. SwiftData persists the expanded mapping schema through `MapEverythingModelSchema`, including legacy `EnvironmentModel` records plus `MappingSessionModel`, `SensorStreamModel`, and `GeoTileModel`.
 
-The planned adaptive mapping router belongs above the capture engines. It should observe RoomPlan availability, AR tracking state, LiDAR depth confidence, Depth Anything health, GPS quality, Core Location indoor metadata, terrain tile coverage, thermal pressure, and operator override state. The router can then select one of two primary capture paths:
+The adaptive mapping router belongs above the capture engines. It observes RoomPlan availability, AR tracking state, LiDAR depth confidence, Depth Anything health, GPS quality, Core Location indoor metadata, terrain tile coverage, thermal pressure, and operator override state. The router then selects one of two primary capture paths:
 
 * **Indoor parametric path:** RoomPlan publishes semantic walls, openings, and object bounding boxes through `/reconstructor/map` while regular pose, IMU, camera, and diagnostics continue.
 * **Outdoor/open-area path:** ARKit LiDAR, Depth Anything fusion, GPS/ENU registration, satellite imagery, and DEM tiles publish dense geometry and geospatial context without depending on RoomPlan's indoor assumptions.
 
-The selected mode, confidence, reason codes, and any operator override should be reflected in `/reconstructor/session` and `/reconstructor/status` so the remote recorder can explain what it captured.
+The selected mode, confidence, reason codes, and any operator override are reflected in `/reconstructor/session` and `/reconstructor/status` so the remote recorder can explain what it captured.
 
 ### Outlier Filtration Pipeline
 The point cloud goes through three distinct stages of cleanup before saving:

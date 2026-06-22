@@ -186,8 +186,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     
     private let pointManager = PointCloudManager()
     private let pointCloudProcessor = PointCloudProcessor()
-    private let adaptiveMappingPolicy = AdaptiveMappingModePolicy()
-    private var latestAdaptiveMappingRecommendation: AdaptiveMappingModeRecommendation?
+    private let adaptiveMappingController = AdaptiveMappingModeController.shared
     private lazy var depthAnythingProcessor: DepthAnythingProcessor? = DepthAnythingProcessor()
     private var lastEnhancedFrameTime: TimeInterval = 0
     private let enhancedFrameInterval: TimeInterval = 0.5 // Run Depth Anything at ~2 fps
@@ -210,6 +209,9 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         didSet {
             if oldValue != useRoomPlan {
                 setupViews()
+                if useRoomPlan, isScanning {
+                    roomCaptureView?.captureSession.run(configuration: RoomCaptureSession.Configuration())
+                }
             }
         }
     }
@@ -581,7 +583,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     }
 
     private func evaluateAdaptiveMappingPolicy(frame: ARFrame) {
-        let localization = IndoorLocalizationManager.shared
         let depthConfidence: Double
         if frame.smoothedSceneDepth != nil {
             depthConfidence = 1.0
@@ -591,21 +592,61 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             depthConfidence = 0.15
         }
 
+        adaptiveMappingController.update(
+            input: makeAdaptiveMappingInput(
+                roomPlanObjectCount: capturedRoomObjectCount,
+                lidarDepthConfidence: depthConfidence
+            )
+        )
+    }
+
+    private func evaluateAdaptiveMappingPolicy(room: CapturedRoom) {
+        adaptiveMappingController.update(
+            input: makeAdaptiveMappingInput(
+                roomPlanObjectCount: capturedRoomElementCount(room),
+                lidarDepthConfidence: fallbackLiDARDepthConfidence
+            )
+        )
+    }
+
+    private func makeAdaptiveMappingInput(
+        roomPlanObjectCount: Int,
+        lidarDepthConfidence: Double
+    ) -> AdaptiveMappingModeInput {
+        let localization = IndoorLocalizationManager.shared
         let horizontalAccuracy = localization.lastHorizontalAccuracy >= 0
             ? localization.lastHorizontalAccuracy
             : nil
-        let input = AdaptiveMappingModeInput(
+
+        return AdaptiveMappingModeInput(
             roomPlanAvailable: RoomCaptureSession.isSupported,
-            roomPlanObjectCount: capturedRoom.map { $0.walls.count + $0.doors.count + $0.windows.count + $0.objects.count } ?? 0,
+            roomPlanObjectCount: roomPlanObjectCount,
             indoorRegistrationQuality: localization.lastIndoorRegistrationQuality,
             globalRegistrationQuality: localization.lastGlobalRegistrationQuality,
             gpsHorizontalAccuracyMeters: horizontalAccuracy,
-            lidarDepthConfidence: depthConfidence,
+            lidarDepthConfidence: lidarDepthConfidence,
             depthAnythingAvailable: isDepthAnythingModelAvailable,
             thermalState: ProcessInfo.processInfo.thermalState,
-            operatorOverride: .automatic
+            operatorOverride: adaptiveMappingController.operatorOverride
         )
-        latestAdaptiveMappingRecommendation = adaptiveMappingPolicy.recommendation(for: input)
+    }
+
+    private var capturedRoomObjectCount: Int {
+        capturedRoom.map(capturedRoomElementCount) ?? 0
+    }
+
+    private var fallbackLiDARDepthConfidence: Double {
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            return 0.75
+        }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            return 0.55
+        }
+        return 0.15
+    }
+
+    private func capturedRoomElementCount(_ room: CapturedRoom) -> Int {
+        room.walls.count + room.doors.count + room.windows.count + room.objects.count
     }
 
     @MainActor
@@ -1161,16 +1202,18 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             delegate?.didFailWithError(error)
         } else {
             self.capturedRoom = processedResult
+            evaluateAdaptiveMappingPolicy(room: processedResult)
             delegate?.didUpdateTrackingFeedback("Room captured successfully!")
             
-            let objectCount = processedResult.walls.count + processedResult.objects.count + processedResult.doors.count + processedResult.windows.count
+            let objectCount = capturedRoomElementCount(processedResult)
             delegate?.didUpdatePointCount(objectCount)
         }
     }
     
     // MARK: - RoomCaptureSessionDelegate
     func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
-        let objectCount = room.walls.count + room.doors.count + room.windows.count + room.objects.count
+        evaluateAdaptiveMappingPolicy(room: room)
+        let objectCount = capturedRoomElementCount(room)
         delegate?.didUpdatePointCount(objectCount)
         
         if ROS2BridgeClient.shared.isConnected {

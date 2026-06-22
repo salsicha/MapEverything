@@ -4,16 +4,38 @@
 //
 
 import Foundation
+import Combine
+import RoomPlan
 
 enum AdaptiveMappingMode: String, Codable, CaseIterable, Hashable {
     case roomPlanParametric = "roomplan_parametric"
     case lidarDepthAnythingOutdoor = "lidar_depthanything_outdoor"
+
+    var displayName: String {
+        switch self {
+        case .roomPlanParametric:
+            return "RoomPlan"
+        case .lidarDepthAnythingOutdoor:
+            return "LiDAR + Depth Anything"
+        }
+    }
 }
 
 enum AdaptiveMappingOperatorOverride: String, Codable, CaseIterable, Hashable {
     case automatic
     case forceRoomPlanParametric = "force_roomplan_parametric"
     case forceLiDARDepthAnything = "force_lidar_depthanything"
+
+    var displayName: String {
+        switch self {
+        case .automatic:
+            return "Automatic"
+        case .forceRoomPlanParametric:
+            return "Force RoomPlan"
+        case .forceLiDARDepthAnything:
+            return "Force LiDAR"
+        }
+    }
 }
 
 enum AdaptiveMappingModeReason: String, Codable, CaseIterable, Hashable {
@@ -76,6 +98,15 @@ struct AdaptiveMappingModeRecommendation: Equatable {
     let operatorOverride: AdaptiveMappingOperatorOverride
     let reasons: [AdaptiveMappingModeReason]
 
+    static let coldStart = AdaptiveMappingModeRecommendation(
+        mode: .roomPlanParametric,
+        confidence: 0.55,
+        roomPlanScore: 0,
+        outdoorScore: 0,
+        operatorOverride: .automatic,
+        reasons: [.closeScores]
+    )
+
     var metadata: [String: String] {
         [
             "active_mapping_mode": mode.rawValue,
@@ -84,6 +115,19 @@ struct AdaptiveMappingModeRecommendation: Equatable {
             "outdoor_score": Self.format(outdoorScore),
             "adaptive_mapping_operator_override": operatorOverride.rawValue,
             "adaptive_mapping_reasons": reasons.map(\.rawValue).joined(separator: ",")
+        ]
+    }
+
+    var rosMessage: [String: Any] {
+        [
+            "active_mapping_mode": mode.rawValue,
+            "active_mapping_mode_label": mode.displayName,
+            "adaptive_mapping_confidence": confidence,
+            "roomplan_score": roomPlanScore,
+            "outdoor_score": outdoorScore,
+            "operator_override": operatorOverride.rawValue,
+            "operator_override_label": operatorOverride.displayName,
+            "reason_codes": reasons.map(\.rawValue)
         ]
     }
 
@@ -215,5 +259,114 @@ private extension Double {
     var clamped01: Double {
         guard isFinite else { return 0 }
         return min(max(self, 0), 1)
+    }
+}
+
+@MainActor
+final class AdaptiveMappingModeController: ObservableObject {
+    static let shared = AdaptiveMappingModeController()
+    static let overrideStorageKey = "adaptiveMappingOperatorOverride"
+
+    @Published private(set) var recommendation: AdaptiveMappingModeRecommendation
+    @Published private(set) var operatorOverride: AdaptiveMappingOperatorOverride
+
+    private let policy: AdaptiveMappingModePolicy
+    private let userDefaults: UserDefaults
+    private let publishesSessionUpdates: Bool
+    private let roomPlanCaptureSupported: Bool
+    private var latestInput: AdaptiveMappingModeInput?
+
+    var activeMode: AdaptiveMappingMode {
+        recommendation.mode
+    }
+
+    var usesRoomPlanCapture: Bool {
+        activeMode == .roomPlanParametric && roomPlanCaptureSupported
+    }
+
+    var sessionMetadata: [String: Any] {
+        recommendation.rosMessage
+    }
+
+    var diagnosticValues: [String: String] {
+        var values = recommendation.metadata
+        values["active_mapping_mode_label"] = recommendation.mode.displayName
+        values["adaptive_mapping_reason_count"] = String(recommendation.reasons.count)
+        return values
+    }
+
+    var diagnosticLevel: Int {
+        if recommendation.confidence < 0.60 { return 1 }
+        return 0
+    }
+
+    var diagnosticMessage: String {
+        if recommendation.confidence < 0.60 {
+            return "Adaptive mapping mode confidence is low"
+        }
+        return "Adaptive mapping mode selected \(recommendation.mode.displayName)"
+    }
+
+    init(
+        policy: AdaptiveMappingModePolicy? = nil,
+        userDefaults: UserDefaults = .standard,
+        publishesSessionUpdates: Bool = true,
+        roomPlanCaptureSupported: Bool = RoomCaptureSession.isSupported
+    ) {
+        self.policy = policy ?? AdaptiveMappingModePolicy()
+        self.userDefaults = userDefaults
+        self.publishesSessionUpdates = publishesSessionUpdates
+        self.roomPlanCaptureSupported = roomPlanCaptureSupported
+
+        let storedRawValue = userDefaults.string(forKey: Self.overrideStorageKey)
+        let storedOverride = storedRawValue.flatMap(AdaptiveMappingOperatorOverride.init(rawValue:)) ?? .automatic
+        self.operatorOverride = storedOverride
+
+        let initialInput = AdaptiveMappingModeInput(
+            roomPlanAvailable: roomPlanCaptureSupported,
+            roomPlanObjectCount: 0,
+            indoorRegistrationQuality: roomPlanCaptureSupported ? 0.45 : 0,
+            globalRegistrationQuality: 0,
+            gpsHorizontalAccuracyMeters: nil,
+            lidarDepthConfidence: 0,
+            depthAnythingAvailable: false,
+            operatorOverride: storedOverride
+        )
+        self.recommendation = self.policy.recommendation(for: initialInput)
+        self.latestInput = initialInput
+    }
+
+    func setOperatorOverride(_ override: AdaptiveMappingOperatorOverride) {
+        operatorOverride = override
+        userDefaults.set(override.rawValue, forKey: Self.overrideStorageKey)
+
+        if let latestInput {
+            update(input: latestInput)
+        } else {
+            recommendation = AdaptiveMappingModeRecommendation.coldStart
+        }
+    }
+
+    func update(input: AdaptiveMappingModeInput) {
+        let controlledInput = AdaptiveMappingModeInput(
+            roomPlanAvailable: input.roomPlanAvailable,
+            roomPlanObjectCount: input.roomPlanObjectCount,
+            indoorRegistrationQuality: input.indoorRegistrationQuality,
+            globalRegistrationQuality: input.globalRegistrationQuality,
+            gpsHorizontalAccuracyMeters: input.gpsHorizontalAccuracyMeters,
+            lidarDepthConfidence: input.lidarDepthConfidence,
+            depthAnythingAvailable: input.depthAnythingAvailable,
+            thermalState: input.thermalState,
+            operatorOverride: operatorOverride
+        )
+        latestInput = controlledInput
+
+        let nextRecommendation = policy.recommendation(for: controlledInput)
+        guard nextRecommendation != recommendation else { return }
+
+        recommendation = nextRecommendation
+        if publishesSessionUpdates, MappingSessionManager.shared.isActive {
+            MappingSessionManager.shared.publishSessionUpdate(event: "adaptive_mapping_updated")
+        }
     }
 }

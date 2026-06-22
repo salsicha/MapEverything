@@ -61,6 +61,7 @@ struct ContentView: View {
     
     @ObservedObject private var ros2Client = ROS2BridgeClient.shared
     @ObservedObject private var mappingSession = MappingSessionManager.shared
+    @ObservedObject private var adaptiveMapping = AdaptiveMappingModeController.shared
     
     // App Settings
     @AppStorage("maxPointLimit") private var maxPointLimit: Int = 2_000_000
@@ -68,7 +69,6 @@ struct ContentView: View {
     @AppStorage("boundingBoxSize") private var boundingBoxSize: Double = 20.0
     @AppStorage("ros2Enabled") private var ros2Enabled: Bool = false
     @AppStorage("ros2WebSocketURL") private var ros2WebSocketURL: String = "ws://192.168.1.100:9090"
-    @AppStorage("useRoomPlan") private var useRoomPlan: Bool = false
     @AppStorage("useImperialUnits") private var useImperialUnits: Bool = false
     
     @State private var visualizationMode: VisualizationMode = .none
@@ -122,7 +122,7 @@ struct ContentView: View {
                     maxPointLimit: maxPointLimit,
                     voxelSize: Float(voxelSize),
                     boundingBoxSize: Float(boundingBoxSize),
-                    useRoomPlan: false,
+                    useRoomPlan: adaptiveMapping.usesRoomPlanCapture,
                     useImperialUnits: useImperialUnits,
                     onSave: { newModel in
                         modelContext.insert(newModel)
@@ -172,7 +172,6 @@ struct ContentView: View {
                 Text(msg)
             }
             .onAppear {
-                useRoomPlan = false
                 appMode = .scan
                 visualizationMode = .wireframe
                 mappingSession.configure(recorderURL: ros2WebSocketURL)
@@ -205,6 +204,7 @@ struct ContentView: View {
                 Label("\(queueStats.depth)/\(queueStats.capacity)", systemImage: "tray.full")
                 Label("\(queueStats.droppedMessages)", systemImage: "exclamationmark.triangle")
                 Label("\(localBufferStats.pointCloudSamples + localBufferStats.meshSamples)", systemImage: "externaldrive")
+                Label(adaptiveMapping.activeMode.displayName, systemImage: adaptiveMapping.usesRoomPlanCapture ? "square.3.layers.3d" : "sparkles.rectangle.stack")
             }
             .font(.caption2.monospacedDigit())
             .foregroundColor(.secondary)
@@ -249,8 +249,8 @@ struct ContentView: View {
                 }
 
                 Section("Will be saved") {
-                    Label("\(pointCount) \(useRoomPlan ? "elements" : "points")", systemImage: useRoomPlan ? "square.3.layers.3d" : "circle.dotted")
-                    if !useRoomPlan {
+                    Label("\(pointCount) \(adaptiveMapping.usesRoomPlanCapture ? "elements" : "points")", systemImage: adaptiveMapping.usesRoomPlanCapture ? "square.3.layers.3d" : "circle.dotted")
+                    if !adaptiveMapping.usesRoomPlanCapture {
                         Label("3D mesh (USDZ + OBJ)", systemImage: "cube")
                         Label("Blueprint PDF", systemImage: "doc.richtext")
                         Label("Flythrough video", systemImage: "video")
@@ -788,6 +788,7 @@ struct EnvironmentGalleryView: View {
 struct SettingsView: View {
     @ObservedObject private var mappingSession = MappingSessionManager.shared
     @ObservedObject private var ros2Client = ROS2BridgeClient.shared
+    @ObservedObject private var adaptiveMapping = AdaptiveMappingModeController.shared
     @AppStorage("maxPointLimit") private var maxPointLimit: Int = 2_000_000
     @AppStorage("voxelSize") private var voxelSize: Double = 0.05
     @AppStorage("boundingBoxSize") private var boundingBoxSize: Double = 20.0
@@ -797,7 +798,6 @@ struct SettingsView: View {
     @AppStorage("bleBeaconPeripheralIDs") private var bleBeaconPeripheralIDs: String = ""
     @AppStorage("bleBeaconLocalNamePrefixes") private var bleBeaconLocalNamePrefixes: String = ""
     @AppStorage("bleBeaconAllowDuplicateAdvertisements") private var bleBeaconAllowDuplicateAdvertisements: Bool = true
-    @AppStorage("useRoomPlan") private var useRoomPlan: Bool = false
     @AppStorage("useImperialUnits") private var useImperialUnits: Bool = false
     @AppStorage(GeoTileProviderConfigurationStore.key("enabled", .copernicusDataSpace)) private var copernicusEnabled: Bool = false
     @AppStorage(GeoTileProviderConfigurationStore.key("endpointURL", .copernicusDataSpace)) private var copernicusEndpointURL: String = GeoTileOptionalProviderID.copernicusDataSpace.defaultEndpointURL
@@ -835,8 +835,14 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section(header: Text("Scanning Mode")) {
-                    Toggle("Use RoomPlan Parametric Model", isOn: $useRoomPlan)
-                    Text("When enabled, the scanner will use Apple's RoomPlan API to extract walls, doors, and furniture into a clean 3D parametric model instead of a raw point cloud.")
+                    Picker("Mapping Mode", selection: adaptiveMappingOverrideBinding) {
+                        ForEach(AdaptiveMappingOperatorOverride.allCases, id: \.self) { override in
+                            Text(override.displayName).tag(override)
+                        }
+                    }
+                    Label(adaptiveMapping.activeMode.displayName, systemImage: adaptiveMapping.usesRoomPlanCapture ? "square.3.layers.3d" : "sparkles.rectangle.stack")
+                        .font(.caption)
+                    Label("Confidence \(Int(adaptiveMapping.recommendation.confidence * 100))%", systemImage: "gauge.with.dots.needle.67percent")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -963,6 +969,13 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var adaptiveMappingOverrideBinding: Binding<AdaptiveMappingOperatorOverride> {
+        Binding(
+            get: { adaptiveMapping.operatorOverride },
+            set: { adaptiveMapping.setOperatorOverride($0) }
+        )
     }
 
     @ViewBuilder

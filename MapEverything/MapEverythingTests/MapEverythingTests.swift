@@ -368,6 +368,85 @@ struct MapEverythingTests {
         #expect(recommendation.metadata["adaptive_mapping_operator_override"] == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
     }
 
+    @Test("Adaptive mapping controller switches active capture mode from policy input")
+    @MainActor
+    func testAdaptiveMappingControllerSwitchesActiveCaptureMode() throws {
+        let suiteName = "AdaptiveMappingControllerTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let controller = AdaptiveMappingModeController(
+            userDefaults: defaults,
+            publishesSessionUpdates: false,
+            roomPlanCaptureSupported: true
+        )
+
+        controller.update(
+            input: AdaptiveMappingModeInput(
+                roomPlanAvailable: true,
+                roomPlanObjectCount: 9,
+                indoorRegistrationQuality: 0.95,
+                globalRegistrationQuality: 0.2,
+                gpsHorizontalAccuracyMeters: 55,
+                lidarDepthConfidence: 0.65,
+                depthAnythingAvailable: true
+            )
+        )
+        #expect(controller.activeMode == .roomPlanParametric)
+        #expect(controller.usesRoomPlanCapture)
+
+        controller.update(
+            input: AdaptiveMappingModeInput(
+                roomPlanAvailable: true,
+                roomPlanObjectCount: 0,
+                indoorRegistrationQuality: 0.05,
+                globalRegistrationQuality: 0.96,
+                gpsHorizontalAccuracyMeters: 4,
+                lidarDepthConfidence: 0.92,
+                depthAnythingAvailable: true
+            )
+        )
+        #expect(controller.activeMode == .lidarDepthAnythingOutdoor)
+        #expect(!controller.usesRoomPlanCapture)
+    }
+
+    @Test("Adaptive mapping controller persists override and emits ROS metadata")
+    @MainActor
+    func testAdaptiveMappingControllerPersistsOverrideAndMetadata() throws {
+        let suiteName = "AdaptiveMappingOverrideTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let controller = AdaptiveMappingModeController(
+            userDefaults: defaults,
+            publishesSessionUpdates: false,
+            roomPlanCaptureSupported: true
+        )
+        controller.setOperatorOverride(.forceLiDARDepthAnything)
+        controller.update(
+            input: AdaptiveMappingModeInput(
+                roomPlanAvailable: true,
+                roomPlanObjectCount: 12,
+                indoorRegistrationQuality: 1.0,
+                globalRegistrationQuality: 0.1,
+                gpsHorizontalAccuracyMeters: 80,
+                lidarDepthConfidence: 0.3,
+                depthAnythingAvailable: false
+            )
+        )
+
+        #expect(defaults.string(forKey: AdaptiveMappingModeController.overrideStorageKey) == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
+        #expect(controller.activeMode == .lidarDepthAnythingOutdoor)
+        #expect(controller.diagnosticValues["adaptive_mapping_operator_override"] == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
+
+        let metadata = controller.sessionMetadata
+        #expect(metadata["active_mapping_mode"] as? String == AdaptiveMappingMode.lidarDepthAnythingOutdoor.rawValue)
+        #expect(metadata["operator_override"] as? String == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
+        #expect((metadata["reason_codes"] as? [String])?.contains(AdaptiveMappingModeReason.operatorForcedLiDARDepthAnything.rawValue) == true)
+        #expect(JSONSerialization.isValidJSONObject(metadata))
+        _ = try JSONSerialization.data(withJSONObject: metadata, options: [])
+    }
+
     @Test("Default geo tile providers expose source policy metadata")
     func testGeoTileProviderSourcePolicyMetadata() throws {
         let satellite = GeoTileProvider.defaultSatellite
