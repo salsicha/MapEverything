@@ -157,6 +157,8 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with truncation and payload-size metadata. |
 | `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
 
+Mesh publishing uses `/reconstructor/map` as the RViz-compatible `MarkerArray` fallback and `/reconstructor/mesh_snapshot` as the structured recording topic when the custom message package is available. Camera, point-cloud, and mesh publishers also report payload-size and encoding metrics in session metadata and diagnostics so recorder operators can detect oversized or degraded streams.
+
 ---
 
 ### Step-by-Step Remote ROS2 Workstation Configuration
