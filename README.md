@@ -146,7 +146,20 @@ Transport decision: MapEverything continues to use `rosbridge_suite` over WebSoc
 
 The companion ROS2 custom message package lives in [ros2/reconstructor_msgs](ros2/reconstructor_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
 
-Local SQLite bag storage is available in Settings and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The Settings screen includes a local bag browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay still requires conversion to CDR messages or a compatible bridge-side importer.
+Local SQLite bag storage is available in Settings and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The Settings screen includes a local bag browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
+
+Use [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) to convert shared local chunks into a native ROS2 bag. Run it from a sourced ROS2 workspace that can import `rosbag2_py`, `rclpy`, and `reconstructor_msgs`:
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-select reconstructor_msgs
+source install/setup.bash
+python3 tools/mapeverything-local-bag-to-ros2.py ROS2Bags/<session> --output converted/<session>_native
+ros2 bag info converted/<session>_native
+ros2 bag play converted/<session>_native
+```
+
+The converter also accepts individual `.db3` chunks, supports `--dry-run` inspection without ROS2 imports, and can use `--skip-unknown` or `--type /topic=pkg/msg/Type` when a message package is unavailable or a topic type needs overriding.
 
 ### Radio Telemetry Notes
 
