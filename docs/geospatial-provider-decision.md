@@ -7,8 +7,8 @@ MapEverything should only bake provider defaults that are practical for a ROS2 r
 ## Decision
 
 - Built-in satellite imagery default: NASA GIBS WMTS, using MODIS or VIIRS true-color layers. It is global, no-login, stable, and aligned with NASA Earthdata's open-data posture. It is lower resolution than commercial basemaps, but it is the best default for a robotics data product that may be cached and recorded.
-- Built-in DEM convenience fallback: Mapzen Terrain Tiles on AWS Open Data, using Terrarium PNG tiles. It is global and no-login, and the current app can fetch it as simple Web Mercator tiles. Because it is a multi-source elevation composite, every published tile must carry Mapzen and source-data attribution metadata.
-- Preferred authoritative US DEM provider to add next: USGS 3DEP through The National Map or an official USGS elevation service. Use it ahead of Mapzen when the device is inside US coverage. Keep Mapzen as the global fallback until a similarly simple global open DEM provider is integrated.
+- Built-in US DEM default: USGS 3DEP through The National Map 3DEPElevation ImageServer. The app requests 256x256 EPSG:3857 TIFF/F32 exports for US-covered tiles and retains USGS/The National Map attribution.
+- Built-in DEM convenience fallback: Mapzen Terrain Tiles on AWS Open Data, using Terrarium PNG tiles. It is global and no-login, and the app uses it outside USGS 3DEP coverage or after a USGS tile fetch failure. Because it is a multi-source elevation composite, every published tile must carry Mapzen and source-data attribution metadata.
 - Optional login/API-key providers: Copernicus Data Space, OpenTopography, USGS EarthExplorer/EROS, NASA Earthdata DAAC downloads, Google Maps, Mapbox, Esri, MapTiler, Azure/Bing, Sentinel Hub, and commercial satellite providers. These should be user-configured and disabled for ROS bag recording unless the user has rights that allow caching, recording, and redistribution.
 
 ## Satellite Imagery Options
@@ -26,7 +26,7 @@ MapEverything should only bake provider defaults that are practical for a ROS2 r
 
 | Provider | Login | Cache and recording fit | Recommendation |
 | --- | --- | --- | --- |
-| USGS 3DEP / The National Map | No for TNM access endpoints checked; some alternate EROS flows require login | Best authoritative US DEM choice. Federal source, but retain product metadata and USGS credit because not every federal-hosted item has identical rights. | Implement next and prefer inside US coverage. |
+| USGS 3DEP / The National Map | No for the 3DEPElevation ImageServer export endpoint checked; some alternate EROS flows require login | Best authoritative US DEM choice. Federal source, but retain product metadata and USGS credit because not every federal-hosted item has identical rights. | Built in and preferred inside US coverage. |
 | Mapzen Terrain Tiles on AWS Open Data | No AWS account required | Good engineering fit as global tiled DEM fallback. Attribution is required and varies by underlying regional source. | Keep baked as convenience fallback, with explicit attribution metadata. |
 | OpenTopography global DEM and USGS DEM APIs | API key required | Strong optional DEM aggregator, but not anonymous. | User API-key provider. |
 | Copernicus DEM through Copernicus Data Space | Login/token required | Good global DEM option; access requires CDSE credentials. | User-login provider. |
@@ -34,7 +34,7 @@ MapEverything should only bake provider defaults that are practical for a ROS2 r
 
 ## What Can Be Baked Into The App
 
-- Provider definitions for NASA GIBS and Mapzen Terrain Tiles.
+- Provider definitions for NASA GIBS, USGS 3DEP, and Mapzen Terrain Tiles.
 - A provider registry with endpoint templates, tile schemes, CRS, encoding, zoom defaults, attribution text, license/source URL, credential requirement, cache policy, and whether the source is recordable by default.
 - Source-policy metadata in each provider definition, including recordable-by-default, transient-cache-only, attribution URL, credential requirement, and whether credentials are required.
 - Attribution, license, and source-policy metadata in every `GeoTileInfo` and `GeoRasterTile` message.
@@ -56,6 +56,7 @@ The app should not bake API keys, user credentials, commercial map tiles, large 
 - NASA Earthdata data and information guidance: https://www.earthdata.nasa.gov/engage/open-data-services-software-policies/data-information-guidance
 - NASA GIBS WMTS capabilities: https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/wmts.cgi?SERVICE=WMTS&REQUEST=GetCapabilities
 - USGS TNM Access API docs: https://tnmaccess.nationalmap.gov/api/v1/docs
+- USGS 3DEPElevation ImageServer: https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer
 - USA.gov federal government copyright guidance: https://www.usa.gov/government-copyright
 - USGS EROS registration: https://ers.cr.usgs.gov/register/
 - AWS Open Data Terrain Tiles listing: https://registry.opendata.aws/terrain-tiles/

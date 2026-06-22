@@ -39,7 +39,7 @@
 - [x] Select initial satellite imagery provider after checking cache, recording, attribution, and redistribution terms.
 - [x] Select initial DEM provider after checking datum, resolution, region support, cache, and recording terms.
 - [x] Add source-policy metadata to `GeoTileProvider` for recordable-by-default, transient-cache-only, attribution URL, and credential requirement.
-- [ ] Add USGS 3DEP provider and prefer it for US DEM tiles, with Mapzen Terrain Tiles as the global fallback.
+- [x] Add USGS 3DEP provider and prefer it for US DEM tiles, with Mapzen Terrain Tiles as the global fallback.
 - [ ] Add user credential/configuration slots for optional Copernicus Data Space, OpenTopography, USGS EROS/Earthdata, and commercial provider integrations.
 - [x] Add tile fetch by current GPS location, radius, zoom, and bounding box.
 - [x] Add local tile cache with provider, layer, CRS, zoom, tile coordinate, timestamp, attribution, and license metadata.
@@ -103,4 +103,4 @@
 - [x] Decide whether to rename the app before larger UI changes. Product name: MapEverything.
 - [x] Decide whether stream-level UI toggles belong in the app or only in recorder-side configuration. Decision: keep the app to start/stop record mode; choose topic subscriptions and rosbag retention on the recorder side.
 - [x] Decide whether rosbridge remains sufficient or whether high-rate streams need a native binary bridge. Decision: continue with rosbridge until throughput benchmarks prove it insufficient; revisit a native binary bridge only with a maintained iOS client or companion ROS2 binary receiver.
-- [x] Choose satellite imagery and DEM providers after checking cache, recording, attribution, and redistribution terms. Decision: bake NASA GIBS imagery and Mapzen Terrain Tiles DEM fallback; add USGS 3DEP as preferred US DEM provider; keep login/API-key sources user-configured.
+- [x] Choose satellite imagery and DEM providers after checking cache, recording, attribution, and redistribution terms. Decision: bake NASA GIBS imagery, prefer USGS 3DEP for US DEM tiles, keep Mapzen Terrain Tiles as the global DEM fallback, and keep login/API-key sources user-configured.

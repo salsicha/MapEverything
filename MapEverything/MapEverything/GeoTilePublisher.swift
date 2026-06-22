@@ -41,7 +41,7 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
         cache: GeoTileCache = GeoTileCache(),
         bridge: ROS2BridgeClient = .shared,
         topicRegistry: ROS2TopicRegistry = .shared,
-        providers: [GeoTileProvider] = [.defaultSatellite, .defaultDEM]
+        providers: [GeoTileProvider] = [.defaultSatellite, .usgs3DEPDEM, .mapzenTerrainTiles]
     ) {
         self.configuration = configuration
         self.locationManager = locationManager
@@ -133,34 +133,58 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
         guard bridge.isConnected else { return }
         guard let location = latestLocation else { return }
 
-        let activeProviders = providers.filter { provider in
-            switch provider.kind {
-            case .satelliteImagery:
-                return topicRegistry.isStreamEnabled(.satelliteImagery)
-            case .dem:
-                return topicRegistry.isStreamEnabled(.dem)
-            }
-        }
-        guard !activeProviders.isEmpty else { return }
+        let providerCandidateGroups = providerCandidateGroups(for: location)
+        guard !providerCandidateGroups.isEmpty else { return }
 
         isPublishing = true
         defer { isPublishing = false }
 
         let now = Date()
-        for provider in activeProviders {
-            do {
-                let payload = try await loadTile(
-                    provider: provider,
-                    location: location,
-                    date: now
-                )
-                publish(payload: payload, timestamp: ProcessInfo.processInfo.systemUptime)
-                lastPublishedAt = Date()
-                lastError = nil
-            } catch {
-                lastError = "GeoTile fetch failed for \(provider.name): \(error.localizedDescription)"
+        for providerCandidates in providerCandidateGroups {
+            var lastFailure: (provider: GeoTileProvider, error: Error)?
+
+            for provider in providerCandidates {
+                do {
+                    let payload = try await loadTile(
+                        provider: provider,
+                        location: location,
+                        date: now
+                    )
+                    publish(payload: payload, timestamp: ProcessInfo.processInfo.systemUptime)
+                    lastPublishedAt = Date()
+                    lastError = nil
+                    lastFailure = nil
+                    break
+                } catch {
+                    lastFailure = (provider, error)
+                }
+            }
+
+            if let lastFailure {
+                let providerNames = providerCandidates.map(\.name).joined(separator: ", ")
+                lastError = "GeoTile fetch failed for \(providerNames): \(lastFailure.error.localizedDescription)"
             }
         }
+    }
+
+    func providerCandidateGroups(for location: CLLocation) -> [[GeoTileProvider]] {
+        var groups: [[GeoTileProvider]] = []
+
+        if topicRegistry.isStreamEnabled(.satelliteImagery) {
+            let satelliteProviders = providers.filter { provider in
+                provider.kind == .satelliteImagery && provider.supports(location: location)
+            }
+            groups.append(contentsOf: satelliteProviders.map { [$0] })
+        }
+
+        if topicRegistry.isStreamEnabled(.dem) {
+            let demCandidates = GeoTileProviderSelection.demCandidates(for: location, providers: providers)
+            if !demCandidates.isEmpty {
+                groups.append(demCandidates)
+            }
+        }
+
+        return groups
     }
 
     private func loadTile(provider: GeoTileProvider, location: CLLocation, date: Date) async throws -> GeoTilePayload {

@@ -9,6 +9,7 @@ import Testing
 import Foundation
 import simd
 import CoreVideo
+import CoreLocation
 @testable import MapEverything
 
 struct MapEverythingTests {
@@ -304,7 +305,8 @@ struct MapEverythingTests {
     @Test("Default geo tile providers expose source policy metadata")
     func testGeoTileProviderSourcePolicyMetadata() throws {
         let satellite = GeoTileProvider.defaultSatellite
-        let dem = GeoTileProvider.defaultDEM
+        let usgs = GeoTileProvider.usgs3DEPDEM
+        let mapzen = GeoTileProvider.mapzenTerrainTiles
 
         #expect(satellite.sourcePolicy.recordableByDefault)
         #expect(!satellite.sourcePolicy.transientCacheOnly)
@@ -312,17 +314,56 @@ struct MapEverythingTests {
         #expect(!satellite.sourcePolicy.requiresCredentials)
         #expect(satellite.sourcePolicy.attributionURL.contains("earthdata"))
 
-        #expect(dem.sourcePolicy.recordableByDefault)
-        #expect(!dem.sourcePolicy.transientCacheOnly)
-        #expect(dem.sourcePolicy.credentialRequirement == .none)
-        #expect(!dem.sourcePolicy.requiresCredentials)
-        #expect(dem.sourcePolicy.attributionURL.contains("joerd"))
+        #expect(usgs.sourcePolicy.recordableByDefault)
+        #expect(!usgs.sourcePolicy.transientCacheOnly)
+        #expect(usgs.sourcePolicy.credentialRequirement == .none)
+        #expect(!usgs.sourcePolicy.requiresCredentials)
+        #expect(usgs.sourcePolicy.attributionURL.contains("usgs"))
+
+        #expect(mapzen.sourcePolicy.recordableByDefault)
+        #expect(!mapzen.sourcePolicy.transientCacheOnly)
+        #expect(mapzen.sourcePolicy.credentialRequirement == .none)
+        #expect(!mapzen.sourcePolicy.requiresCredentials)
+        #expect(mapzen.sourcePolicy.attributionURL.contains("joerd"))
 
         let payload: [String: Any] = [
             "satellite": satellite.sourcePolicy.rosMessage,
-            "dem": dem.sourcePolicy.rosMessage
+            "usgs": usgs.sourcePolicy.rosMessage,
+            "mapzen": mapzen.sourcePolicy.rosMessage
         ]
         #expect(JSONSerialization.isValidJSONObject(payload))
         _ = try JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
+    @Test("USGS 3DEP is the preferred US DEM provider with Mapzen fallback")
+    func testDEMProviderSelection() throws {
+        let denver = CLLocation(latitude: 39.7392, longitude: -104.9903)
+        let london = CLLocation(latitude: 51.5074, longitude: -0.1278)
+        let providers = [
+            GeoTileProvider.defaultSatellite,
+            GeoTileProvider.usgs3DEPDEM,
+            GeoTileProvider.mapzenTerrainTiles
+        ]
+
+        let usCandidates = GeoTileProviderSelection.demCandidates(for: denver, providers: providers)
+        #expect(usCandidates.map { $0.name } == ["USGS 3DEP", "Mapzen Terrain Tiles"])
+
+        let globalCandidates = GeoTileProviderSelection.demCandidates(for: london, providers: providers)
+        #expect(globalCandidates.map { $0.name } == ["Mapzen Terrain Tiles"])
+
+        let coordinate = GeoTileCoordinate.webMercator(
+            latitude: denver.coordinate.latitude,
+            longitude: denver.coordinate.longitude,
+            zoom: GeoTileProvider.usgs3DEPDEM.zoom
+        )
+        let url = try #require(GeoTileProvider.usgs3DEPDEM.makeURL(coordinate, nil))
+        let urlString = url.absoluteString
+
+        #expect(urlString.contains("3DEPElevation/ImageServer/exportImage"))
+        #expect(urlString.contains("bboxSR=3857"))
+        #expect(urlString.contains("imageSR=3857"))
+        #expect(urlString.contains("format=tiff"))
+        #expect(urlString.contains("pixelType=F32"))
+        #expect(urlString.contains("f=image"))
     }
 }
