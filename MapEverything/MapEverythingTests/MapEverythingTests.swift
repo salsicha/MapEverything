@@ -556,6 +556,236 @@ struct MapEverythingTests {
         _ = try JSONSerialization.data(withJSONObject: payload, options: [])
     }
 
+    @Test("Implemented ROS2 topics serialize advertised schema metadata")
+    func testROS2TopicRegistryAdvertisedTopicsSerialize() throws {
+        let registry = ROS2TopicRegistry()
+        let allTopics = registry.allTopics()
+        let advertisedTopics = registry.advertisedTopics()
+
+        #expect(allTopics.count == ROS2TopicID.allCases.count)
+        #expect(Set(allTopics.map(\.id)) == Set(ROS2TopicID.allCases))
+        #expect(Set(advertisedTopics.map(\.id)).isSuperset(of: [.cameraCompressed, .pointCloud, .meshSnapshot, .satelliteTileInfo, .demTile]))
+
+        let advertisedPayload = advertisedTopics.map { definition in
+            [
+                "id": definition.id.rawValue,
+                "stream": definition.stream.rawValue,
+                "topic": definition.topic,
+                "message_type": definition.messageType,
+                "default_rate_hz": definition.defaultRateHz.map { $0 as Any } ?? NSNull(),
+                "is_implemented": definition.isImplemented
+            ] as [String: Any]
+        }
+        let payload: [String: Any] = ["advertised_topics": advertisedPayload]
+
+        for definition in advertisedTopics {
+            #expect(definition.topic.hasPrefix("/"))
+            #expect(definition.messageType.contains("/msg/"))
+            if let defaultRateHz = definition.defaultRateHz {
+                #expect(defaultRateHz >= 0)
+            }
+        }
+
+        #expect(JSONSerialization.isValidJSONObject(payload))
+        _ = try JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
+    @Test("GPS fixes convert to ENU and map-frame coordinates")
+    func testGPSLocationConvertsToENUMeters() throws {
+        let georeferencer = MapGeoreferencer(maximumOriginHorizontalAccuracy: 10)
+        var transform = matrix_identity_float4x4
+        transform.columns.3 = SIMD4<Float>(10, 2, -3, 1)
+        georeferencer.updateMapPose(transform, timestamp: 100)
+
+        let originLatitude = 37.3349
+        let originLongitude = -122.0090
+        let originLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: originLatitude, longitude: originLongitude),
+            altitude: 20,
+            horizontalAccuracy: 3,
+            verticalAccuracy: 4,
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        let originSnapshot = try #require(georeferencer.snapshot(for: originLocation))
+        #expect(abs(originSnapshot.enuMeters.x) < 0.01)
+        #expect(abs(originSnapshot.enuMeters.y) < 0.01)
+        #expect(abs(originSnapshot.enuMeters.z) < 0.01)
+
+        let eastMeters = 5.0
+        let northMeters = 12.0
+        let upMeters = 3.0
+        let targetCoordinate = offsetCoordinate(
+            latitude: originLatitude,
+            longitude: originLongitude,
+            eastMeters: eastMeters,
+            northMeters: northMeters
+        )
+        let targetLocation = CLLocation(
+            coordinate: targetCoordinate,
+            altitude: originLocation.altitude + upMeters,
+            horizontalAccuracy: 3,
+            verticalAccuracy: 4,
+            timestamp: Date(timeIntervalSince1970: 1_700_000_010)
+        )
+
+        let snapshot = try #require(georeferencer.snapshot(for: targetLocation))
+        #expect(abs(snapshot.enuMeters.x - eastMeters) < 0.5)
+        #expect(abs(snapshot.enuMeters.y - northMeters) < 0.5)
+        #expect(abs(snapshot.enuMeters.z - upMeters) < 0.1)
+        #expect(abs(snapshot.mapPositionMeters.x - (10 + eastMeters)) < 0.5)
+        #expect(abs(snapshot.mapPositionMeters.y - (2 + upMeters)) < 0.1)
+        #expect(abs(snapshot.mapPositionMeters.z - (-3 - northMeters)) < 0.5)
+        #expect(JSONSerialization.isValidJSONObject(snapshot.rosMessage))
+        _ = try JSONSerialization.data(withJSONObject: snapshot.rosMessage, options: [])
+    }
+
+    @Test("GPS origin is gated by horizontal accuracy")
+    func testGPSOriginRequiresAccurateFix() {
+        let georeferencer = MapGeoreferencer(maximumOriginHorizontalAccuracy: 5)
+        var transform = matrix_identity_float4x4
+        transform.columns.3 = SIMD4<Float>(0, 0, 0, 1)
+        georeferencer.updateMapPose(transform, timestamp: 1)
+
+        let poorFix = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.3349, longitude: -122.0090),
+            altitude: 20,
+            horizontalAccuracy: 50,
+            verticalAccuracy: 4,
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        #expect(georeferencer.snapshot(for: poorFix) == nil)
+        #expect(georeferencer.unavailableMessage["reason"] as? String == "waiting_for_accurate_gps_origin")
+    }
+
+    @Test("Geo tile metadata and cache indexing stay stable")
+    func testGeoTileMetadataAndCacheIndexing() throws {
+        let provider = GeoTileProvider.usgs3DEPDEM
+        let location = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
+            altitude: 1609,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 8,
+            timestamp: Date(timeIntervalSince1970: 1_700_000_030)
+        )
+        let coordinate = GeoTileCoordinate.webMercator(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            zoom: provider.zoom
+        )
+        let bounds = GeoTileBounds.webMercatorBounds(for: coordinate)
+        let pixel = GeoTilePixelCoordinate.webMercator(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            coordinate: coordinate,
+            tileSizePixels: provider.tileSizePixels
+        )
+        let deviceLocation = GeoTileDeviceLocation(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            altitude: location.altitude,
+            horizontalAccuracy: location.horizontalAccuracy,
+            verticalAccuracy: location.verticalAccuracy,
+            timestamp: location.timestamp,
+            pixel: pixel
+        )
+        let cache = GeoTileCache()
+        let time = "2026-06-22"
+        let cachePath = cache.relativePath(provider: provider, coordinate: coordinate, time: time)
+        let payload = GeoTilePayload(
+            provider: provider,
+            coordinate: coordinate,
+            bounds: bounds,
+            deviceLocation: deviceLocation,
+            time: time,
+            data: Data([1, 2, 3, 4]),
+            sourceURL: try #require(provider.makeURL(coordinate, time)),
+            fetchedAt: Date(timeIntervalSince1970: 1_700_000_040),
+            isCached: true
+        )
+        let model = GeoTileModel(payload: payload, cachePath: cachePath)
+
+        #expect(cachePath.hasPrefix("USGS_3DEP/3DEPElevation/\(time)/\(coordinate.z)/"))
+        #expect(cachePath.hasSuffix("/\(coordinate.y).tif"))
+        #expect(!cachePath.contains(" "))
+        #expect(model.id == GeoTileModel.id(provider: provider, coordinate: coordinate, time: time))
+        #expect(model.cachePath == cachePath)
+        #expect(model.providerName == "USGS 3DEP")
+        #expect(model.kind == GeoTileLayerKind.dem.rawValue)
+        #expect(model.sourcePolicyJSON.contains("\"recordable_by_default\":true"))
+        #expect(pixel.x >= 0 && pixel.x <= Double(provider.tileSizePixels))
+        #expect(pixel.y >= 0 && pixel.y <= Double(provider.tileSizePixels))
+        #expect(bounds.west < location.coordinate.longitude)
+        #expect(bounds.east > location.coordinate.longitude)
+        #expect(bounds.south < location.coordinate.latitude)
+        #expect(bounds.north > location.coordinate.latitude)
+    }
+
+    @Test("Publish queue drops oldest publish when capacity is exceeded")
+    func testPublishQueueBackpressureDropsOldestPublish() async throws {
+        let stats = PublishQueueStatsRecorder()
+        let sends = PublishQueueSendRecorder()
+        let queue = PublishQueue(
+            configuration: PublishQueue.Configuration(
+                capacity: 2,
+                maxRetries: 0,
+                retryDelayMilliseconds: 1,
+                dropPolicy: .dropOldestPublish
+            )
+        ) { data, completion in
+            sends.record(data: data, completion: completion)
+        }
+        queue.onStatsChange = stats.record
+
+        queue.enqueueEncodedPayload(Data("first".utf8), op: "publish", topic: "/test/first")
+        queue.enqueueEncodedPayload(Data("second".utf8), op: "publish", topic: "/test/second")
+        queue.enqueueEncodedPayload(Data("third".utf8), op: "publish", topic: "/test/third")
+        queue.enqueueEncodedPayload(Data("fourth".utf8), op: "publish", topic: "/test/fourth")
+
+        #expect(await waitUntil { stats.latest?.droppedMessages == 1 && stats.latest?.depth == 2 })
+        #expect(stats.latest?.lastError?.contains("/test/second") == true)
+
+        sends.completeNext(with: nil)
+        #expect(await waitUntil { sends.sentPayloads.count == 2 })
+        sends.completeNext(with: nil)
+        #expect(await waitUntil { sends.sentPayloads.count == 3 })
+        sends.completeNext(with: nil)
+        #expect(await waitUntil { stats.latest?.sentMessages == 3 })
+
+        #expect(sends.sentPayloads == ["first", "third", "fourth"])
+        #expect(stats.latest?.failedMessages == 0)
+    }
+
+    @Test("Publish queue retries transient publish failures")
+    func testPublishQueueRetriesTransientFailures() async throws {
+        let stats = PublishQueueStatsRecorder()
+        let sends = PublishQueueSendRecorder()
+        let queue = PublishQueue(
+            configuration: PublishQueue.Configuration(
+                capacity: 4,
+                maxRetries: 2,
+                retryDelayMilliseconds: 1,
+                dropPolicy: .dropOldestPublish
+            )
+        ) { data, completion in
+            sends.record(data: data, completion: completion)
+        }
+        queue.onStatsChange = stats.record
+
+        queue.enqueueEncodedPayload(Data("retry-me".utf8), op: "publish", topic: "/test/retry")
+        #expect(await waitUntil { sends.sentPayloads.count == 1 })
+        sends.completeNext(with: TestPublishError.temporary)
+
+        #expect(await waitUntil { stats.latest?.retriedMessages == 1 && sends.sentPayloads.count == 2 })
+        sends.completeNext(with: nil)
+
+        #expect(await waitUntil { stats.latest?.sentMessages == 1 })
+        #expect(sends.sentPayloads == ["retry-me", "retry-me"])
+        #expect(stats.latest?.failedMessages == 0)
+        #expect(stats.latest?.lastError?.contains("/test/retry") == true)
+    }
+
     @Test("Expanded SwiftData schema preserves EnvironmentModel and stores mapping records")
     @MainActor
     func testMappingPersistenceModelsAndEnvironmentMigration() throws {
@@ -762,5 +992,88 @@ struct MapEverythingTests {
                 "success": true
             ]
         )
+    }
+
+    private func offsetCoordinate(
+        latitude: Double,
+        longitude: Double,
+        eastMeters: Double,
+        northMeters: Double
+    ) -> CLLocationCoordinate2D {
+        let earthRadiusMeters = 6_378_137.0
+        let latitudeRadians = latitude * .pi / 180.0
+        let deltaLatitude = northMeters / earthRadiusMeters
+        let deltaLongitude = eastMeters / (earthRadiusMeters * cos(latitudeRadians))
+
+        return CLLocationCoordinate2D(
+            latitude: latitude + deltaLatitude * 180.0 / .pi,
+            longitude: longitude + deltaLongitude * 180.0 / .pi
+        )
+    }
+
+    private func waitUntil(
+        timeoutSeconds: TimeInterval = 1,
+        condition: @escaping () -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if condition() {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return condition()
+    }
+
+    private enum TestPublishError: LocalizedError {
+        case temporary
+
+        var errorDescription: String? {
+            "Temporary publish failure"
+        }
+    }
+
+    private final class PublishQueueStatsRecorder {
+        private let lock = NSLock()
+        private var snapshots: [PublishQueueStats] = []
+
+        var latest: PublishQueueStats? {
+            lock.lock()
+            defer { lock.unlock() }
+            return snapshots.last
+        }
+
+        func record(_ snapshot: PublishQueueStats) {
+            lock.lock()
+            snapshots.append(snapshot)
+            lock.unlock()
+        }
+    }
+
+    private final class PublishQueueSendRecorder {
+        private let lock = NSLock()
+        private var completions: [(Error?) -> Void] = []
+        private var payloads: [String] = []
+
+        var sentPayloads: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return payloads
+        }
+
+        func record(data: Data, completion: @escaping (Error?) -> Void) {
+            lock.lock()
+            payloads.append(String(data: data, encoding: .utf8) ?? "")
+            completions.append(completion)
+            lock.unlock()
+        }
+
+        func completeNext(with error: Error?) {
+            let completion: ((Error?) -> Void)?
+            lock.lock()
+            completion = completions.isEmpty ? nil : completions.removeFirst()
+            lock.unlock()
+            completion?(error)
+        }
     }
 }

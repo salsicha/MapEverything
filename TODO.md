@@ -87,14 +87,14 @@
 
 ## P2 - Validation
 
-- [ ] Add simulator-safe unit tests for topic serialization and message schemas.
-- [ ] Add unit tests for GPS-to-ENU conversion.
-- [ ] Add unit tests for tile metadata and cache indexing.
-- [ ] Add unit tests for publish queue backpressure and retry behavior.
-- [ ] Benchmark rosbridge throughput for camera, point-cloud, mesh, satellite, and DEM topics at target field rates.
-- [ ] Add physical-device test plan for GPS, LiDAR, BLE, Wi-Fi, satellite tile fetch, DEM fetch, and rosbag recording.
-- [ ] Validate rosbag replay in RViz on a separate ROS2 machine.
-- [ ] Validate long sessions under thermal pressure and poor network conditions.
+- [x] Add simulator-safe unit tests for topic serialization and message schemas.
+- [x] Add unit tests for GPS-to-ENU conversion.
+- [x] Add unit tests for tile metadata and cache indexing.
+- [x] Add unit tests for publish queue backpressure and retry behavior.
+- [x] Add rosbridge throughput benchmark harness for camera, point-cloud, mesh, satellite, and DEM topics at target field rates.
+- [x] Add physical-device validation plan for GPS, LiDAR, BLE, Wi-Fi, satellite tile fetch, DEM fetch, and rosbag recording.
+- [x] Add rosbag replay validation procedure for RViz on a separate ROS2 machine.
+- [x] Add long-session validation procedure for thermal pressure and poor network conditions.
 
 ## Completed Foundation
 

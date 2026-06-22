@@ -141,7 +141,7 @@ The current ROS topic namespace remains `/reconstructor` for compatibility with 
 
 Transport decision: MapEverything continues to use `rosbridge_suite` over WebSocket in this build. A native binary bridge is not enabled until there is a maintained iOS ROS2/DDS client or companion ROS2 binary receiver and a throughput benchmark showing rosbridge is insufficient. The app publishes its active bridge profile on `/reconstructor/session` and `/reconstructor/status`.
 
-The companion ROS2 custom message package lives in [ros2/reconstructor_msgs](ros2/reconstructor_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
+The companion ROS2 custom message package lives in [ros2/reconstructor_msgs](ros2/reconstructor_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
 
 ### Radio Telemetry Notes
 
@@ -182,6 +182,17 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
 
 Mesh publishing uses `/reconstructor/map` as the RViz-compatible `MarkerArray` fallback and `/reconstructor/mesh_snapshot` as the structured recording topic when the custom message package is available. Camera, point-cloud, and mesh publishers also report payload-size and encoding metrics in session metadata and diagnostics so recorder operators can detect oversized or degraded streams.
+
+### Validation and Throughput Checks
+
+Simulator-safe validation covers ROS2 topic metadata serialization, message schema JSON compatibility, GPS-to-ENU georeferencing, geotile cache indexing, and publish queue backpressure/retry behavior. Field validation for physical sensors, rosbag replay, thermal pressure, and poor-network sessions is documented in [docs/validation-plan.md](docs/validation-plan.md).
+
+Rosbridge throughput can be sized or exercised with the checked-in benchmark harness:
+
+```bash
+python3 tools/rosbridge-throughput-benchmark.py --dry-run --duration 5
+python3 tools/rosbridge-throughput-benchmark.py --url ws://<RECORDER_IP>:9090 --duration 60
+```
 
 ---
 
