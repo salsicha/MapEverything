@@ -58,17 +58,17 @@
 
 ## P2 - Companion ROS2 Package
 
-- [ ] Create a `reconstructor_msgs` ROS2 package for custom message definitions.
-- [ ] Add `MappingSession.msg`.
-- [ ] Add `GPSMetadata.msg`.
-- [ ] Add `RadioObservation.msg`.
-- [ ] Add `GeoTileInfo.msg`.
-- [ ] Add `GeoRasterTile.msg`.
-- [ ] Add `IndoorLocalization.msg`.
-- [ ] Add `MeshSnapshot.msg`.
-- [ ] Add `PublisherStats.msg`.
-- [ ] Add rosbridge and rosbag2 setup instructions for building and recording custom messages.
-- [ ] Add sample RViz config for pose, GPS, point cloud, mesh, radio, satellite, and DEM layers.
+- [x] Create a `reconstructor_msgs` ROS2 package for custom message definitions.
+- [x] Add `MappingSession.msg`.
+- [x] Add `GPSMetadata.msg`.
+- [x] Add `RadioObservation.msg`.
+- [x] Add `GeoTileInfo.msg`.
+- [x] Add `GeoRasterTile.msg`.
+- [x] Add `IndoorLocalization.msg`.
+- [x] Add `MeshSnapshot.msg`.
+- [x] Add `PublisherStats.msg`.
+- [x] Add rosbridge and rosbag2 setup instructions for building and recording custom messages.
+- [x] Add sample RViz config for pose, GPS, point cloud, mesh, radio, satellite, and DEM layers.
 
 ## P2 - Data Model and Persistence
 

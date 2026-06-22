@@ -394,6 +394,39 @@ class ROS2BridgeClient: ObservableObject {
     private func finiteROSNumber(_ value: Float, fallback: Double = -1) -> Double {
         value.isFinite ? Double(value) : fallback
     }
+
+    private func rosJSONString(_ value: Any, fallback: String = "{}") -> String {
+        let normalized = rosJSONCompatible(value)
+        guard JSONSerialization.isValidJSONObject(normalized),
+              let data = try? JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys]),
+              let string = String(data: data, encoding: .utf8) else {
+            return fallback
+        }
+        return string
+    }
+
+    private func rosJSONCompatible(_ value: Any) -> Any {
+        switch value {
+        case let dictionary as [String: Any]:
+            return Dictionary(uniqueKeysWithValues: dictionary.map { key, value in
+                (key, rosJSONCompatible(value))
+            })
+        case let array as [Any]:
+            return array.map { rosJSONCompatible($0) }
+        case let value as Double:
+            return finiteROSNumber(value, fallback: 0)
+        case let value as Float:
+            return finiteROSNumber(value, fallback: 0)
+        case let value as String:
+            return value
+        case let value as Bool:
+            return value
+        case let value as NSNumber:
+            return value
+        default:
+            return String(describing: value)
+        }
+    }
     
     // MARK: - Publishers
     
@@ -966,6 +999,20 @@ class ROS2BridgeClient: ObservableObject {
         let hasSpeedAccuracy = location.speedAccuracy.isFinite && location.speedAccuracy >= 0
         let hasCourse = location.course.isFinite && location.course >= 0
         let hasCourseAccuracy = location.courseAccuracy.isFinite && location.courseAccuracy >= 0
+        let validity: [String: Any] = [
+            "coordinate": location.coordinate.latitude.isFinite && location.coordinate.longitude.isFinite,
+            "horizontal_accuracy": hasHorizontalAccuracy,
+            "vertical_accuracy": hasVerticalAccuracy,
+            "altitude": location.altitude.isFinite,
+            "speed": hasSpeed,
+            "speed_accuracy": hasSpeedAccuracy,
+            "course": hasCourse,
+            "course_accuracy": hasCourseAccuracy
+        ]
+        let source: [String: Any] = [
+            "simulated_by_software": sourceInformation?.isSimulatedBySoftware ?? false,
+            "produced_by_accessory": sourceInformation?.isProducedByAccessory ?? false
+        ]
 
         var msg: [String: Any] = [
             "header": createHeader(frameId: "earth", date: location.timestamp),
@@ -983,26 +1030,14 @@ class ROS2BridgeClient: ObservableObject {
             "timestamp": ISO8601DateFormatter().string(from: location.timestamp),
             "unix_time": location.timestamp.timeIntervalSince1970,
             "age_seconds": abs(location.timestamp.timeIntervalSinceNow),
-            "validity": [
-                "coordinate": location.coordinate.latitude.isFinite && location.coordinate.longitude.isFinite,
-                "horizontal_accuracy": hasHorizontalAccuracy,
-                "vertical_accuracy": hasVerticalAccuracy,
-                "altitude": location.altitude.isFinite,
-                "speed": hasSpeed,
-                "speed_accuracy": hasSpeedAccuracy,
-                "course": hasCourse,
-                "course_accuracy": hasCourseAccuracy
-            ],
-            "source": [
-                "simulated_by_software": sourceInformation?.isSimulatedBySoftware ?? false,
-                "produced_by_accessory": sourceInformation?.isProducedByAccessory ?? false
-            ]
+            "validity": rosJSONString(validity),
+            "source": rosJSONString(source)
         ]
 
         if let georeference = MapGeoreferencer.shared.snapshot(for: location) {
-            msg["georeference"] = georeference.rosMessage
+            msg["georeference"] = rosJSONString(georeference.rosMessage)
         } else {
-            msg["georeference"] = MapGeoreferencer.shared.unavailableMessage
+            msg["georeference"] = rosJSONString(MapGeoreferencer.shared.unavailableMessage)
         }
 
         send(op: "publish", topic: topicRegistry.topic(.gpsMetadata), msg: msg)
@@ -1014,6 +1049,17 @@ class ROS2BridgeClient: ObservableObject {
         let location = sample.location
         let heading = sample.heading
         let sourceInformation = location.sourceInformation
+        let source: [String: Any] = [
+            "simulated_by_software": sourceInformation?.isSimulatedBySoftware ?? false,
+            "produced_by_accessory": sourceInformation?.isProducedByAccessory ?? false,
+            "beacon_ranging_configured": false
+        ]
+        let registrationQuality: [String: Any] = [
+            "indoor": finiteROSNumber(sample.indoorRegistrationQuality, fallback: 0),
+            "indoor_label": sample.indoorQualityLabel,
+            "global": finiteROSNumber(sample.globalRegistrationQuality, fallback: 0),
+            "global_label": sample.globalQualityLabel
+        ]
 
         let msg: [String: Any] = [
             "header": createHeader(frameId: "earth", timestamp: timestamp),
@@ -1034,17 +1080,8 @@ class ROS2BridgeClient: ObservableObject {
             "true_heading": finiteROSNumber(heading?.trueHeading ?? -1),
             "magnetic_heading": finiteROSNumber(heading?.magneticHeading ?? -1),
             "heading_accuracy": finiteROSNumber(heading?.headingAccuracy ?? -1),
-            "source": [
-                "simulated_by_software": sourceInformation?.isSimulatedBySoftware ?? false,
-                "produced_by_accessory": sourceInformation?.isProducedByAccessory ?? false,
-                "beacon_ranging_configured": false
-            ],
-            "registration_quality": [
-                "indoor": finiteROSNumber(sample.indoorRegistrationQuality, fallback: 0),
-                "indoor_label": sample.indoorQualityLabel,
-                "global": finiteROSNumber(sample.globalRegistrationQuality, fallback: 0),
-                "global_label": sample.globalQualityLabel
-            ],
+            "source": rosJSONString(source),
+            "registration_quality": rosJSONString(registrationQuality),
             "timestamp": ISO8601DateFormatter().string(from: sample.timestamp)
         ]
 
@@ -1070,14 +1107,14 @@ class ROS2BridgeClient: ObservableObject {
             "zoom": tile.coordinate.z,
             "tile_x": tile.coordinate.x,
             "tile_y": tile.coordinate.y,
-            "bounds": tile.bounds.rosMessage,
-            "device_location": tile.deviceLocation.rosMessage,
+            "bounds": rosJSONString(tile.bounds.rosMessage),
+            "device_location": rosJSONString(tile.deviceLocation.rosMessage),
             "format": tile.provider.format,
             "mime_type": tile.provider.mimeType,
             "source_url": tile.sourceURL.absoluteString,
             "attribution": tile.provider.attribution,
             "license": tile.provider.license,
-            "source_policy": tile.provider.sourcePolicy.rosMessage,
+            "source_policy": rosJSONString(tile.provider.sourcePolicy.rosMessage),
             "is_cached": tile.isCached
         ]
 
@@ -1107,39 +1144,41 @@ class ROS2BridgeClient: ObservableObject {
                 "default_rate_hz": definition.defaultRateHz.map { String($0) } ?? ""
             ]
         }
+        let app: [String: Any] = [
+            "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
+            "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+        ]
+        let device: [String: Any] = [
+            "name": UIDevice.current.name,
+            "model": UIDevice.current.model,
+            "system_name": UIDevice.current.systemName,
+            "system_version": UIDevice.current.systemVersion,
+            "vendor_id": UIDevice.current.identifierForVendor?.uuidString ?? ""
+        ]
 
-        var msg: [String: Any] = [
+        let msg: [String: Any] = [
             "header": createHeader(frameId: "iphone_camera", timestamp: timestamp),
             "event": snapshot.event,
             "session_id": snapshot.sessionID?.uuidString ?? "",
             "state": snapshot.state,
             "recorder_url": snapshot.recorderURL,
-            "bridge_transport": transportProfile.rosMessage,
+            "bridge_transport": rosJSONString(transportProfile.rosMessage),
             "enabled_streams": snapshot.enabledStreams,
-            "advertised_topics": advertisedTopics,
-            "radio_channels": RadioTelemetryCatalog.shared.rosMessage,
-            "radio_platform_restrictions": RadioTelemetryCatalog.shared.platformRestrictionsMessage,
-            "radio_observation_schema": RadioObservationMessageSchema.shared.rosMessage,
-            "mesh_snapshot_schema": MeshSnapshotMessageSchema.shared.rosMessage,
-            "stream_payload_metrics": streamPayloadMetrics.rosMessage,
-            "optional_geo_provider_configurations": optionalGeoProviderConfigurations.map(\.rosMessage),
-            "current_wifi_telemetry": currentWiFiTelemetryManager.sessionMetadata,
-            "ble_beacon_telemetry": bleBeaconTelemetryManager.sessionMetadata,
-            "network_path_diagnostics": networkPathDiagnosticsManager.sessionMetadata,
-            "recorder_endpoint_probe": recorderEndpointProbeManager.sessionMetadata,
+            "advertised_topics": rosJSONString(advertisedTopics, fallback: "[]"),
+            "radio_channels": rosJSONString(RadioTelemetryCatalog.shared.rosMessage),
+            "radio_platform_restrictions": rosJSONString(RadioTelemetryCatalog.shared.platformRestrictionsMessage),
+            "radio_observation_schema": rosJSONString(RadioObservationMessageSchema.shared.rosMessage),
+            "mesh_snapshot_schema": rosJSONString(MeshSnapshotMessageSchema.shared.rosMessage),
+            "stream_payload_metrics": rosJSONString(streamPayloadMetrics.rosMessage),
+            "optional_geo_provider_configurations": rosJSONString(optionalGeoProviderConfigurations.map(\.rosMessage), fallback: "[]"),
+            "current_wifi_telemetry": rosJSONString(currentWiFiTelemetryManager.sessionMetadata),
+            "ble_beacon_telemetry": rosJSONString(bleBeaconTelemetryManager.sessionMetadata),
+            "network_path_diagnostics": rosJSONString(networkPathDiagnosticsManager.sessionMetadata),
+            "recorder_endpoint_probe": rosJSONString(recorderEndpointProbeManager.sessionMetadata),
             "started_at": iso8601String(snapshot.startedAt),
             "ended_at": iso8601String(snapshot.endedAt),
-            "app": [
-                "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
-                "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-            ],
-            "device": [
-                "name": UIDevice.current.name,
-                "model": UIDevice.current.model,
-                "system_name": UIDevice.current.systemName,
-                "system_version": UIDevice.current.systemVersion,
-                "vendor_id": UIDevice.current.identifierForVendor?.uuidString ?? ""
-            ],
+            "app": rosJSONString(app),
+            "device": rosJSONString(device),
             "publish_queue": [
                 "capacity": queueStats.capacity,
                 "depth": queueStats.depth,
@@ -1149,12 +1188,9 @@ class ROS2BridgeClient: ObservableObject {
                 "retried_messages": queueStats.retriedMessages,
                 "failed_messages": queueStats.failedMessages,
                 "last_error": queueStats.lastError ?? ""
-            ]
+            ],
+            "last_error": snapshot.lastError ?? ""
         ]
-
-        if let lastError = snapshot.lastError {
-            msg["last_error"] = lastError
-        }
 
         send(op: "publish", topic: topicRegistry.topic(.session), msg: msg)
     }

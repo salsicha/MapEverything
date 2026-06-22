@@ -1,0 +1,85 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Plane: XY
+      Reference Frame: <Fixed Frame>
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Pose
+      Topic:
+        Value: /reconstructor/pose
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: Odometry
+      Topic:
+        Value: /reconstructor/odom
+    - Class: rviz_default_plugins/NavSat
+      Enabled: true
+      Name: GPS Fix
+      Topic:
+        Value: /reconstructor/gps/fix
+    - Class: rviz_default_plugins/PointCloud2
+      Enabled: true
+      Name: Point Cloud
+      Size (m): 0.02
+      Style: Points
+      Topic:
+        Value: /reconstructor/pointcloud
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Mesh Markers
+      Topic:
+        Value: /reconstructor/map
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Camera Image
+      Transport Hint: compressed
+      Topic:
+        Value: /reconstructor/camera/image/compressed
+    - Class: rviz_default_plugins/Image
+      Enabled: false
+      Name: Satellite Image
+      Transport Hint: compressed
+      Topic:
+        Value: /reconstructor/satellite/image/compressed
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: false
+      Name: Radio Observation Overlay
+      Topic:
+        Value: /reconstructor/radio/markers
+    - Class: rviz_default_plugins/Image
+      Enabled: false
+      Name: DEM Raster Overlay
+      Topic:
+        Value: /reconstructor/dem/image
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: false
+      Name: DEM Terrain Markers
+      Topic:
+        Value: /reconstructor/dem/markers
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Value: true
+Window Geometry:
+  Height: 900
+  Width: 1440

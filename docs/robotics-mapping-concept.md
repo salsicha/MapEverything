@@ -138,7 +138,7 @@ Recommended output:
 | `/reconstructor/gps/fix` | `sensor_msgs/msg/NavSatFix` | 1-10 Hz | GPS position and accuracy. |
 | `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 1-10 Hz | Camera frames for context and replay. |
 | `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | 1-10 Hz | Downsampled LiDAR or fused point cloud. |
-| `/reconstructor/mesh_markers` | `visualization_msgs/msg/MarkerArray` | 0.2-2 Hz | RViz-friendly mesh and semantic objects. |
+| `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | 0.2-2 Hz | RViz-friendly mesh and semantic objects. |
 | `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | 0.5-5 Hz | Wi-Fi, BLE, link, or external radio measurements. |
 | `/reconstructor/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Satellite imagery tile payloads. |
 | `/reconstructor/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery georeference metadata. |
@@ -148,20 +148,24 @@ Recommended output:
 
 ## Custom ROS Message Package
 
-A companion `reconstructor_msgs` package should be created for data that has no clean standard ROS representation.
+The companion `reconstructor_msgs` package lives at `ros2/reconstructor_msgs`.
+Build it in the recorder colcon workspace before launching rosbridge, rosbag2,
+or RViz. Setup details are in `docs/ros2-companion-package.md`.
 
 Initial messages:
 
 - `MappingSession.msg`
+- `GPSMetadata.msg`
 - `RadioObservation.msg`
 - `GeoTileInfo.msg`
 - `GeoRasterTile.msg`
+- `IndoorLocalization.msg`
 - `MeshSnapshot.msg`
 - `PublisherStats.msg`
 
 `RadioObservation.msg` is schema version 1 and uses `std_msgs/Header` plus optional `geometry_msgs/Point` map position fields. The stable fields include session ID, channel ID, observation kind, source API, source ID, radio type, optional geodetic position, Wi-Fi SSID/BSSID/normalized signal strength, BLE peripheral/service/RSSI fields, Network.framework path fields, recorder probe RTT/throughput fields, external-adapter frequency/RSSI/SNR/quality fields, success/error, and `metadata_json` for channel-specific payloads. Unset numeric fields use `0.0` for rosbridge JSON compatibility; unset strings and arrays are empty.
 
-The recorder device must build this package before recording custom topics with `rosbag2`.
+The recorder device must build this package before recording custom topics with `rosbag2`. The starter RViz configuration is `ros2/rviz/mapeverything.rviz`; it covers native pose, GPS, point-cloud, mesh, camera, and satellite image displays, with disabled placeholder layers for radio and DEM converter outputs.
 
 ## iOS Architecture Plan
 

@@ -128,6 +128,8 @@ The current ROS topic namespace remains `/reconstructor` for compatibility with 
 
 Transport decision: MapEverything continues to use `rosbridge_suite` over WebSocket in this build. A native binary bridge is not enabled until there is a maintained iOS ROS2/DDS client or companion ROS2 binary receiver and a throughput benchmark showing rosbridge is insufficient. The app publishes its active bridge profile on `/reconstructor/session` and `/reconstructor/status`.
 
+The companion ROS2 custom message package lives in [ros2/reconstructor_msgs](ros2/reconstructor_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
+
 ### Radio Telemetry Notes
 
 See [docs/ios-radio-restrictions.md](docs/ios-radio-restrictions.md) for operator-facing iOS radio API constraints and external-adapter guidance.
@@ -150,12 +152,21 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | :--- | :--- | :--- | :--- |
 | `/tf` | `tf2_msgs/msg/TFMessage` | ~10 Hz | Live spatial coordinate frames mapping the relative transform from the mobile `iphone_camera` frame to the world origin `map` frame. |
 | `/reconstructor/pose` | `geometry_msgs/msg/PoseStamped` | ~10 Hz | Standard 6-DOF SLAM position and orientation tracking. |
+| `/reconstructor/odom` | `nav_msgs/msg/Odometry` | ~10 Hz | Odometry-style pose for robotics consumers. |
 | `/reconstructor/imu` | `sensor_msgs/msg/Imu` | 100 Hz | High-fidelity IMU data containing orientation quaternions, angular velocities, and linear accelerations (including gravity). |
+| `/reconstructor/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
+| `/reconstructor/gps/metadata` | `reconstructor_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
 | `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~10 Hz | Point cloud payloads downsampled to a sparse 10cm grid. Color values are packed into a single 32-bit integer (`rgb`). |
 | `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | ~10 Hz | JPEG-compressed image stream rotated to match current mobile screen orientation. |
 | `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |
 | `/reconstructor/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with truncation and payload-size metadata. |
 | `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
+| `/reconstructor/indoor_localization` | `reconstructor_msgs/msg/IndoorLocalization` | ~1 Hz | Indoor-aware Core Location sample with floor, heading, and registration quality metadata. |
+| `/reconstructor/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Compressed satellite imagery tile payload. |
+| `/reconstructor/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery provider, bounds, CRS, attribution, and source policy metadata. |
+| `/reconstructor/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM raster payload with bounds, CRS, attribution, and source policy metadata. |
+| `/reconstructor/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, and recorder configuration. |
+| `/reconstructor/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
 
 Mesh publishing uses `/reconstructor/map` as the RViz-compatible `MarkerArray` fallback and `/reconstructor/mesh_snapshot` as the structured recording topic when the custom message package is available. Camera, point-cloud, and mesh publishers also report payload-size and encoding metrics in session metadata and diagnostics so recorder operators can detect oversized or degraded streams.
 
@@ -163,7 +174,20 @@ Mesh publishing uses `/reconstructor/map` as the RViz-compatible `MarkerArray` f
 
 ### Step-by-Step Remote ROS2 Workstation Configuration
 
-#### Step 1: Install the WebSocket Bridge Server
+#### Step 1: Build the Custom Message Package
+
+Build [ros2/reconstructor_msgs](ros2/reconstructor_msgs) in a colcon workspace before launching rosbridge:
+
+```bash
+mkdir -p ~/mapeverything_ws/src
+cp -R ros2/reconstructor_msgs ~/mapeverything_ws/src/
+cd ~/mapeverything_ws
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --packages-select reconstructor_msgs
+source install/setup.bash
+```
+
+#### Step 2: Install the WebSocket Bridge Server
 On your remote Linux workstation or robot computer running **ROS2 (Humble or Iron)**, install the `rosbridge-suite`:
 
 ```bash
@@ -171,17 +195,18 @@ sudo apt-get update
 sudo apt-get install ros-$ROS_DISTRO-rosbridge-suite
 ```
 
-#### Step 2: Launch the WebSocket Server Node
+#### Step 3: Launch the WebSocket Server Node
 Launch the rosbridge WebSocket node on your workstation. By default, it binds to port `9090`:
 
 ```bash
+source ~/mapeverything_ws/install/setup.bash
 ros2 launch rosbridge_server rosbridge_websocket_launch.xml
 ```
 
 You should see log output confirming that the websocket server is running:
 `[websocket_node-1] registered class rosbridge_library.capabilities.advertise.Advertise`
 
-#### Step 3: Connect the iOS Device
+#### Step 4: Connect the iOS Device
 1. Find your workstation's local IP address (e.g., by running `hostname -I` or `ifconfig` in the terminal).
 2. Connect both the iOS device and your workstation to the **same Wi-Fi network**.
 3. Open **MapEverything** on your iPhone or iPad.
@@ -197,6 +222,12 @@ On your workstation, launch `rviz2` in a new terminal window:
 
 ```bash
 rviz2
+```
+
+Or load the checked-in starter configuration:
+
+```bash
+rviz2 -d ros2/rviz/mapeverything.rviz
 ```
 
 Configure your RViz2 workspace using the settings below:
