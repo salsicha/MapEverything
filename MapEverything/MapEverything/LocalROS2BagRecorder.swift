@@ -113,6 +113,71 @@ struct LocalROS2BagRecorderStats: Equatable {
     }
 }
 
+struct LocalROS2BagFile: Identifiable, Hashable {
+    enum Kind: String {
+        case metadata
+        case sqliteChunk
+        case other
+
+        var displayName: String {
+            switch self {
+            case .metadata: return "Metadata"
+            case .sqliteChunk: return "SQLite Chunk"
+            case .other: return "File"
+            }
+        }
+
+        var iconName: String {
+            switch self {
+            case .metadata: return "doc.text"
+            case .sqliteChunk: return "cylinder.split.1x2"
+            case .other: return "doc"
+            }
+        }
+    }
+
+    let url: URL
+    let relativePath: String
+    let kind: Kind
+    let byteCount: Int
+    let modifiedAt: Date?
+
+    var id: String {
+        url.path
+    }
+
+    var name: String {
+        url.lastPathComponent
+    }
+
+    var byteCountLabel: String {
+        ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
+    }
+}
+
+struct LocalROS2BagSession: Identifiable, Hashable {
+    let directoryURL: URL
+    let files: [LocalROS2BagFile]
+    let byteCount: Int
+    let modifiedAt: Date?
+
+    var id: String {
+        directoryURL.path
+    }
+
+    var name: String {
+        directoryURL.lastPathComponent
+    }
+
+    var chunkCount: Int {
+        files.filter { $0.kind == .sqliteChunk }.count
+    }
+
+    var byteCountLabel: String {
+        ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
+    }
+}
+
 final class LocalROS2BagRecorder: ObservableObject {
     static let shared = LocalROS2BagRecorder()
     static let serializationFormat = "rosbridge_json"
@@ -246,6 +311,40 @@ final class LocalROS2BagRecorder: ObservableObject {
         queue.sync {}
     }
 
+    func listBagSessions() throws -> [LocalROS2BagSession] {
+        let rootURL = try storageRootURL()
+        guard fileManager.fileExists(atPath: rootURL.path) else { return [] }
+
+        let directoryURLs = try fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        return try directoryURLs.compactMap { url in
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey])
+            guard values.isDirectory == true else { return nil }
+            return try bagSession(directoryURL: url)
+        }
+        .sorted { lhs, rhs in
+            (lhs.modifiedAt ?? .distantPast) > (rhs.modifiedAt ?? .distantPast)
+        }
+    }
+
+    func deleteBagSession(_ session: LocalROS2BagSession) throws {
+        if stats.isRecording,
+           let activeURL = stats.bagDirectoryURL,
+           activeURL.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path {
+            throw NSError(
+                domain: "LocalROS2BagRecorder",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Stop recording before deleting the active local bag."]
+            )
+        }
+
+        try fileManager.removeItem(at: session.directoryURL)
+    }
+
     func recordPublishedTopic(topic: String, messageType: String, msg: [String: Any]) {
         guard acceptsRecords else { return }
 
@@ -312,6 +411,48 @@ final class LocalROS2BagRecorder: ObservableObject {
             throw NSError(domain: "LocalROS2BagRecorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "Documents directory unavailable"])
         }
         return documentsURL.appendingPathComponent("ROS2Bags", isDirectory: true)
+    }
+
+    private func bagSession(directoryURL: URL) throws -> LocalROS2BagSession {
+        let fileURLs = try fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        .filter { url in
+            url.pathExtension == "db3" || url.lastPathComponent == "metadata.yaml"
+        }
+        .sorted { lhs, rhs in
+            lhs.lastPathComponent < rhs.lastPathComponent
+        }
+
+        let files = try fileURLs.map { url in
+            let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let kind: LocalROS2BagFile.Kind
+            if url.lastPathComponent == "metadata.yaml" {
+                kind = .metadata
+            } else if url.pathExtension == "db3" {
+                kind = .sqliteChunk
+            } else {
+                kind = .other
+            }
+
+            return LocalROS2BagFile(
+                url: url,
+                relativePath: "\(directoryURL.lastPathComponent)/\(url.lastPathComponent)",
+                kind: kind,
+                byteCount: values.fileSize ?? 0,
+                modifiedAt: values.contentModificationDate
+            )
+        }
+
+        let directoryValues = try directoryURL.resourceValues(forKeys: [.contentModificationDateKey])
+        return LocalROS2BagSession(
+            directoryURL: directoryURL,
+            files: files,
+            byteCount: files.reduce(0) { $0 + $1.byteCount },
+            modifiedAt: directoryValues.contentModificationDate ?? files.compactMap(\.modifiedAt).max()
+        )
     }
 
     private func bagName(sessionID: UUID?, date: Date) -> String {

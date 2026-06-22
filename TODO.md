@@ -77,6 +77,7 @@
 - [x] Add `GeoTileModel` for satellite and DEM cache records.
 - [x] Add transient radio observation buffering for network loss.
 - [x] Add off-by-default local SQLite bag storage for chunked on-device ROS2 topic capture.
+- [x] Add local bag browser UI for listing, deleting, and sharing on-device bag files.
 - [x] Add migration tests for existing `EnvironmentModel` data.
 - [x] Add cleanup logic for orphaned point-cloud, mesh, imagery, DEM, and session files.
 

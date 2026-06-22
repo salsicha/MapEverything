@@ -842,6 +842,8 @@ struct MapEverythingTests {
         let dbFiles = try fileManager.contentsOfDirectory(at: bagDirectory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "db3" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let sessions = try recorder.listBagSessions()
+        let listedSession = try #require(sessions.first)
 
         #expect(dbFiles.count == 2)
         #expect(metadata.contains("storage_identifier: sqlite3"))
@@ -859,6 +861,13 @@ struct MapEverythingTests {
 
         #expect(totalMessages == 2)
         #expect(topicCount == 2)
+        #expect(sessions.count == 1)
+        #expect(listedSession.chunkCount == 2)
+        #expect(listedSession.files.contains { $0.name == "metadata.yaml" && $0.kind == .metadata })
+        #expect(listedSession.files.contains { $0.name == "mapeverything_0.db3" && $0.kind == .sqliteChunk })
+
+        try recorder.deleteBagSession(listedSession)
+        #expect(try recorder.listBagSessions().isEmpty)
     }
 
     @Test("Expanded SwiftData schema preserves EnvironmentModel and stores mapping records")

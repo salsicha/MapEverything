@@ -802,6 +802,7 @@ struct SettingsView: View {
     @AppStorage("ros2WebSocketURL") private var ros2WebSocketURL: String = "ws://192.168.1.100:9090"
     @AppStorage(LocalROS2BagRecorderConfiguration.enabledStorageKey) private var localROS2BagStorageEnabled: Bool = false
     @AppStorage(LocalROS2BagRecorderConfiguration.chunkSizeMBStorageKey) private var localROS2BagChunkSizeMB: Int = LocalROS2BagRecorderConfiguration.defaultChunkSizeMB
+    @State private var showLocalBagBrowser = false
     @AppStorage("bleBeaconServiceUUIDs") private var bleBeaconServiceUUIDs: String = ""
     @AppStorage("bleBeaconPeripheralIDs") private var bleBeaconPeripheralIDs: String = ""
     @AppStorage("bleBeaconLocalNamePrefixes") private var bleBeaconLocalNamePrefixes: String = ""
@@ -969,6 +970,11 @@ struct SettingsView: View {
                 }
                 Section(header: Text("Local ROS2 Bag Storage")) {
                     Toggle("Save Local SQLite Bag", isOn: $localROS2BagStorageEnabled)
+                    Button {
+                        showLocalBagBrowser = true
+                    } label: {
+                        Label("Manage Local Bags", systemImage: "externaldrive")
+                    }
                     if localROS2BagStorageEnabled {
                         Stepper(
                             "Chunk Size: \(localROS2BagChunkSizeMB) MB",
@@ -991,6 +997,9 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .sheet(isPresented: $showLocalBagBrowser) {
+                LocalROS2BagBrowserView()
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") {
@@ -1046,6 +1055,188 @@ struct SettingsView: View {
         let credentialState = hasCredentialMaterial ? "credentials present" : "credentials missing"
         let recordingState = recordingAllowed ? "recording allowed" : "recording disabled"
         return "\(providerID.credentialLabel); \(credentialState); \(recordingState)"
+    }
+}
+
+struct LocalROS2BagBrowserView: View {
+    @ObservedObject private var recorder = LocalROS2BagRecorder.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var sessions: [LocalROS2BagSession] = []
+    @State private var pendingDeletion: LocalROS2BagSession?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if sessions.isEmpty {
+                    ContentUnavailableView(
+                        "No Local Bags",
+                        systemImage: "externaldrive",
+                        description: Text("Recorded local bags appear here.")
+                    )
+                } else {
+                    ForEach(sessions) { session in
+                        NavigationLink {
+                            LocalROS2BagSessionDetailView(
+                                session: session,
+                                isActive: isActive(session)
+                            )
+                        } label: {
+                            localBagRow(session)
+                        }
+                        .swipeActions {
+                            if !isActive(session) {
+                                Button(role: .destructive) {
+                                    pendingDeletion = session
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Local Bags")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        reload()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .accessibilityLabel("Refresh")
+                }
+            }
+            .onAppear(perform: reload)
+            .refreshable {
+                reload()
+            }
+            .alert("Delete Local Bag?", isPresented: Binding<Bool>(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            )) {
+                Button("Delete", role: .destructive) {
+                    deletePendingSession()
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingDeletion = nil
+                }
+            }
+            .alert("Local Bag Error", isPresented: Binding<Bool>(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(errorMessage ?? "")
+            }
+        }
+    }
+
+    private func localBagRow(_ session: LocalROS2BagSession) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(session.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                if isActive(session) {
+                    Image(systemName: "record.circle.fill")
+                        .foregroundColor(.red)
+                }
+            }
+            HStack(spacing: 10) {
+                Label("\(session.chunkCount)", systemImage: "cylinder.split.1x2")
+                Label(session.byteCountLabel, systemImage: "doc")
+                if let modifiedAt = session.modifiedAt {
+                    Text(modifiedAt, style: .date)
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+        }
+    }
+
+    private func reload() {
+        do {
+            sessions = try recorder.listBagSessions()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func deletePendingSession() {
+        guard let pendingDeletion else { return }
+        do {
+            try recorder.deleteBagSession(pendingDeletion)
+            self.pendingDeletion = nil
+            reload()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func isActive(_ session: LocalROS2BagSession) -> Bool {
+        guard recorder.stats.isRecording,
+              let activeURL = recorder.stats.bagDirectoryURL else {
+            return false
+        }
+
+        return activeURL.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path
+    }
+}
+
+struct LocalROS2BagSessionDetailView: View {
+    let session: LocalROS2BagSession
+    let isActive: Bool
+
+    var body: some View {
+        List {
+            Section("Bag") {
+                LabeledContent("Files", value: "\(session.files.count)")
+                LabeledContent("Chunks", value: "\(session.chunkCount)")
+                LabeledContent("Size", value: session.byteCountLabel)
+                if let modifiedAt = session.modifiedAt {
+                    LabeledContent("Modified") {
+                        Text(modifiedAt, style: .date)
+                    }
+                }
+                if isActive {
+                    Label("Recording", systemImage: "record.circle.fill")
+                        .foregroundColor(.red)
+                }
+            }
+
+            Section("Files") {
+                ForEach(session.files) { file in
+                    HStack(spacing: 12) {
+                        Image(systemName: file.kind.iconName)
+                            .foregroundColor(.blue)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(file.name)
+                                .font(.body)
+                                .lineLimit(1)
+                            Text("\(file.kind.displayName) • \(file.byteCountLabel)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        ShareLink(item: file.url) {
+                            Image(systemName: "square.and.arrow.up")
+                                .frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            }
+        }
+        .navigationTitle(session.name)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
