@@ -303,6 +303,71 @@ struct MapEverythingTests {
         #expect(JSONSerialization.isValidJSONObject(snapshot.rosMessage))
     }
 
+    @Test("Adaptive mapping policy prefers RoomPlan for strong indoor semantics")
+    func testAdaptiveMappingPolicyPrefersRoomPlanIndoors() {
+        let policy = AdaptiveMappingModePolicy()
+        let recommendation = policy.recommendation(
+            for: AdaptiveMappingModeInput(
+                roomPlanAvailable: true,
+                roomPlanObjectCount: 8,
+                indoorRegistrationQuality: 0.92,
+                globalRegistrationQuality: 0.25,
+                gpsHorizontalAccuracyMeters: 42,
+                lidarDepthConfidence: 0.7,
+                depthAnythingAvailable: true
+            )
+        )
+
+        #expect(recommendation.mode == .roomPlanParametric)
+        #expect(recommendation.roomPlanScore > recommendation.outdoorScore)
+        #expect(recommendation.reasons.contains(.roomPlanSemanticsStrong))
+        #expect(recommendation.reasons.contains(.indoorRegistrationStrong))
+        #expect(recommendation.metadata["active_mapping_mode"] == AdaptiveMappingMode.roomPlanParametric.rawValue)
+    }
+
+    @Test("Adaptive mapping policy prefers LiDAR Depth Anything for outdoor context")
+    func testAdaptiveMappingPolicyPrefersOutdoorDepthAnything() {
+        let policy = AdaptiveMappingModePolicy()
+        let recommendation = policy.recommendation(
+            for: AdaptiveMappingModeInput(
+                roomPlanAvailable: true,
+                roomPlanObjectCount: 0,
+                indoorRegistrationQuality: 0.1,
+                globalRegistrationQuality: 0.94,
+                gpsHorizontalAccuracyMeters: 4,
+                lidarDepthConfidence: 0.88,
+                depthAnythingAvailable: true
+            )
+        )
+
+        #expect(recommendation.mode == .lidarDepthAnythingOutdoor)
+        #expect(recommendation.outdoorScore > recommendation.roomPlanScore)
+        #expect(recommendation.reasons.contains(.outdoorGPSStrong))
+        #expect(recommendation.reasons.contains(.depthAnythingAvailable))
+    }
+
+    @Test("Adaptive mapping policy honors operator override")
+    func testAdaptiveMappingPolicyHonorsOperatorOverride() {
+        let policy = AdaptiveMappingModePolicy()
+        let recommendation = policy.recommendation(
+            for: AdaptiveMappingModeInput(
+                roomPlanAvailable: true,
+                roomPlanObjectCount: 10,
+                indoorRegistrationQuality: 1.0,
+                globalRegistrationQuality: 0.1,
+                gpsHorizontalAccuracyMeters: 80,
+                lidarDepthConfidence: 0.3,
+                depthAnythingAvailable: false,
+                operatorOverride: .forceLiDARDepthAnything
+            )
+        )
+
+        #expect(recommendation.mode == .lidarDepthAnythingOutdoor)
+        #expect(recommendation.confidence == 1.0)
+        #expect(recommendation.reasons.first == .operatorForcedLiDARDepthAnything)
+        #expect(recommendation.metadata["adaptive_mapping_operator_override"] == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
+    }
+
     @Test("Default geo tile providers expose source policy metadata")
     func testGeoTileProviderSourcePolicyMetadata() throws {
         let satellite = GeoTileProvider.defaultSatellite

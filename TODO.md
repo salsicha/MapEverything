@@ -81,7 +81,7 @@
 
 ## P2 - Adaptive Indoor/Outdoor Mapping
 
-- [ ] Add an adaptive mapping-mode policy that scores RoomPlan suitability, outdoor GPS context, LiDAR depth confidence, Depth Anything availability, thermal pressure, and operator override state.
+- [x] Add an adaptive mapping-mode policy that scores RoomPlan suitability, outdoor GPS context, LiDAR depth confidence, Depth Anything availability, thermal pressure, and operator override state.
 - [ ] Prefer parametric RoomPlan capture for enclosed interiors and switch to LiDAR + Depth Anything outdoor mapping with GPS, satellite imagery, and DEM context when room semantics are not reliable.
 - [ ] Publish active mapping mode, confidence, reason codes, and override state in `/reconstructor/session` and `/reconstructor/status`.
 

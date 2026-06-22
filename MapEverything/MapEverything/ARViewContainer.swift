@@ -186,6 +186,8 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     
     private let pointManager = PointCloudManager()
     private let pointCloudProcessor = PointCloudProcessor()
+    private let adaptiveMappingPolicy = AdaptiveMappingModePolicy()
+    private var latestAdaptiveMappingRecommendation: AdaptiveMappingModeRecommendation?
     private lazy var depthAnythingProcessor: DepthAnythingProcessor? = DepthAnythingProcessor()
     private var lastEnhancedFrameTime: TimeInterval = 0
     private let enhancedFrameInterval: TimeInterval = 0.5 // Run Depth Anything at ~2 fps
@@ -578,6 +580,34 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         depthAnythingProcessor != nil
     }
 
+    private func evaluateAdaptiveMappingPolicy(frame: ARFrame) {
+        let localization = IndoorLocalizationManager.shared
+        let depthConfidence: Double
+        if frame.smoothedSceneDepth != nil {
+            depthConfidence = 1.0
+        } else if frame.sceneDepth != nil {
+            depthConfidence = 0.75
+        } else {
+            depthConfidence = 0.15
+        }
+
+        let horizontalAccuracy = localization.lastHorizontalAccuracy >= 0
+            ? localization.lastHorizontalAccuracy
+            : nil
+        let input = AdaptiveMappingModeInput(
+            roomPlanAvailable: RoomCaptureSession.isSupported,
+            roomPlanObjectCount: capturedRoom.map { $0.walls.count + $0.doors.count + $0.windows.count + $0.objects.count } ?? 0,
+            indoorRegistrationQuality: localization.lastIndoorRegistrationQuality,
+            globalRegistrationQuality: localization.lastGlobalRegistrationQuality,
+            gpsHorizontalAccuracyMeters: horizontalAccuracy,
+            lidarDepthConfidence: depthConfidence,
+            depthAnythingAvailable: isDepthAnythingModelAvailable,
+            thermalState: ProcessInfo.processInfo.thermalState,
+            operatorOverride: .automatic
+        )
+        latestAdaptiveMappingRecommendation = adaptiveMappingPolicy.recommendation(for: input)
+    }
+
     @MainActor
     private func shouldUseFusedMappingDepth() -> Bool {
         depthAnythingProcessor != nil
@@ -891,6 +921,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         guard isScanning else { return }
 
         MapGeoreferencer.shared.updateMapPose(frame.camera.transform, timestamp: frame.timestamp)
+        evaluateAdaptiveMappingPolicy(frame: frame)
         
         if ROS2BridgeClient.shared.isConnected {
             ROS2BridgeClient.shared.publishPose(frame.camera.transform, timestamp: frame.timestamp)
