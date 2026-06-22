@@ -201,6 +201,106 @@ struct MapEverythingTests {
         #expect(JSONSerialization.isValidJSONObject(message))
     }
 
+    @Test("Mesh publishing advertises MarkerArray fallback and structured MeshSnapshot")
+    func testMeshPublishingTopicsAndSchema() throws {
+        let registry = ROS2TopicRegistry()
+        let markerTopic = registry.definition(.meshMarkers)
+        let snapshotTopic = registry.definition(.meshSnapshot)
+        let advertisedIDs = Set(registry.advertisedTopics().map(\.id))
+        let schema = MeshSnapshotMessageSchema.shared
+
+        #expect(markerTopic.topic == "/reconstructor/map")
+        #expect(markerTopic.messageType == "visualization_msgs/msg/MarkerArray")
+        #expect(snapshotTopic.topic == schema.topic)
+        #expect(snapshotTopic.messageType == schema.messageType)
+        #expect(advertisedIDs.contains(.meshMarkers))
+        #expect(advertisedIDs.contains(.meshSnapshot))
+        #expect(schema.messageDefinition.contains("geometry_msgs/Point[] vertices"))
+        #expect(schema.messageDefinition.contains("uint32[] triangle_indices"))
+        #expect(schema.fields.contains { $0.name == "published_payload_bytes" })
+        #expect(JSONSerialization.isValidJSONObject(schema.rosMessage))
+        _ = try JSONSerialization.data(withJSONObject: schema.rosMessage, options: [])
+    }
+
+    @Test("Large MeshSnapshot messages are triangle-aligned and payload limited")
+    func testMeshSnapshotBuilderFitsLargePayloads() throws {
+        var trianglePoints: [[String: Float]] = []
+        trianglePoints.reserveCapacity(9_000)
+        for index in 0..<9_000 {
+            trianglePoints.append([
+                "x": Float(index) * 0.01,
+                "y": Float(index % 97) * 0.02,
+                "z": Float(index % 31) * 0.03
+            ])
+        }
+        let header: [String: Any] = [
+            "stamp": ["sec": 1, "nanosec": 2],
+            "frame_id": "map"
+        ]
+        let maxPayloadBytes = 16_000
+        let message = MeshSnapshotMessageBuilder.makeTriangleListMessage(
+            header: header,
+            snapshotID: "stress-snapshot",
+            source: "unit_test",
+            frameID: "map",
+            anchorCount: 8,
+            trianglePoints: trianglePoints,
+            maxPayloadBytes: maxPayloadBytes,
+            metadata: ["test": "large_mesh_snapshot"]
+        )
+
+        let vertices = try #require(message["vertices"] as? [[String: Double]])
+        let indices = try #require(message["triangle_indices"] as? [Int])
+        let encodedBytes = try #require(
+            MeshSnapshotMessageBuilder.encodedPublishPayloadByteCount(
+                topic: MeshSnapshotMessageSchema.shared.topic,
+                msg: message
+            )
+        )
+
+        #expect(message["is_truncated"] as? Bool == true)
+        #expect(vertices.count % 3 == 0)
+        #expect(indices.count == vertices.count)
+        #expect(message["original_vertex_count"] as? Int == trianglePoints.count)
+        #expect((message["published_payload_bytes"] as? Int ?? 0) <= maxPayloadBytes)
+        #expect(encodedBytes <= maxPayloadBytes)
+        #expect(JSONSerialization.isValidJSONObject(message))
+        _ = try JSONSerialization.data(withJSONObject: message, options: [])
+    }
+
+    @Test("Payload metrics cover compressed camera and long-running point-cloud sessions")
+    func testStreamPayloadMetricsAccumulateLongRunningSessions() {
+        var camera = StreamPayloadMetricAccumulator(streamID: MappingSensorStream.camera.rawValue)
+        camera.record(
+            originalBytes: 1_228_800,
+            encodedBytes: 92_000,
+            compression: "jpeg_q0.4_base64",
+            recordedAt: Date(timeIntervalSince1970: 10)
+        )
+
+        #expect(camera.snapshot.messageCount == 1)
+        #expect(camera.snapshot.compressionRatio < 1.0)
+        #expect(camera.snapshot.lastCompression == "jpeg_q0.4_base64")
+
+        var pointCloud = StreamPayloadMetricAccumulator(streamID: MappingSensorStream.pointCloud.rawValue)
+        for index in 0..<10_000 {
+            pointCloud.record(
+                originalBytes: 16_000,
+                encodedBytes: 21_336,
+                compression: "pointcloud2_binary_base64",
+                recordedAt: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+        }
+
+        let snapshot = pointCloud.snapshot
+        #expect(snapshot.messageCount == 10_000)
+        #expect(snapshot.originalBytesTotal == 160_000_000)
+        #expect(snapshot.encodedBytesTotal == 213_360_000)
+        #expect(snapshot.maxEncodedBytes == 21_336)
+        #expect(snapshot.compressionRatio > 1.0)
+        #expect(JSONSerialization.isValidJSONObject(snapshot.rosMessage))
+    }
+
     @Test("Default geo tile providers expose source policy metadata")
     func testGeoTileProviderSourcePolicyMetadata() throws {
         let satellite = GeoTileProvider.defaultSatellite

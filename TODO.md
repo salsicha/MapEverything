@@ -51,10 +51,10 @@
 
 ## P1 - Mesh, Point Cloud, and Camera Publishing
 
-- [ ] Add mesh publishing fallback through `visualization_msgs/MarkerArray`.
-- [ ] Define `reconstructor_msgs/MeshSnapshot` for structured mesh recording.
-- [ ] Add compression and payload-size metrics for camera and point-cloud streams.
-- [ ] Add stress tests for large mesh snapshots and long-running point-cloud sessions.
+- [x] Add mesh publishing fallback through `visualization_msgs/MarkerArray`.
+- [x] Define `reconstructor_msgs/MeshSnapshot` for structured mesh recording.
+- [x] Add compression and payload-size metrics for camera and point-cloud streams.
+- [x] Add stress tests for large mesh snapshots and long-running point-cloud sessions.
 
 ## P2 - Companion ROS2 Package
 

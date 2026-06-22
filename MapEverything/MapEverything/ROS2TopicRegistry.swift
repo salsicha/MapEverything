@@ -10,6 +10,7 @@ enum ROS2TopicID: String, CaseIterable, Codable, Hashable {
     case pointCloud
     case imu
     case meshMarkers
+    case meshSnapshot
     case tf
     case cameraCompressed
     case gpsFix
@@ -144,6 +145,14 @@ final class ROS2TopicRegistry {
             stream: .mesh,
             topic: "/reconstructor/map",
             messageType: "visualization_msgs/msg/MarkerArray",
+            defaultRateHz: 0.5,
+            isImplemented: true
+        ),
+        ROS2TopicDefinition(
+            id: .meshSnapshot,
+            stream: .mesh,
+            topic: MeshSnapshotMessageSchema.shared.topic,
+            messageType: MeshSnapshotMessageSchema.shared.messageType,
             defaultRateHz: 0.5,
             isImplemented: true
         ),

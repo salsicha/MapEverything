@@ -154,6 +154,7 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~10 Hz | Point cloud payloads downsampled to a sparse 10cm grid. Color values are packed into a single 32-bit integer (`rgb`). |
 | `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | ~10 Hz | JPEG-compressed image stream rotated to match current mobile screen orientation. |
 | `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |
+| `/reconstructor/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with truncation and payload-size metadata. |
 | `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
 
 ---
@@ -237,6 +238,10 @@ let nowUnix = Date().timeIntervalSince1970
 let hardwareUnix = nowUnix - systemUptime + timestamp
 ```
 This aligns iOS data streams perfectly with standard sensor times on your remote ROS2 robot workstation.
+
+Camera, point-cloud, and mesh publishers report original payload bytes,
+encoded payload bytes, maximum observed payload size, last encoding/compression
+mode, and compression ratio in `/reconstructor/status` and session metadata.
 
 ---
 

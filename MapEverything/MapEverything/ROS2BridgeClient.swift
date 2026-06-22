@@ -93,6 +93,7 @@ class ROS2BridgeClient: ObservableObject {
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) // Reuse to prevent allocation per frame
     private let topicRegistry = ROS2TopicRegistry.shared
     private let meshSnapshotConfiguration = MeshSnapshotPublishConfiguration.default
+    private let streamPayloadMetrics = StreamPayloadMetricsStore.shared
     private let localSampleBufferConfiguration = LocalSampleBufferConfiguration.default
     private let localSampleBufferQueue = DispatchQueue(label: "com.reconstructor.localSampleBuffer", qos: .utility)
     private var diagnosticsTimer: DispatchSourceTimer?
@@ -571,11 +572,18 @@ class ROS2BridgeClient: ObservableObject {
         
         guard let safeColorSpace = colorSpace,
               let jpegData = ciContext.jpegRepresentation(of: ciImage, colorSpace: safeColorSpace, options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.4]) else { return }
+        let encodedImage = jpegData.base64EncodedString()
+        recordStreamPayloadMetric(
+            stream: .camera,
+            originalBytes: CVPixelBufferGetDataSize(pixelBuffer),
+            encodedBytes: encodedImage.utf8.count,
+            compression: "jpeg_q0.4_base64"
+        )
         
         let msg: [String: Any] = [
             "header": createHeader(frameId: "iphone_camera", timestamp: timestamp),
             "format": "jpeg",
-            "data": jpegData.base64EncodedString()
+            "data": encodedImage
         ]
         send(op: "publish", topic: topicRegistry.topic(.cameraCompressed), msg: msg)
     }
@@ -601,6 +609,14 @@ class ROS2BridgeClient: ObservableObject {
             }
         }
         
+        let encodedPointData = data.base64EncodedString()
+        recordStreamPayloadMetric(
+            stream: .pointCloud,
+            originalBytes: dataCount,
+            encodedBytes: encodedPointData.utf8.count,
+            compression: "pointcloud2_binary_base64"
+        )
+
         let msg: [String: Any] = [
             "header": createHeader(frameId: "map", timestamp: timestamp),
             "height": 1,
@@ -614,7 +630,7 @@ class ROS2BridgeClient: ObservableObject {
             "is_bigendian": false,
             "point_step": pointStep,
             "row_step": points.count * pointStep,
-            "data": data.base64EncodedString(),
+            "data": encodedPointData,
             "is_dense": true
         ]
         publishOrBufferLocalSample(
@@ -666,8 +682,49 @@ class ROS2BridgeClient: ObservableObject {
         )
         guard !fittedMarkers.isEmpty else { return }
 
-        let msg: [String: Any] = ["markers": fittedMarkers]
-        publishOrBufferLocalSample(kind: .mesh, topic: topic, msg: msg)
+        let markerMessage: [String: Any] = ["markers": fittedMarkers]
+        if let encodedBytes = encodedPublishPayloadByteCount(topic: topic, msg: markerMessage) {
+            recordStreamPayloadMetric(
+                stream: .mesh,
+                originalBytes: trianglePointsIncluded * 3 * MemoryLayout<Float>.size,
+                encodedBytes: encodedBytes,
+                compression: "visualization_marker_array_json"
+            )
+        }
+        publishOrBufferLocalSample(kind: .mesh, topic: topic, msg: markerMessage)
+
+        let snapshotTopic = topicRegistry.topic(.meshSnapshot)
+        let snapshotPoints = fittedMarkers.flatMap { marker in
+            marker["points"] as? [[String: Float]] ?? []
+        }
+        let snapshotMessage = MeshSnapshotMessageBuilder.makeTriangleListMessage(
+            header: createHeader(frameId: FrameID.map, timestamp: timestamp),
+            snapshotID: UUID().uuidString,
+            source: "arkit_mesh",
+            frameID: FrameID.map,
+            anchorCount: meshAnchors.count,
+            trianglePoints: snapshotPoints,
+            originalTrianglePointCount: trianglePointsIncluded,
+            maxPayloadBytes: meshSnapshotConfiguration.maxPayloadBytes,
+            compression: "none",
+            metadata: [
+                "fallback_marker_topic": topic,
+                "max_payload_bytes": meshSnapshotConfiguration.maxPayloadBytes,
+                "max_triangle_points": meshSnapshotConfiguration.maxTrianglePoints
+            ],
+            topic: snapshotTopic
+        )
+        let originalSnapshotBytes = snapshotMessage["original_payload_bytes"] as? Int ?? 0
+        let publishedSnapshotBytes = snapshotMessage["published_payload_bytes"] as? Int
+            ?? encodedPublishPayloadByteCount(topic: snapshotTopic, msg: snapshotMessage)
+            ?? 0
+        recordStreamPayloadMetric(
+            stream: .mesh,
+            originalBytes: originalSnapshotBytes,
+            encodedBytes: publishedSnapshotBytes,
+            compression: "mesh_snapshot_json"
+        )
+        publishOrBufferLocalSample(kind: .mesh, topic: snapshotTopic, msg: snapshotMessage)
     }
 
     private func meshTrianglePoints(for anchor: ARMeshAnchor, maxPointCount: Int) -> [[String: Float]] {
@@ -766,6 +823,20 @@ class ROS2BridgeClient: ObservableObject {
             "msg": msg
         ]
         return try? JSONSerialization.data(withJSONObject: payload, options: []).count
+    }
+
+    private func recordStreamPayloadMetric(
+        stream: MappingSensorStream,
+        originalBytes: Int,
+        encodedBytes: Int,
+        compression: String
+    ) {
+        streamPayloadMetrics.record(
+            stream: stream,
+            originalBytes: originalBytes,
+            encodedBytes: encodedBytes,
+            compression: compression
+        )
     }
 
     func publishRoomPlan(_ room: CapturedRoom, timestamp: TimeInterval) {
@@ -1048,6 +1119,8 @@ class ROS2BridgeClient: ObservableObject {
             "radio_channels": RadioTelemetryCatalog.shared.rosMessage,
             "radio_platform_restrictions": RadioTelemetryCatalog.shared.platformRestrictionsMessage,
             "radio_observation_schema": RadioObservationMessageSchema.shared.rosMessage,
+            "mesh_snapshot_schema": MeshSnapshotMessageSchema.shared.rosMessage,
+            "stream_payload_metrics": streamPayloadMetrics.rosMessage,
             "current_wifi_telemetry": currentWiFiTelemetryManager.sessionMetadata,
             "ble_beacon_telemetry": bleBeaconTelemetryManager.sessionMetadata,
             "network_path_diagnostics": networkPathDiagnosticsManager.sessionMetadata,
@@ -1101,6 +1174,7 @@ class ROS2BridgeClient: ObservableObject {
         let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
+        let payloadMetricSnapshots = streamPayloadMetrics.allSnapshots()
         let enabledStreams = MappingSensorStream.allCases
             .filter { topicRegistry.isStreamEnabled($0) }
             .map(\.rawValue)
@@ -1154,6 +1228,12 @@ class ROS2BridgeClient: ObservableObject {
                         "replayed_samples": String(localBufferStats.replayedSamples),
                         "last_buffered_at": localBufferStats.lastBufferedAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
                     ]
+                ),
+                diagnosticStatus(
+                    name: "reconstructor/stream_payload_metrics",
+                    level: 0,
+                    message: payloadMetricSnapshots.isEmpty ? "No camera, point-cloud, or mesh payloads published yet" : "Stream payload metrics nominal",
+                    values: streamPayloadDiagnosticValues(payloadMetricSnapshots)
                 ),
                 diagnosticStatus(
                     name: "reconstructor/geotiles",
@@ -1279,6 +1359,22 @@ class ROS2BridgeClient: ObservableObject {
             return "Local sample buffer has replayed offline samples"
         }
         return "Local sample buffer empty"
+    }
+
+    private func streamPayloadDiagnosticValues(_ snapshots: [StreamPayloadMetricSnapshot]) -> [String: String] {
+        var values: [String: String] = [:]
+        for snapshot in snapshots {
+            let prefix = snapshot.streamID
+            values["\(prefix)_message_count"] = String(snapshot.messageCount)
+            values["\(prefix)_original_bytes_total"] = String(snapshot.originalBytesTotal)
+            values["\(prefix)_encoded_bytes_total"] = String(snapshot.encodedBytesTotal)
+            values["\(prefix)_max_encoded_bytes"] = String(snapshot.maxEncodedBytes)
+            values["\(prefix)_last_encoded_bytes"] = String(snapshot.lastEncodedBytes)
+            values["\(prefix)_last_compression"] = snapshot.lastCompression
+            values["\(prefix)_compression_ratio"] = String(format: "%.4f", snapshot.compressionRatio)
+            values["\(prefix)_last_recorded_at"] = snapshot.lastRecordedAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
+        }
+        return values
     }
 
     private func gpsQualityDiagnosticLevel(_ manager: IndoorLocalizationManager) -> Int {
