@@ -5,11 +5,13 @@
 ![ARKit](https://img.shields.io/badge/ARKit-LiDAR-black.svg?style=for-the-badge&logo=arkit)
 ![ROS2](https://img.shields.io/badge/ROS2-Humble%2FIron-green.svg?style=for-the-badge&logo=ros)
 
-**MapEverything** is a robotics-first mapping payload for iOS. It turns a LiDAR-equipped iPhone or iPad Pro into a mobile ROS2 sensor node that captures device pose, IMU, camera context, LiDAR point clouds, reconstructed mesh, GPS, radio signal observations, satellite imagery, DEM/elevation tiles, and diagnostics for recording on another ROS2 device.
+**MapEverything** is a robotics-first mapping payload for iOS. It turns a LiDAR-equipped iPhone or iPad Pro into a mobile ROS2 sensor node that captures device pose, IMU, camera context, LiDAR + Depth Anything point clouds, reconstructed mesh, GPS, radio signal observations, satellite imagery, DEM/elevation tiles, and diagnostics for recording on another ROS2 device.
 
 The app streams raw color feeds, dense point clouds, 6-DOF pose frames (`/tf`), IMU data, geospatial context, radio telemetry, DEM/elevation tiles, satellite imagery, and parametric RoomPlan cubes to a remote robotics workstation or simulator over a WebSocket ROS2 bridge.
 
 MapEverything is intentionally a single record-mode publisher. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. The app should not create local session recordings beyond transient buffers and caches needed to publish reliably.
+
+The mapping architecture separates capture engines from mode selection. Today the operator can choose LiDAR + Depth Anything point-cloud capture or RoomPlan parametric capture; planned work adds an adaptive policy that can prefer RoomPlan for enclosed interiors and switch to outdoor LiDAR + Depth Anything mapping with GPS, satellite, and DEM context when room semantics are not reliable.
 
 See [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md) for the implementation concept and [TODO.md](TODO.md) for the phased task list.
 
@@ -18,29 +20,40 @@ See [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md) for the
 ## 🌟 Architecture & Core Features
 
 ```
-                   ┌────────────────────────────────────────────────────────┐
-                   │                    MAPEVERYTHING                       │
-                   └──────────────────────────┬─────────────────────────────┘
-                                              │
-                      ┌───────────────────────┴───────────────────────┐
-                      ▼                                               ▼
-          ┌───────────────────────┐                       ┌───────────────────────┐
-          │   High-Density LiDAR  │                       │  Parametric RoomPlan  │
-          │     (Raw Point Cloud) │                       │  (Machine Learning)   │
-          └───────────┬───────────┘                       └───────────┬───────────┘
-                      │                                               │
-  ┌───────────────────┴───────────────────┐               ┌───────────┴───────────┐
-  ▼                                       ▼               ▼                       ▼
-Voxel Grid                            Radius Outlier    2D Blueprints         USDZ Bounding
-Filtering                             Removal (ROR)     (Vector PDF)             Boxes
+                     MAPEVERYTHING
+                           |
+             +-------------+-------------+
+             |                           |
+     Mapping Session Manager      SwiftData persistence
+             |                           |
+             v                           v
+  Adaptive Mapping Policy         MappingSessionModel
+        (planned)                 SensorStreamModel
+             |                    GeoTileModel
+    +--------+--------+
+    |                 |
+    v                 v
+RoomPlan        LiDAR + Depth Anything
+indoor          outdoor / open-area
+parametrics     dense geometry
+    |                 |
+    +--------+--------+
+             |
+             v
+ GPS / ENU georeference + satellite imagery + DEM tiles
+             |
+             v
+ rosbridge WebSocket publishers + external rosbag recorder
 ```
 
-### 1. Dual Scanning Engines
-* **High-Density LiDAR Mode:** Projects the camera's YCbCr frames directly onto spatial 3D depth coordinates derived from hardware `smoothedSceneDepth`. Points are buffered in a custom `PointCloudManager` actor off the main thread, downsampled using **Voxel Grid filters**, and cleared of noise using a high-efficiency spatial **Radius Outlier Removal (ROR)** algorithm.
-* **Parametric RoomPlan Mode:** Harnesses Apple's local coreML-based scene understanding to automatically isolate surfaces (walls, windows, doors) and objects (tables, sofas, chairs) in real-time, mapping them to bounding boxes natively.
+### 1. Mapping Engines and Mode Routing
+* **LiDAR + Depth Anything Mapping:** Projects the camera's YCbCr frames onto metric 3D depth coordinates derived from ARKit LiDAR and Depth Anything dense relative depth. Points are buffered in a custom `PointCloudManager` actor off the main thread, downsampled using **Voxel Grid filters**, and cleared of noise using a spatial **Radius Outlier Removal (ROR)** algorithm.
+* **Parametric RoomPlan Mapping:** Uses Apple's local Core ML scene understanding to isolate indoor surfaces (walls, windows, doors) and objects (tables, sofas, chairs), then publishes clean parametric bounding boxes alongside regular pose and sensor streams.
+* **Adaptive Mapping Policy (planned):** A future router will score RoomPlan suitability, outdoor GPS context, LiDAR confidence, Depth Anything availability, thermal pressure, and operator override state. It should prefer RoomPlan inside enclosed rooms and switch to LiDAR + Depth Anything outdoors or in spaces where room semantics are weak.
+* **Geospatial Context:** GPS, heading, ENU frame registration, satellite imagery, and DEM/elevation tiles run alongside either mapping engine so outdoor datasets carry terrain and map context rather than only local AR geometry.
 
 ### 2. Multi-Format Serialization & Export
-A high-performance pipeline serializes captures to the iOS local file system and syncs metadata over **SwiftData**. Exporting produces a standard iOS Share Sheet with files including:
+A high-performance pipeline serializes inspection/export artifacts to the iOS local file system and syncs metadata over **SwiftData**. The authoritative robotics recording remains the external rosbag recorder; local files support review, sharing, and cache-backed publication. Exporting produces a standard iOS Share Sheet with files including:
 * **`.ply` (Binary PLY):** A high-density point cloud file encoding `x, y, z` floating coordinates and `red, green, blue` color attributes per-point.
 * **`.obj` (Wavefront 3D):** A standardized, polygonal mesh representing the tracked surfaces, textured with standard gray materials ready for importing into Blender, CAD, or Unity.
 * **`.usdz` (Universal Scene Description):** Apple’s native AR file format. Meshes are baked with physically plausible PBR materials for realistic lighting in iOS QuickLook or iMessage.
@@ -63,7 +76,7 @@ A high-performance pipeline serializes captures to the iOS local file system and
    - **Voxel Size:** Adjust the spacing of the grid (e.g., `0.05m` for detailed indoor scans, `0.1m` for outdoor terrain).
    - **Max Point Limit:** Limit points (up to 2M) to avoid high memory spikes.
    - **Units:** Toggle between Metric (meters/sq m) and Imperial (feet/sq ft) values.
-   - **Scan Mode:** Switch between Point Cloud LiDAR tracking and ML-driven **RoomPlan** extraction.
+   - **Scan Mode:** Manually switch between LiDAR + Depth Anything point-cloud capture and ML-driven **RoomPlan** extraction. Adaptive indoor/outdoor switching is tracked in [TODO.md](TODO.md).
 
 ---
 
@@ -122,7 +135,7 @@ Ensure scanning is paused or running in Point Cloud mode. Use the segmented mode
 
 ## 🛰️ ROS 2 Bridge Integration Guide
 
-MapEverything acts as a robust WebSocket-based edge sensor node. It connects directly to standard `rosbridge_suite` networks, allowing you to stream camera feeds, high-density point clouds, IMU arrays, and RoomPlan boundaries directly into your ROS2 workspace.
+MapEverything acts as a robust WebSocket-based edge sensor node. It connects directly to standard `rosbridge_suite` networks, allowing you to stream camera feeds, high-density LiDAR + Depth Anything point clouds, IMU arrays, GPS/geotile context, DEM tiles, and RoomPlan boundaries directly into your ROS2 workspace.
 
 The current ROS topic namespace remains `/reconstructor` for compatibility with existing recorder setups.
 
@@ -250,6 +263,16 @@ Configure your RViz2 workspace using the settings below:
 ---
 
 ## ⚙️ Technical System Architecture
+
+### Mapping Mode Architecture
+`MappingSessionManager` owns the record-mode lifecycle, enabled streams, recorder URL, bridge transport, and session metadata. SwiftData persists the expanded mapping schema through `MapEverythingModelSchema`, including legacy `EnvironmentModel` records plus `MappingSessionModel`, `SensorStreamModel`, and `GeoTileModel`.
+
+The planned adaptive mapping router belongs above the capture engines. It should observe RoomPlan availability, AR tracking state, LiDAR depth confidence, Depth Anything health, GPS quality, Core Location indoor metadata, terrain tile coverage, thermal pressure, and operator override state. The router can then select one of two primary capture paths:
+
+* **Indoor parametric path:** RoomPlan publishes semantic walls, openings, and object bounding boxes through `/reconstructor/map` while regular pose, IMU, camera, and diagnostics continue.
+* **Outdoor/open-area path:** ARKit LiDAR, Depth Anything fusion, GPS/ENU registration, satellite imagery, and DEM tiles publish dense geometry and geospatial context without depending on RoomPlan's indoor assumptions.
+
+The selected mode, confidence, reason codes, and any operator override should be reflected in `/reconstructor/session` and `/reconstructor/status` so the remote recorder can explain what it captured.
 
 ### Outlier Filtration Pipeline
 The point cloud goes through three distinct stages of cleanup before saving:
