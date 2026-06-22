@@ -96,6 +96,20 @@
 - [x] Add rosbag replay validation procedure for RViz on a separate ROS2 machine.
 - [x] Add long-session validation procedure for thermal pressure and poor network conditions.
 
+## P3 - Packaging and Distribution
+
+- [ ] Decide supported distribution channels: local developer builds, signed ad hoc/internal beta builds, TestFlight, App Store, and GitHub release artifacts for ROS2 companion assets.
+- [ ] Audit bundle identifier, signing team, provisioning profiles, capabilities, and entitlements for camera, precise location, Bluetooth, local network, and Wi-Fi info access.
+- [ ] Add a release build/archive checklist for LiDAR-only device testing, simulator-safe tests, physical-device validation, rosbag replay, and rosbridge throughput benchmarking.
+- [ ] Add signed iOS archive/export instructions, including `xcodebuild archive`, export options, version/build number handling, and TestFlight upload steps.
+- [ ] Add App Store Connect metadata checklist for description, screenshots, privacy nutrition labels, export compliance, support URL, and TestFlight beta review notes.
+- [ ] Add a privacy and compliance checklist for `Info.plist` usage strings, Privacy Manifest entries, data-retention language, radio/GPS disclaimers, and third-party geospatial attribution.
+- [ ] Define release artifact layout for app builds, release notes, validation reports, sample RViz config, rosbridge benchmark results, and source-policy/attribution records.
+- [ ] Package the ROS2 companion package as a versioned source archive with build instructions, supported ROS2 distros, message compatibility notes, and a colcon smoke-test command.
+- [ ] Add GitHub release/tagging process with semantic versioning, changelog generation, migration notes, and rollback instructions for both iOS and ROS2 companion packages.
+- [ ] Document beta operator setup: required hardware, recorder workstation setup, network assumptions, permission prompts, credential configuration, and known platform restrictions.
+- [ ] Add a release-blocker checklist for missing provisioning, failed validation, missing attribution, credential leakage, non-replayable bags, queue instability, or unsupported sensor claims.
+
 ## Completed Foundation
 
 - [x] Reposition the app as a robotics mapping payload rather than a general room-scanning/remodeling tool.
