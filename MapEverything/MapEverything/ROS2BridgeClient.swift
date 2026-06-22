@@ -94,6 +94,7 @@ class ROS2BridgeClient: ObservableObject {
     private let topicRegistry = ROS2TopicRegistry.shared
     private let meshSnapshotConfiguration = MeshSnapshotPublishConfiguration.default
     private let streamPayloadMetrics = StreamPayloadMetricsStore.shared
+    private let localBagRecorder = LocalROS2BagRecorder.shared
     private let localSampleBufferConfiguration = LocalSampleBufferConfiguration.default
     private let localSampleBufferQueue = DispatchQueue(label: "com.reconstructor.localSampleBuffer", qos: .utility)
     private var diagnosticsTimer: DispatchSourceTimer?
@@ -227,6 +228,10 @@ class ROS2BridgeClient: ObservableObject {
         if let type = type { payload["type"] = type }
         if let msg = msg { payload["msg"] = msg }
 
+        if op == "publish", let msg {
+            recordLocalBagPublish(topic: topic, msg: msg)
+        }
+
         publishQueue.enqueue(payload: payload, op: op, topic: topic)
     }
 
@@ -242,12 +247,18 @@ class ROS2BridgeClient: ObservableObject {
         ]
 
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []) else { return }
+        recordLocalBagPublish(topic: topic, msg: msg)
 
         if isConnected {
             publishQueue.enqueueEncodedPayload(data, op: "publish", topic: topic)
         } else {
             bufferLocalSample(kind: kind, topic: topic, data: data)
         }
+    }
+
+    private func recordLocalBagPublish(topic: String, msg: [String: Any]) {
+        let messageType = topicRegistry.definition(forTopic: topic)?.messageType ?? "unknown_msgs/msg/Unknown"
+        localBagRecorder.recordPublishedTopic(topic: topic, messageType: messageType, msg: msg)
     }
 
     private func bufferLocalSample(kind: LocalBufferedSampleKind, topic: String, data: Data) {
@@ -1134,6 +1145,7 @@ class ROS2BridgeClient: ObservableObject {
         let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
+        let localBagRecorder = LocalROS2BagRecorder.shared
         let adaptiveMappingController = AdaptiveMappingModeController.shared
         let optionalGeoProviderConfigurations = GeoTileProviderConfigurationStore.load()
         let advertisedTopics = topicRegistry.advertisedTopics().map { definition in
@@ -1177,6 +1189,7 @@ class ROS2BridgeClient: ObservableObject {
             "ble_beacon_telemetry": rosJSONString(bleBeaconTelemetryManager.sessionMetadata),
             "network_path_diagnostics": rosJSONString(networkPathDiagnosticsManager.sessionMetadata),
             "recorder_endpoint_probe": rosJSONString(recorderEndpointProbeManager.sessionMetadata),
+            "local_bag_storage": rosJSONString(localBagRecorder.sessionMetadata),
             "started_at": iso8601String(snapshot.startedAt),
             "ended_at": iso8601String(snapshot.endedAt),
             "app": rosJSONString(app),
@@ -1214,6 +1227,7 @@ class ROS2BridgeClient: ObservableObject {
         let bleBeaconTelemetryManager = BLEBeaconTelemetryManager.shared
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
+        let localBagRecorder = LocalROS2BagRecorder.shared
         let adaptiveMappingController = AdaptiveMappingModeController.shared
         let optionalGeoProviderDiagnosticValues = GeoTileProviderConfigurationStore.diagnosticValues
         let payloadMetricSnapshots = streamPayloadMetrics.allSnapshots()
@@ -1270,6 +1284,12 @@ class ROS2BridgeClient: ObservableObject {
                         "replayed_samples": String(localBufferStats.replayedSamples),
                         "last_buffered_at": localBufferStats.lastBufferedAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""
                     ]
+                ),
+                diagnosticStatus(
+                    name: "reconstructor/local_bag_storage",
+                    level: localBagRecorder.diagnosticLevel,
+                    message: localBagRecorder.diagnosticMessage,
+                    values: localBagRecorder.stats.diagnosticValues
                 ),
                 diagnosticStatus(
                     name: "reconstructor/stream_payload_metrics",

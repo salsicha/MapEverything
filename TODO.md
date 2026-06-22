@@ -76,6 +76,7 @@
 - [x] Add `SensorStreamModel` for publisher status, publish rate, message counts, and last error.
 - [x] Add `GeoTileModel` for satellite and DEM cache records.
 - [x] Add transient radio observation buffering for network loss.
+- [x] Add off-by-default local SQLite bag storage for chunked on-device ROS2 topic capture.
 - [x] Add migration tests for existing `EnvironmentModel` data.
 - [x] Add cleanup logic for orphaned point-cloud, mesh, imagery, DEM, and session files.
 
@@ -115,7 +116,7 @@
 - [x] Reposition the app as a robotics mapping payload rather than a general room-scanning/remodeling tool.
 - [x] Update README product language around ROS2 mapping, field data capture, GPS, radio telemetry, satellite imagery, and DEM support.
 - [x] Keep RoomPlan as an optional semantic layer unless it conflicts with the robotics-first workflow.
-- [x] Define MapEverything as a single record-mode ROS2 publisher with external recorder-side data retention.
+- [x] Define MapEverything as a single record-mode ROS2 publisher with external recorder-side data retention by default and optional local SQLite bag fallback.
 - [x] Keep rosbridge WebSocket as the production bridge for now; no native ROS2/DDS iOS client or recorder-side binary receiver is integrated in this build.
 
 ## Open Product Decisions

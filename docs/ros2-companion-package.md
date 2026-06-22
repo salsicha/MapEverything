@@ -113,4 +113,5 @@ the app in session metadata. Session, GPS, indoor localization, satellite tile,
 and DEM messages keep high-value scalar fields typed and store nested metadata
 objects as JSON strings. This keeps the recorder package compact while preserving
 provider policies, georeference details, radio catalog metadata, bridge
-transport details, adaptive mapping mode decisions, and diagnostics in rosbag2.
+transport details, local bag storage status, adaptive mapping mode decisions,
+and diagnostics in rosbag2.

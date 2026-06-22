@@ -85,6 +85,10 @@ final class ROS2TopicRegistry {
         definition(id).topic
     }
 
+    func definition(forTopic topic: String) -> ROS2TopicDefinition? {
+        definitions.first { $0.topic == topic }
+    }
+
     func advertisedTopics() -> [ROS2TopicDefinition] {
         lock.lock()
         let streams = enabledStreams

@@ -89,6 +89,7 @@ final class MappingSessionManager: ObservableObject {
     private let networkPathDiagnosticsManager: NetworkPathDiagnosticsManager
     private let recorderEndpointProbeManager: RecorderEndpointProbeManager
     private let radioObservationPublisher: RadioObservationPublisher
+    private let localBagRecorder: LocalROS2BagRecorder
 
     var isActive: Bool {
         state == .active
@@ -99,6 +100,8 @@ final class MappingSessionManager: ObservableObject {
             "recorder_url": recorderURL,
             "bridge_transport": ROS2BridgeTransportProfile.current.kind.rawValue,
             "bridge_transport_decision": ROS2BridgeTransportProfile.current.decision,
+            "local_bag_storage_enabled": String(LocalROS2BagRecorderConfiguration.load().isEnabled),
+            "local_bag_storage_path": LocalROS2BagRecorder.shared.stats.bagDirectoryURL?.path ?? "",
             "state": state.label,
             "active_mapping_mode": AdaptiveMappingModeController.shared.activeMode.rawValue,
             "adaptive_mapping_confidence": String(format: "%.3f", AdaptiveMappingModeController.shared.recommendation.confidence),
@@ -135,6 +138,7 @@ final class MappingSessionManager: ObservableObject {
         networkPathDiagnosticsManager: NetworkPathDiagnosticsManager? = nil,
         recorderEndpointProbeManager: RecorderEndpointProbeManager? = nil,
         radioObservationPublisher: RadioObservationPublisher? = nil,
+        localBagRecorder: LocalROS2BagRecorder? = nil,
         recorderURL: String = "ws://192.168.1.100:9090",
         enabledStreams: Set<MappingSensorStream>? = nil
     ) {
@@ -146,6 +150,7 @@ final class MappingSessionManager: ObservableObject {
         self.networkPathDiagnosticsManager = networkPathDiagnosticsManager ?? NetworkPathDiagnosticsManager.shared
         self.recorderEndpointProbeManager = recorderEndpointProbeManager ?? RecorderEndpointProbeManager.shared
         self.radioObservationPublisher = radioObservationPublisher ?? RadioObservationPublisher.shared
+        self.localBagRecorder = localBagRecorder ?? LocalROS2BagRecorder.shared
         self.recorderURL = recorderURL
         self.enabledStreams = enabledStreams ?? Self.defaultStreams
     }
@@ -184,6 +189,7 @@ final class MappingSessionManager: ObservableObject {
         state = .connecting
 
         MapGeoreferencer.shared.reset()
+        localBagRecorder.start(sessionID: sessionID)
         bridge.connect(to: self.recorderURL)
         geoTilePublisher.start()
         indoorLocalizationManager.start()
@@ -208,6 +214,7 @@ final class MappingSessionManager: ObservableObject {
         recorderEndpointProbeManager.stop()
         radioObservationPublisher.stop()
         bridge.disconnect(after: 0.25)
+        localBagRecorder.stop()
     }
 
     func restart(recorderURL: String? = nil) {

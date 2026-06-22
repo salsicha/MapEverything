@@ -11,6 +11,7 @@ import simd
 import CoreVideo
 import CoreLocation
 import SwiftData
+import SQLite3
 @testable import MapEverything
 
 struct MapEverythingTests {
@@ -786,6 +787,80 @@ struct MapEverythingTests {
         #expect(stats.latest?.lastError?.contains("/test/retry") == true)
     }
 
+    @Test("Local ROS2 bag storage is disabled by default")
+    func testLocalROS2BagConfigurationDefaultsOff() throws {
+        let suiteName = "LocalROS2BagConfigurationTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let configuration = LocalROS2BagRecorderConfiguration.load(from: defaults)
+
+        #expect(!configuration.isEnabled)
+        #expect(configuration.chunkSizeMB == LocalROS2BagRecorderConfiguration.defaultChunkSizeMB)
+    }
+
+    @Test("Local ROS2 bag recorder writes chunked SQLite rosbridge JSON bags")
+    func testLocalROS2BagRecorderWritesChunkedSQLiteBag() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("MapEverythingLocalBag-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: rootURL) }
+
+        let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
+        let sessionID = try #require(UUID(uuidString: "11111111-2222-3333-4444-555555555555"))
+        recorder.start(
+            sessionID: sessionID,
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 900)
+        )
+
+        let firstMessage = makeLocalBagMessage(sequence: 1, payloadSize: 1_100)
+        let secondMessage = makeLocalBagMessage(sequence: 2, payloadSize: 1_100)
+        recorder.recordPublishedTopic(
+            topic: "/reconstructor/status",
+            messageType: "diagnostic_msgs/msg/DiagnosticArray",
+            msg: firstMessage
+        )
+        recorder.recordPublishedTopic(
+            topic: "/reconstructor/status",
+            messageType: "diagnostic_msgs/msg/DiagnosticArray",
+            msg: secondMessage
+        )
+        recorder.stopAndWait()
+
+        let bagDirectories = try fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        ).filter { url in
+            (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        }
+        let bagDirectory = try #require(bagDirectories.first)
+        let metadata = try String(
+            contentsOf: bagDirectory.appendingPathComponent("metadata.yaml"),
+            encoding: .utf8
+        )
+        let dbFiles = try fileManager.contentsOfDirectory(at: bagDirectory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "db3" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        #expect(dbFiles.count == 2)
+        #expect(metadata.contains("storage_identifier: sqlite3"))
+        #expect(metadata.contains("serialization_format: 'rosbridge_json'"))
+        #expect(metadata.contains("mapeverything_0.db3"))
+        #expect(metadata.contains("mapeverything_1.db3"))
+        #expect(metadata.contains("Messages are stored as rosbridge publish JSON payloads"))
+
+        let totalMessages = try dbFiles.reduce(0) { count, url in
+            count + (try sqliteInteger(url: url, sql: "SELECT COUNT(*) FROM messages"))
+        }
+        let topicCount = try dbFiles.reduce(0) { count, url in
+            count + (try sqliteInteger(url: url, sql: "SELECT COUNT(*) FROM topics WHERE name = '/reconstructor/status' AND type = 'diagnostic_msgs/msg/DiagnosticArray' AND serialization_format = 'rosbridge_json'"))
+        }
+
+        #expect(totalMessages == 2)
+        #expect(topicCount == 2)
+    }
+
     @Test("Expanded SwiftData schema preserves EnvironmentModel and stores mapping records")
     @MainActor
     func testMappingPersistenceModelsAndEnvironmentMigration() throws {
@@ -994,6 +1069,27 @@ struct MapEverythingTests {
         )
     }
 
+    private func makeLocalBagMessage(sequence: Int, payloadSize: Int) -> [String: Any] {
+        [
+            "header": [
+                "stamp": [
+                    "sec": 1_700_000_000 + sequence,
+                    "nanosec": sequence
+                ],
+                "frame_id": "map"
+            ],
+            "status": [
+                [
+                    "level": 0,
+                    "name": "unit_test/local_bag",
+                    "message": String(repeating: "x", count: payloadSize),
+                    "hardware_id": "simulator",
+                    "values": []
+                ]
+            ]
+        ]
+    }
+
     private func offsetCoordinate(
         latitude: Double,
         longitude: Double,
@@ -1074,6 +1170,42 @@ struct MapEverythingTests {
             completion = completions.isEmpty ? nil : completions.removeFirst()
             lock.unlock()
             completion?(error)
+        }
+    }
+
+    private func sqliteInteger(url: URL, sql: String) throws -> Int {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            throw TestSQLiteError(database: database, fallback: "Unable to open SQLite database")
+        }
+        defer { sqlite3_close(database) }
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw TestSQLiteError(database: database, fallback: "Unable to prepare SQLite statement")
+        }
+        defer { sqlite3_finalize(statement) }
+
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw TestSQLiteError(database: database, fallback: "SQLite query returned no rows")
+        }
+
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private struct TestSQLiteError: LocalizedError {
+        let message: String
+
+        init(database: OpaquePointer?, fallback: String) {
+            if let database, let sqliteMessage = sqlite3_errmsg(database) {
+                message = String(cString: sqliteMessage)
+            } else {
+                message = fallback
+            }
+        }
+
+        var errorDescription: String? {
+            message
         }
     }
 }

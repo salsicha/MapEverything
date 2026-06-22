@@ -21,6 +21,7 @@ string current_wifi_telemetry
 string ble_beacon_telemetry
 string network_path_diagnostics
 string recorder_endpoint_probe
+string local_bag_storage
 string started_at
 string ended_at
 string app

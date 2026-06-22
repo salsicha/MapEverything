@@ -62,6 +62,7 @@ struct ContentView: View {
     @ObservedObject private var ros2Client = ROS2BridgeClient.shared
     @ObservedObject private var mappingSession = MappingSessionManager.shared
     @ObservedObject private var adaptiveMapping = AdaptiveMappingModeController.shared
+    @ObservedObject private var localBagRecorder = LocalROS2BagRecorder.shared
     
     // App Settings
     @AppStorage("maxPointLimit") private var maxPointLimit: Int = 2_000_000
@@ -185,6 +186,7 @@ struct ContentView: View {
     private var recorderDiagnosticsPanel: some View {
         let queueStats = ros2Client.publishQueueStats
         let localBufferStats = ros2Client.localSampleBufferStats
+        let localBagStats = localBagRecorder.stats
         let lastError = queueStats.lastError ?? mappingSession.lastError
 
         return VStack(alignment: .leading, spacing: 8) {
@@ -204,6 +206,9 @@ struct ContentView: View {
                 Label("\(queueStats.depth)/\(queueStats.capacity)", systemImage: "tray.full")
                 Label("\(queueStats.droppedMessages)", systemImage: "exclamationmark.triangle")
                 Label("\(localBufferStats.pointCloudSamples + localBufferStats.meshSamples)", systemImage: "externaldrive")
+                if localBagStats.isEnabled {
+                    Label("\(localBagStats.messageCount)", systemImage: "externaldrive.badge.plus")
+                }
                 Label(adaptiveMapping.activeMode.displayName, systemImage: adaptiveMapping.usesRoomPlanCapture ? "square.3.layers.3d" : "sparkles.rectangle.stack")
             }
             .font(.caption2.monospacedDigit())
@@ -789,11 +794,14 @@ struct SettingsView: View {
     @ObservedObject private var mappingSession = MappingSessionManager.shared
     @ObservedObject private var ros2Client = ROS2BridgeClient.shared
     @ObservedObject private var adaptiveMapping = AdaptiveMappingModeController.shared
+    @ObservedObject private var localBagRecorder = LocalROS2BagRecorder.shared
     @AppStorage("maxPointLimit") private var maxPointLimit: Int = 2_000_000
     @AppStorage("voxelSize") private var voxelSize: Double = 0.05
     @AppStorage("boundingBoxSize") private var boundingBoxSize: Double = 20.0
     @AppStorage("ros2Enabled") private var ros2Enabled: Bool = false
     @AppStorage("ros2WebSocketURL") private var ros2WebSocketURL: String = "ws://192.168.1.100:9090"
+    @AppStorage(LocalROS2BagRecorderConfiguration.enabledStorageKey) private var localROS2BagStorageEnabled: Bool = false
+    @AppStorage(LocalROS2BagRecorderConfiguration.chunkSizeMBStorageKey) private var localROS2BagChunkSizeMB: Int = LocalROS2BagRecorderConfiguration.defaultChunkSizeMB
     @AppStorage("bleBeaconServiceUUIDs") private var bleBeaconServiceUUIDs: String = ""
     @AppStorage("bleBeaconPeripheralIDs") private var bleBeaconPeripheralIDs: String = ""
     @AppStorage("bleBeaconLocalNamePrefixes") private var bleBeaconLocalNamePrefixes: String = ""
@@ -956,6 +964,28 @@ struct SettingsView: View {
                             Label(lastError, systemImage: "exclamationmark.triangle")
                                 .font(.caption)
                                 .foregroundColor(.orange)
+                        }
+                    }
+                }
+                Section(header: Text("Local ROS2 Bag Storage")) {
+                    Toggle("Save Local SQLite Bag", isOn: $localROS2BagStorageEnabled)
+                    if localROS2BagStorageEnabled {
+                        Stepper(
+                            "Chunk Size: \(localROS2BagChunkSizeMB) MB",
+                            value: $localROS2BagChunkSizeMB,
+                            in: LocalROS2BagRecorderConfiguration.minimumChunkSizeMB...LocalROS2BagRecorderConfiguration.maximumChunkSizeMB,
+                            step: 8
+                        )
+                        Label(
+                            localBagRecorder.stats.isRecording ? "Recording \(localBagRecorder.stats.messageCount) messages" : "Starts with the next mapping session",
+                            systemImage: localBagRecorder.stats.isRecording ? "record.circle" : "externaldrive"
+                        )
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        if let bagURL = localBagRecorder.stats.bagDirectoryURL {
+                            Text(bagURL.lastPathComponent)
+                                .font(.caption2.monospaced())
+                                .foregroundColor(.secondary)
                         }
                     }
                 }

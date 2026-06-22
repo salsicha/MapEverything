@@ -6,7 +6,7 @@ MapEverything should pivot from a general room-scanning and remodeling utility i
 
 The app should prioritize reliable field mapping over consumer design features. A successful session produces a time-synchronized ROS2 bag containing camera-derived pose, LiDAR point clouds, reconstructed mesh, GPS fixes, radio signal observations, satellite imagery tiles, DEM/elevation tiles, device diagnostics, and session metadata.
 
-MapEverything has one operator mode: record. Starting a session publishes the configured robotics topic set over ROS2; stopping a session stops publication. Stream selection, topic filtering, and data retention belong on the recorder-side ROS2/rosbag setup, not in per-stream app toggles. The iPhone should not be treated as the session recorder of record, aside from transient retry buffers and provider caches needed to publish reliably.
+MapEverything has one operator mode: record. Starting a session publishes the configured robotics topic set over ROS2; stopping a session stops publication. Stream selection, topic filtering, and data retention belong on the recorder-side ROS2/rosbag setup, not in per-stream app toggles. The iPhone is not treated as the session recorder of record by default, aside from transient retry buffers and provider caches needed to publish reliably; an explicit off-by-default local SQLite bag option can mirror outgoing rosbridge payloads into chunked on-device fallback files.
 
 The production bridge remains `rosbridge_suite` over WebSocket for this build. A native binary bridge is not enabled because the project does not currently integrate a maintained iOS ROS2/DDS client or a recorder-side binary receiver. High-rate streams should first be controlled with compression, publish-rate limits, queue backpressure, and transient retry buffers. Revisit a native binary bridge only after measured rosbridge throughput fails field requirements and a maintained iOS client, Foxglove/ROS2 CDR path, or custom companion ROS2 receiver is selected.
 
@@ -180,13 +180,14 @@ The recorder device must build this package before recording custom topics with 
 - `ROS2TopicRegistry`: defines advertised topics, message types, publish rates, and recorder-facing metadata.
 - `ROS2BridgeTransportProfile`: publishes the active bridge kind, encoding, rationale, and upgrade path in session metadata and diagnostics.
 - `PublishQueue`: applies backpressure, retry, compression, and drop policies.
-- `SessionStore`: holds active session metadata, transient fetch history, and retryable samples without creating a local recording artifact.
+- `LocalROS2BagRecorder`: off-by-default SQLite storage that mirrors outgoing rosbridge publish payloads into chunked rosbag2-style `.db3` files plus `metadata.yaml` for field fallback and later conversion.
+- `SessionStore`: holds active session metadata, transient fetch history, and retryable samples.
 
 ### UI Changes
 
 - Replace remodeling/landscape-first navigation with a single record-mode mapping view.
 - Add prominent recorder connection status, publish rates, queue depth, and dropped-message counts.
-- Keep stream selection and rosbag retention out of the app UI; configure subscriptions and recording policy on the recorder side.
+- Keep stream selection and default rosbag retention out of the app UI; configure subscriptions and recording policy on the recorder side. Use the local SQLite bag toggle only as an explicit field fallback.
 - Keep map area defaults for satellite/DEM tile radius, zoom, provider, and cache behavior in build/config or recorder-side session setup.
 - Add a permissions screen for camera, motion, location, Bluetooth, local network, and Wi-Fi information entitlement.
 - Add diagnostics views for publisher health; do not add local session export as a primary workflow.

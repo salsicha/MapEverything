@@ -9,7 +9,7 @@
 
 The app streams raw color feeds, dense point clouds, 6-DOF pose frames (`/tf`), IMU data, geospatial context, radio telemetry, DEM/elevation tiles, satellite imagery, and parametric RoomPlan cubes to a remote robotics workstation or simulator over a WebSocket ROS2 bridge.
 
-MapEverything is intentionally a single record-mode publisher. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. The app should not create local session recordings beyond transient buffers and caches needed to publish reliably.
+MapEverything is intentionally a single record-mode publisher by default. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. An off-by-default local SQLite bag option can mirror published topics into chunked rosbag2-style files on device for field fallback or later conversion.
 
 The mapping architecture separates capture engines from mode selection. An adaptive policy prefers RoomPlan for enclosed interiors and switches to outdoor LiDAR + Depth Anything mapping with GPS, satellite, and DEM context when room semantics are not reliable.
 
@@ -44,6 +44,9 @@ parametrics     dense geometry
              |
              v
  rosbridge WebSocket publishers + external rosbag recorder
+             |
+             v
+ optional local SQLite bag chunks
 ```
 
 ### 1. Mapping Engines and Mode Routing
@@ -53,7 +56,7 @@ parametrics     dense geometry
 * **Geospatial Context:** GPS, heading, ENU frame registration, satellite imagery, and DEM/elevation tiles run alongside either mapping engine so outdoor datasets carry terrain and map context rather than only local AR geometry.
 
 ### 2. Multi-Format Serialization & Export
-A high-performance pipeline serializes inspection/export artifacts to the iOS local file system and syncs metadata over **SwiftData**. The authoritative robotics recording remains the external rosbag recorder; local files support review, sharing, and cache-backed publication. Exporting produces a standard iOS Share Sheet with files including:
+A high-performance pipeline serializes inspection/export artifacts to the iOS local file system and syncs metadata over **SwiftData**. The authoritative robotics recording remains the external rosbag recorder unless local SQLite bag storage is explicitly enabled; local files support review, sharing, cache-backed publication, and field fallback. Exporting produces a standard iOS Share Sheet with files including:
 * **`.ply` (Binary PLY):** A high-density point cloud file encoding `x, y, z` floating coordinates and `red, green, blue` color attributes per-point.
 * **`.obj` (Wavefront 3D):** A standardized, polygonal mesh representing the tracked surfaces, textured with standard gray materials ready for importing into Blender, CAD, or Unity.
 * **`.usdz` (Universal Scene Description):** Apple’s native AR file format. Meshes are baked with physically plausible PBR materials for realistic lighting in iOS QuickLook or iMessage.
@@ -143,6 +146,8 @@ Transport decision: MapEverything continues to use `rosbridge_suite` over WebSoc
 
 The companion ROS2 custom message package lives in [ros2/reconstructor_msgs](ros2/reconstructor_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
 
+Local SQLite bag storage is available in Settings and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay still requires conversion to CDR messages or a compatible bridge-side importer.
+
 ### Radio Telemetry Notes
 
 See [docs/ios-radio-restrictions.md](docs/ios-radio-restrictions.md) for operator-facing iOS radio API constraints and external-adapter guidance.
@@ -178,7 +183,7 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Compressed satellite imagery tile payload. |
 | `/reconstructor/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery provider, bounds, CRS, attribution, and source policy metadata. |
 | `/reconstructor/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM raster payload with bounds, CRS, attribution, and source policy metadata. |
-| `/reconstructor/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, and recorder configuration. |
+| `/reconstructor/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, recorder configuration, and local bag status. |
 | `/reconstructor/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
 
 Mesh publishing uses `/reconstructor/map` as the RViz-compatible `MarkerArray` fallback and `/reconstructor/mesh_snapshot` as the structured recording topic when the custom message package is available. Camera, point-cloud, and mesh publishers also report payload-size and encoding metrics in session metadata and diagnostics so recorder operators can detect oversized or degraded streams.
