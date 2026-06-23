@@ -981,16 +981,14 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         isProcessingFrame = true
         
         let transform = frame.camera.transform
-        let pixelBuffer = frame.capturedImage
         let timestamp = frame.timestamp
-        let currentOrientation = UIDevice.current.orientation
         let shouldPublishPointCloud = timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
         
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
             
             if ROS2BridgeClient.shared.isConnected {
-                ROS2BridgeClient.shared.publishImage(pixelBuffer: pixelBuffer, timestamp: timestamp, deviceOrientation: currentOrientation)
+                ROS2BridgeClient.shared.publishImage(frame: frame, timestamp: timestamp)
             }
             
             let shouldUseFusedDepth = await self.shouldUseFusedMappingDepth()

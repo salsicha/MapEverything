@@ -188,7 +188,8 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
 | `/reconstructor/gps/metadata` | `reconstructor_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
 | `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~10 Hz | Point cloud payloads downsampled to a sparse 10cm grid. Color values are packed into a single 32-bit integer (`rgb`). |
-| `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | ~10 Hz | JPEG-compressed image stream rotated to match current mobile screen orientation. |
+| `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | ~10 Hz | JPEG-compressed native ARKit camera image stream for visual loop closure and recorder context. |
+| `/reconstructor/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | ~10 Hz | Same-timestamp camera intrinsics for the compressed image stream, including `K`, `P`, rectification, image size, and zero-distortion pinhole coefficients. |
 | `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |
 | `/reconstructor/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with truncation and payload-size metadata. |
 | `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
@@ -200,6 +201,8 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
 
 Mesh publishing uses `/reconstructor/map` as the RViz-compatible `MarkerArray` fallback and `/reconstructor/mesh_snapshot` as the structured recording topic when the custom message package is available. Camera, point-cloud, and mesh publishers also report payload-size and encoding metrics in session metadata and diagnostics so recorder operators can detect oversized or degraded streams.
+
+Loop-closure consumers such as ArrayDataEngine need both intrinsics and extrinsics for each visual frame. MapEverything publishes intrinsic values on `/reconstructor/camera/camera_info`: image `width`/`height`, focal lengths `fx`/`fy`, principal point `cx`/`cy`, full `K` and `P` matrices, identity rectification `R`, `plumb_bob` distortion model, and zero distortion coefficients because ARKit frames are treated as rectified pinhole images. Extrinsics come from `/tf`, `/reconstructor/pose`, and `/reconstructor/odom`: the `map -> odom -> base_link -> iphone_camera` transform chain gives the camera pose for the same `iphone_camera` frame used by the image and camera-info headers. All of these messages use UNIX epoch ROS timestamps derived from ARKit's hardware timestamp, so recorder-side loop closure can associate images, intrinsics, IMU, point clouds, and poses by header time.
 
 ### Validation and Throughput Checks
 

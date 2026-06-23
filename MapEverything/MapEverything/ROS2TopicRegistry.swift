@@ -13,6 +13,7 @@ enum ROS2TopicID: String, CaseIterable, Codable, Hashable {
     case meshSnapshot
     case tf
     case cameraCompressed
+    case cameraInfo
     case gpsFix
     case gpsMetadata
     case odom
@@ -173,6 +174,14 @@ final class ROS2TopicRegistry {
             stream: .camera,
             topic: "/reconstructor/camera/image/compressed",
             messageType: "sensor_msgs/msg/CompressedImage",
+            defaultRateHz: 10,
+            isImplemented: true
+        ),
+        ROS2TopicDefinition(
+            id: .cameraInfo,
+            stream: .camera,
+            topic: "/reconstructor/camera/camera_info",
+            messageType: "sensor_msgs/msg/CameraInfo",
             defaultRateHz: 10,
             isImplemented: true
         ),

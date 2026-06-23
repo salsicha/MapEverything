@@ -111,7 +111,6 @@ class ROS2BridgeClient: ObservableObject {
         return queue
     }()
     
-    private var lastValidOrientation: CGImagePropertyOrientation = .right
     private var currentURL: String?
     private var lastOdometrySample: OdometrySample?
     private var bufferedSamples: [LocalBufferedSample] = []
@@ -598,22 +597,58 @@ class ROS2BridgeClient: ObservableObject {
         ]
     }
     
-    func publishImage(pixelBuffer: CVPixelBuffer, timestamp: TimeInterval, deviceOrientation: UIDeviceOrientation) {
-        guard isConnected else { return }
-        
-        if deviceOrientation.isPortrait || deviceOrientation.isLandscape {
-            switch deviceOrientation {
-            case .portraitUpsideDown: lastValidOrientation = .left
-            case .landscapeLeft: lastValidOrientation = .up
-            case .landscapeRight: lastValidOrientation = .down
-            case .portrait: lastValidOrientation = .right
-            default: break
-            }
-        }
-        
-        // Rotate the CIImage to match the iPhone's current physical orientation
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(lastValidOrientation)
-        
+    static func makeCameraInfoMessage(
+        header: [String: Any],
+        intrinsics: simd_float3x3,
+        imageResolution: CGSize
+    ) -> [String: Any] {
+        let width = Int(imageResolution.width.rounded())
+        let height = Int(imageResolution.height.rounded())
+        let fx = Double(intrinsics[0][0])
+        let fy = Double(intrinsics[1][1])
+        let cx = Double(intrinsics[2][0])
+        let cy = Double(intrinsics[2][1])
+
+        return [
+            "header": header,
+            "height": height,
+            "width": width,
+            "distortion_model": "plumb_bob",
+            "d": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "k": [
+                fx, 0.0, cx,
+                0.0, fy, cy,
+                0.0, 0.0, 1.0
+            ],
+            "r": [
+                1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0
+            ],
+            "p": [
+                fx, 0.0, cx, 0.0,
+                0.0, fy, cy, 0.0,
+                0.0, 0.0, 1.0, 0.0
+            ],
+            "binning_x": 0,
+            "binning_y": 0,
+            "roi": [
+                "x_offset": 0,
+                "y_offset": 0,
+                "height": 0,
+                "width": 0,
+                "do_rectify": false
+            ]
+        ]
+    }
+
+    func publishImage(frame: ARFrame, timestamp: TimeInterval) {
+        guard isConnected, topicRegistry.isStreamEnabled(.camera) else { return }
+
+        let pixelBuffer = frame.capturedImage
+        let header = createHeader(frameId: FrameID.iphoneCamera, timestamp: timestamp)
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+
         guard let safeColorSpace = colorSpace,
               let jpegData = ciContext.jpegRepresentation(of: ciImage, colorSpace: safeColorSpace, options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.4]) else { return }
         let encodedImage = jpegData.base64EncodedString()
@@ -625,11 +660,18 @@ class ROS2BridgeClient: ObservableObject {
         )
         
         let msg: [String: Any] = [
-            "header": createHeader(frameId: "iphone_camera", timestamp: timestamp),
+            "header": header,
             "format": "jpeg",
             "data": encodedImage
         ]
         send(op: "publish", topic: topicRegistry.topic(.cameraCompressed), msg: msg)
+
+        let cameraInfo = Self.makeCameraInfoMessage(
+            header: header,
+            intrinsics: frame.camera.intrinsics,
+            imageResolution: frame.camera.imageResolution
+        )
+        send(op: "publish", topic: topicRegistry.topic(.cameraInfo), msg: cameraInfo)
     }
     
     func publishPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {

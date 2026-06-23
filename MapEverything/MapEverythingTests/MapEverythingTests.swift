@@ -8,6 +8,7 @@
 import Testing
 import Foundation
 import simd
+import CoreGraphics
 import CoreVideo
 import CoreLocation
 import SwiftData
@@ -565,7 +566,7 @@ struct MapEverythingTests {
 
         #expect(allTopics.count == ROS2TopicID.allCases.count)
         #expect(Set(allTopics.map(\.id)) == Set(ROS2TopicID.allCases))
-        #expect(Set(advertisedTopics.map(\.id)).isSuperset(of: [.cameraCompressed, .pointCloud, .meshSnapshot, .satelliteTileInfo, .demTile]))
+        #expect(Set(advertisedTopics.map(\.id)).isSuperset(of: [.cameraCompressed, .cameraInfo, .pointCloud, .meshSnapshot, .satelliteTileInfo, .demTile]))
 
         let advertisedPayload = advertisedTopics.map { definition in
             [
@@ -589,6 +590,46 @@ struct MapEverythingTests {
 
         #expect(JSONSerialization.isValidJSONObject(payload))
         _ = try JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
+    @Test("CameraInfo payload exposes loop-closure intrinsics")
+    func testCameraInfoPayloadExposesLoopClosureIntrinsics() throws {
+        let registry = ROS2TopicRegistry()
+        let cameraInfoTopic = registry.definition(.cameraInfo)
+        let header: [String: Any] = [
+            "stamp": ["sec": 10, "nanosec": 20],
+            "frame_id": "iphone_camera"
+        ]
+        let intrinsics = simd_float3x3(
+            SIMD3<Float>(600, 0, 0),
+            SIMD3<Float>(0, 590, 0),
+            SIMD3<Float>(320, 240, 1)
+        )
+
+        let msg = ROS2BridgeClient.makeCameraInfoMessage(
+            header: header,
+            intrinsics: intrinsics,
+            imageResolution: CGSize(width: 640, height: 480)
+        )
+
+        #expect(cameraInfoTopic.topic == "/reconstructor/camera/camera_info")
+        #expect(cameraInfoTopic.messageType == "sensor_msgs/msg/CameraInfo")
+        #expect(msg["width"] as? Int == 640)
+        #expect(msg["height"] as? Int == 480)
+        #expect(msg["distortion_model"] as? String == "plumb_bob")
+        #expect(msg["d"] as? [Double] == [0.0, 0.0, 0.0, 0.0, 0.0])
+        #expect(msg["k"] as? [Double] == [
+            600.0, 0.0, 320.0,
+            0.0, 590.0, 240.0,
+            0.0, 0.0, 1.0
+        ])
+        #expect(msg["p"] as? [Double] == [
+            600.0, 0.0, 320.0, 0.0,
+            0.0, 590.0, 240.0, 0.0,
+            0.0, 0.0, 1.0, 0.0
+        ])
+        #expect(JSONSerialization.isValidJSONObject(msg))
+        _ = try JSONSerialization.data(withJSONObject: msg, options: [])
     }
 
     @Test("GPS fixes convert to ENU and map-frame coordinates")

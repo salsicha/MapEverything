@@ -35,12 +35,14 @@ On the recorder workstation, monitor the same topics in parallel:
 
 ```bash
 ros2 topic hz /reconstructor/camera/image/compressed
+ros2 topic hz /reconstructor/camera/camera_info
 ros2 topic hz /reconstructor/pointcloud
 ros2 topic hz /reconstructor/mesh_snapshot
 ros2 topic hz /reconstructor/satellite/image/compressed
 ros2 topic hz /reconstructor/dem/tile
 
 ros2 topic bw /reconstructor/camera/image/compressed
+ros2 topic bw /reconstructor/camera/camera_info
 ros2 topic bw /reconstructor/pointcloud
 ros2 topic bw /reconstructor/mesh_snapshot
 ros2 topic bw /reconstructor/satellite/image/compressed
