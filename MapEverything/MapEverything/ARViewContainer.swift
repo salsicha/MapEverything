@@ -185,6 +185,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     var appMode: AppMode = .scan
     
     private let pointManager = PointCloudManager()
+    private let surfelMap = ColoredSurfelMap()
     private let pointCloudProcessor = PointCloudProcessor()
     private let adaptiveMappingController = AdaptiveMappingModeController.shared
     private lazy var depthAnythingProcessor: DepthAnythingProcessor? = DepthAnythingProcessor()
@@ -197,12 +198,16 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private var pointProcessingInterval: TimeInterval = 0.1 // Process points 10 times a second
     private var lastPointCloudPublishTime: TimeInterval = 0
     private let pointCloudPublishInterval: TimeInterval = 0.2 // Publish ROS point clouds at up to 5Hz
+    private var lastSurfelPublishTime: TimeInterval = 0
+    private let surfelPublishInterval: TimeInterval = 1.0
+    private let maxPublishedSurfels = 25_000
     private var isProcessingFrame = false
     var maxPointLimit: Int = 2_000_000
     var boundingBoxSize: Float = 20.0
     var voxelSize: Float = 0.05 {
         didSet {
             Task { await pointManager.setVoxelSize(voxelSize) }
+            Task { await surfelMap.configure(voxelSize: max(0.02, voxelSize * 0.8)) }
         }
     }
     var useRoomPlan: Bool = false {
@@ -425,10 +430,14 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             }
 
             Task {
+                let surfels = await self.surfelMap.snapshot()
                 let cleanedPoints = await self.pointManager.getCleanedPoints(maxDistance: self.boundingBoxSize)
                 
                 let savedPath = await Task.detached(priority: .userInitiated) {
-                    PointCloudStorageManager.shared.saveBinaryPLY(points: cleanedPoints, to: filename)
+                    if !surfels.isEmpty {
+                        return PointCloudStorageManager.shared.saveBinaryPLY(surfels: surfels, to: filename)
+                    }
+                    return PointCloudStorageManager.shared.saveBinaryPLY(points: cleanedPoints, to: filename)
                 }.value
                 
                 guard let savedPath = savedPath else {
@@ -500,6 +509,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         Task { [weak self] in
             guard let self = self else { return }
             await pointManager.clear()
+            await surfelMap.clear()
             delegate?.didUpdatePointCount(0)
             
             measurementNodes.forEach { $0.anchor?.removeFromParent() }
@@ -982,7 +992,13 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         
         let transform = frame.camera.transform
         let timestamp = frame.timestamp
+        let cameraPosition = SIMD3<Float>(
+            transform.columns.3.x,
+            transform.columns.3.y,
+            transform.columns.3.z
+        )
         let shouldPublishPointCloud = timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
+        let shouldPublishSurfels = timestamp - lastSurfelPublishTime >= surfelPublishInterval
         
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
@@ -1004,12 +1020,24 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             }
 
             if !newPoints.isEmpty {
+                _ = await self.surfelMap.fuse(
+                    points: newPoints,
+                    observerPosition: cameraPosition,
+                    timestamp: timestamp
+                )
                 if shouldPublishPointCloud {
                     // Downsample the network payload to a sparse 10cm grid to prevent saturating the Wi-Fi bandwidth
                     let sparsePoints = self.pointCloudProcessor.voxelGridFilter(points: newPoints, voxelSize: 0.1)
                     ROS2BridgeClient.shared.publishPointCloud(sparsePoints, timestamp: timestamp)
                     await MainActor.run {
                         self.lastPointCloudPublishTime = timestamp
+                    }
+                }
+                if shouldPublishSurfels {
+                    let surfelSnapshot = await self.surfelMap.snapshot(maxCount: self.maxPublishedSurfels)
+                    ROS2BridgeClient.shared.publishSurfels(surfelSnapshot, timestamp: timestamp)
+                    await MainActor.run {
+                        self.lastSurfelPublishTime = timestamp
                     }
                 }
                 let count = await self.pointManager.addAndFilter(newPoints: newPoints)

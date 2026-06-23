@@ -37,6 +37,13 @@ Visualization Manager:
       Style: Points
       Topic:
         Value: /reconstructor/pointcloud
+    - Class: rviz_default_plugins/PointCloud2
+      Enabled: true
+      Name: Colored Surfels
+      Size (m): 0.04
+      Style: Flat Squares
+      Topic:
+        Value: /reconstructor/surfels
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Mesh Markers

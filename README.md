@@ -51,13 +51,14 @@ parametrics     dense geometry
 
 ### 1. Mapping Engines and Mode Routing
 * **LiDAR + Depth Anything Mapping:** Projects the camera's YCbCr frames onto metric 3D depth coordinates derived from ARKit LiDAR and Depth Anything dense relative depth. Points are buffered in a custom `PointCloudManager` actor off the main thread, downsampled using **Voxel Grid filters**, and cleared of noise using a spatial **Radius Outlier Removal (ROR)** algorithm.
+* **Colored Surfel Reconstruction:** Fuses repeated RGB-D samples into a bounded voxel-hashed surfel map with weighted color, position, view-facing normals, radius, confidence, and observation counts. This provides a fuller colored surface reconstruction on device without the training cost of Gaussian splatting.
 * **Parametric RoomPlan Mapping:** Uses Apple's local Core ML scene understanding to isolate indoor surfaces (walls, windows, doors) and objects (tables, sofas, chairs), then publishes clean parametric bounding boxes alongside regular pose and sensor streams.
 * **Adaptive Mapping Policy:** Scores RoomPlan suitability, outdoor GPS context, LiDAR confidence, Depth Anything availability, thermal pressure, and operator override state. It prefers RoomPlan inside enclosed rooms and switches to LiDAR + Depth Anything outdoors or in spaces where room semantics are weak.
 * **Geospatial Context:** GPS, heading, ENU frame registration, satellite imagery, and DEM/elevation tiles run alongside either mapping engine so outdoor datasets carry terrain and map context rather than only local AR geometry.
 
 ### 2. Multi-Format Serialization & Export
 A high-performance pipeline serializes inspection/export artifacts to the iOS local file system and syncs metadata over **SwiftData**. The authoritative robotics recording remains the external rosbag recorder unless local SQLite bag storage is explicitly enabled; local files support review, sharing, cache-backed publication, and field fallback. Exporting produces a standard iOS Share Sheet with files including:
-* **`.ply` (Binary PLY):** A high-density point cloud file encoding `x, y, z` floating coordinates and `red, green, blue` color attributes per-point.
+* **`.ply` (Binary PLY):** A high-density point cloud or surfel file encoding `x, y, z` floating coordinates and `red, green, blue` color attributes. Surfel PLY exports also include normals, radius, confidence, and observation counts for surface-oriented rendering or offline meshing.
 * **`.obj` (Wavefront 3D):** A standardized, polygonal mesh representing the tracked surfaces, textured with standard gray materials ready for importing into Blender, CAD, or Unity.
 * **`.usdz` (Universal Scene Description):** Apple’s native AR file format. Meshes are baked with physically plausible PBR materials for realistic lighting in iOS QuickLook or iMessage.
 * **`.pdf` (Dimensioned Blueprint):** A top-down 2D vector graphic blueprint featuring thick dark walls, red offset dimension ticks, measurement labels (in metric or imperial), and a graphic scale bar.
@@ -188,6 +189,7 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
 | `/reconstructor/gps/metadata` | `reconstructor_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
 | `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~10 Hz | Point cloud payloads downsampled to a sparse 10cm grid. Color values are packed into a single 32-bit integer (`rgb`). |
+| `/reconstructor/surfels` | `sensor_msgs/msg/PointCloud2` | ~1 Hz | Bounded colored surfel surface map with `x/y/z`, normals, radius, confidence, packed `rgb`, and observation count fields. |
 | `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | ~10 Hz | JPEG-compressed native ARKit camera image stream for visual loop closure and recorder context. |
 | `/reconstructor/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | ~10 Hz | Same-timestamp camera intrinsics for the compressed image stream, including `K`, `P`, rectification, image size, and zero-distortion pinhole coefficients. |
 | `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |

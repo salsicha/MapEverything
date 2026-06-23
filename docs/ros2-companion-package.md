@@ -89,7 +89,8 @@ rviz2 -d <repo>/ros2/rviz/mapeverything.rviz
 ```
 
 It opens native RViz displays for TF, pose, odometry, GPS fix, point cloud,
-camera image, satellite image, and the `/reconstructor/map` mesh marker layer.
+the `/reconstructor/surfels` colored surface map, camera image, satellite image,
+and the `/reconstructor/map` mesh marker layer.
 The structured custom topics `/reconstructor/radio`,
 `/reconstructor/satellite/tile_info`, `/reconstructor/dem/tile`,
 `/reconstructor/mesh_snapshot`, `/reconstructor/gps/metadata`,
@@ -97,6 +98,11 @@ The structured custom topics `/reconstructor/radio`,
 for rosbag2 recording and topic inspection. RViz does not render those custom
 message payloads directly unless a local converter node or RViz plugin maps
 them to standard `MarkerArray`, `Image`, `PointCloud2`, or `Map` topics.
+
+`/reconstructor/surfels` intentionally stays on standard `sensor_msgs/PointCloud2`.
+The extra fields are `normal_x`, `normal_y`, `normal_z`, `radius`,
+`confidence`, and `observation_count` alongside `x`, `y`, `z`, and packed `rgb`,
+so rosbag2 can record it without custom message generation.
 
 The config includes disabled placeholder displays for common converter outputs:
 

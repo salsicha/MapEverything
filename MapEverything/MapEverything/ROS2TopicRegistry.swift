@@ -14,6 +14,7 @@ enum ROS2TopicID: String, CaseIterable, Codable, Hashable {
     case tf
     case cameraCompressed
     case cameraInfo
+    case surfels
     case gpsFix
     case gpsMetadata
     case odom
@@ -183,6 +184,14 @@ final class ROS2TopicRegistry {
             topic: "/reconstructor/camera/camera_info",
             messageType: "sensor_msgs/msg/CameraInfo",
             defaultRateHz: 10,
+            isImplemented: true
+        ),
+        ROS2TopicDefinition(
+            id: .surfels,
+            stream: .pointCloud,
+            topic: "/reconstructor/surfels",
+            messageType: "sensor_msgs/msg/PointCloud2",
+            defaultRateHz: 1,
             isImplemented: true
         ),
         ROS2TopicDefinition(

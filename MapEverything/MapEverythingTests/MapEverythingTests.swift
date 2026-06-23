@@ -44,6 +44,36 @@ struct MapEverythingTests {
         
         #expect(downsampled.count == 2)
     }
+
+    @Test("Colored surfel map fuses repeated RGB-D samples")
+    func testColoredSurfelMapFusesSamples() async throws {
+        let map = ColoredSurfelMap(voxelSize: 0.05, maxSurfels: 10)
+        let first = ColoredPoint(
+            position: SIMD3<Float>(0.01, 0.01, -1.0),
+            color: SIMD3<UInt8>(200, 10, 20)
+        )
+        let second = ColoredPoint(
+            position: SIMD3<Float>(0.02, 0.01, -1.0),
+            color: SIMD3<UInt8>(100, 30, 40)
+        )
+
+        let count = await map.fuse(
+            points: [first, second],
+            observerPosition: SIMD3<Float>(0, 0, 0),
+            timestamp: 1
+        )
+        let surfels = await map.snapshot()
+        let surfel = try #require(surfels.first)
+
+        #expect(count == 1)
+        #expect(surfels.count == 1)
+        #expect(surfel.observationCount == 2)
+        #expect(surfel.confidence > 0.2)
+        #expect(surfel.radius > 0)
+        #expect(simd_length(surfel.normal) > 0.99)
+        #expect(surfel.color.x < 200)
+        #expect(surfel.color.x > 100)
+    }
     
     @Test("Successfully saves and loads PLY files to disk")
     func testStorageManagerSaveAndLoadPLY() {
@@ -59,6 +89,30 @@ struct MapEverythingTests {
         #expect(loadedPoints != nil)
         #expect(loadedPoints?.count == 2)
         #expect(loadedPoints?.first == points.first)
+    }
+
+    @Test("Successfully saves surfel PLY files with point-cloud compatible loading")
+    func testStorageManagerSaveAndLoadSurfelPLY() throws {
+        let manager = PointCloudStorageManager.shared
+        let filename = "test_surfels_\(UUID().uuidString)"
+        let surfels = [
+            ColoredSurfel(
+                position: SIMD3<Float>(1.0, 2.0, 3.0),
+                normal: SIMD3<Float>(0, 1, 0),
+                color: SIMD3<UInt8>(10, 20, 30),
+                radius: 0.04,
+                confidence: 0.8,
+                observationCount: 3
+            )
+        ]
+
+        let savedFile = try #require(manager.saveBinaryPLY(surfels: surfels, to: filename))
+        let loadedPoints = try #require(manager.loadBinaryPLY(from: savedFile))
+
+        #expect(savedFile == "\(filename).ply")
+        #expect(loadedPoints.count == 1)
+        #expect(loadedPoints.first?.position == surfels.first?.position)
+        #expect(loadedPoints.first?.color == surfels.first?.color)
     }
 
     @Test("Environment model initializes correctly")
@@ -566,7 +620,7 @@ struct MapEverythingTests {
 
         #expect(allTopics.count == ROS2TopicID.allCases.count)
         #expect(Set(allTopics.map(\.id)) == Set(ROS2TopicID.allCases))
-        #expect(Set(advertisedTopics.map(\.id)).isSuperset(of: [.cameraCompressed, .cameraInfo, .pointCloud, .meshSnapshot, .satelliteTileInfo, .demTile]))
+        #expect(Set(advertisedTopics.map(\.id)).isSuperset(of: [.cameraCompressed, .cameraInfo, .pointCloud, .surfels, .meshSnapshot, .satelliteTileInfo, .demTile]))
 
         let advertisedPayload = advertisedTopics.map { definition in
             [
@@ -628,6 +682,49 @@ struct MapEverythingTests {
             0.0, 590.0, 240.0, 0.0,
             0.0, 0.0, 1.0, 0.0
         ])
+        #expect(JSONSerialization.isValidJSONObject(msg))
+        _ = try JSONSerialization.data(withJSONObject: msg, options: [])
+    }
+
+    @Test("Surfel cloud payload uses PointCloud2 fields for colored surface reconstruction")
+    func testSurfelCloudPayloadUsesPointCloud2Fields() throws {
+        let registry = ROS2TopicRegistry()
+        let surfelTopic = registry.definition(.surfels)
+        let header: [String: Any] = [
+            "stamp": ["sec": 10, "nanosec": 20],
+            "frame_id": "map"
+        ]
+        let surfels = [
+            ColoredSurfel(
+                position: SIMD3<Float>(1, 2, 3),
+                normal: SIMD3<Float>(0, 1, 0),
+                color: SIMD3<UInt8>(10, 20, 30),
+                radius: 0.04,
+                confidence: 0.9,
+                observationCount: 4
+            )
+        ]
+
+        let msg = ROS2BridgeClient.makeSurfelPointCloudMessage(
+            surfels: surfels,
+            header: header
+        )
+        let fields = try #require(msg["fields"] as? [[String: Any]])
+        let fieldNames = Set(fields.compactMap { $0["name"] as? String })
+        let encodedData = try #require(msg["data"] as? String)
+        let decodedData = try #require(Data(base64Encoded: encodedData))
+
+        #expect(surfelTopic.topic == "/reconstructor/surfels")
+        #expect(surfelTopic.messageType == "sensor_msgs/msg/PointCloud2")
+        #expect(msg["point_step"] as? Int == 40)
+        #expect(msg["row_step"] as? Int == 40)
+        #expect(msg["width"] as? Int == 1)
+        #expect(decodedData.count == 40)
+        #expect(fieldNames.isSuperset(of: [
+            "x", "y", "z",
+            "normal_x", "normal_y", "normal_z",
+            "radius", "confidence", "rgb", "observation_count"
+        ]))
         #expect(JSONSerialization.isValidJSONObject(msg))
         _ = try JSONSerialization.data(withJSONObject: msg, options: [])
     }

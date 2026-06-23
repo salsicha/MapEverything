@@ -7,16 +7,44 @@
 
 import Foundation
 import ARKit
-import RealityKit
 import CoreVideo
 
-public struct ColoredPoint: Equatable {
+public struct ColoredPoint: Equatable, Sendable {
     public let position: SIMD3<Float>
     public let color: SIMD3<UInt8>
     
     public init(position: SIMD3<Float>, color: SIMD3<UInt8> = SIMD3<UInt8>(255, 255, 255)) {
         self.position = position
         self.color = color
+    }
+}
+
+public struct ColoredSurfel: Equatable, Sendable {
+    public let position: SIMD3<Float>
+    public let normal: SIMD3<Float>
+    public let color: SIMD3<UInt8>
+    public let radius: Float
+    public let confidence: Float
+    public let observationCount: UInt32
+
+    public init(
+        position: SIMD3<Float>,
+        normal: SIMD3<Float> = SIMD3<Float>(0, 1, 0),
+        color: SIMD3<UInt8> = SIMD3<UInt8>(255, 255, 255),
+        radius: Float = 0.03,
+        confidence: Float = 0,
+        observationCount: UInt32 = 1
+    ) {
+        self.position = position
+        self.normal = normal
+        self.color = color
+        self.radius = radius
+        self.confidence = confidence
+        self.observationCount = observationCount
+    }
+
+    var coloredPoint: ColoredPoint {
+        ColoredPoint(position: position, color: color)
     }
 }
 
@@ -303,5 +331,154 @@ actor PointCloudManager {
     
     func clear() {
         voxelMap.removeAll()
+    }
+}
+
+/// Incrementally fuses colored RGB-D samples into a bounded surfel map.
+actor ColoredSurfelMap {
+    private struct SurfelAccumulator {
+        var position: SIMD3<Float>
+        var normal: SIMD3<Float>
+        var color: SIMD3<Float>
+        var radius: Float
+        var confidence: Float
+        var observationCount: UInt32
+        var updatedAt: TimeInterval
+
+        var surfel: ColoredSurfel {
+            ColoredSurfel(
+                position: position,
+                normal: normal,
+                color: SIMD3<UInt8>(
+                    UInt8(max(0, min(255, color.x.rounded()))),
+                    UInt8(max(0, min(255, color.y.rounded()))),
+                    UInt8(max(0, min(255, color.z.rounded())))
+                ),
+                radius: radius,
+                confidence: confidence,
+                observationCount: observationCount
+            )
+        }
+    }
+
+    private var surfels: [SIMD3<Int>: SurfelAccumulator] = [:]
+    private var voxelSize: Float
+    private var maxSurfels: Int
+    private let maxFusionWeight: Float = 64
+
+    init(voxelSize: Float = 0.04, maxSurfels: Int = 300_000) {
+        self.voxelSize = voxelSize
+        self.maxSurfels = maxSurfels
+    }
+
+    func configure(voxelSize: Float? = nil, maxSurfels: Int? = nil) {
+        if let voxelSize {
+            self.voxelSize = max(0.01, voxelSize)
+        }
+        if let maxSurfels {
+            self.maxSurfels = max(1_000, maxSurfels)
+            trimIfNeeded()
+        }
+    }
+
+    func fuse(
+        points: [ColoredPoint],
+        observerPosition: SIMD3<Float>,
+        timestamp: TimeInterval
+    ) -> Int {
+        guard !points.isEmpty else { return surfels.count }
+
+        for point in points {
+            guard point.position.x.isFinite,
+                  point.position.y.isFinite,
+                  point.position.z.isFinite else {
+                continue
+            }
+
+            let key = voxelIndex(for: point.position)
+            let incomingNormal = estimatedNormal(point: point.position, observerPosition: observerPosition)
+            let incomingColor = SIMD3<Float>(
+                Float(point.color.x),
+                Float(point.color.y),
+                Float(point.color.z)
+            )
+
+            if var existing = surfels[key] {
+                let oldWeight = min(Float(existing.observationCount), maxFusionWeight)
+                let newWeight = oldWeight + 1
+                existing.position = ((existing.position * oldWeight) + point.position) / newWeight
+                existing.color = ((existing.color * oldWeight) + incomingColor) / newWeight
+                existing.normal = normalized((existing.normal * oldWeight) + incomingNormal)
+                existing.radius = min(max(existing.radius, voxelSize * 0.75), voxelSize * 2)
+                existing.confidence = min(1, existing.confidence + 0.04)
+                existing.observationCount = min(UInt32.max, existing.observationCount + 1)
+                existing.updatedAt = timestamp
+                surfels[key] = existing
+            } else {
+                surfels[key] = SurfelAccumulator(
+                    position: point.position,
+                    normal: incomingNormal,
+                    color: incomingColor,
+                    radius: voxelSize * 0.75,
+                    confidence: 0.2,
+                    observationCount: 1,
+                    updatedAt: timestamp
+                )
+            }
+        }
+
+        trimIfNeeded()
+        return surfels.count
+    }
+
+    func snapshot(maxCount: Int? = nil) -> [ColoredSurfel] {
+        let values = surfels.values
+            .sorted { lhs, rhs in
+                if lhs.confidence == rhs.confidence {
+                    return lhs.updatedAt > rhs.updatedAt
+                }
+                return lhs.confidence > rhs.confidence
+            }
+
+        if let maxCount, values.count > maxCount {
+            return values.prefix(maxCount).map(\.surfel)
+        }
+        return values.map(\.surfel)
+    }
+
+    func clear() {
+        surfels.removeAll()
+    }
+
+    private func voxelIndex(for position: SIMD3<Float>) -> SIMD3<Int> {
+        SIMD3<Int>(
+            Int(floor(position.x / voxelSize)),
+            Int(floor(position.y / voxelSize)),
+            Int(floor(position.z / voxelSize))
+        )
+    }
+
+    private func estimatedNormal(point: SIMD3<Float>, observerPosition: SIMD3<Float>) -> SIMD3<Float> {
+        normalized(observerPosition - point)
+    }
+
+    private func normalized(_ value: SIMD3<Float>) -> SIMD3<Float> {
+        let length = simd_length(value)
+        guard length.isFinite, length > 0.000_001 else {
+            return SIMD3<Float>(0, 1, 0)
+        }
+        return value / length
+    }
+
+    private func trimIfNeeded() {
+        guard surfels.count > maxSurfels else { return }
+        let removeCount = surfels.count - maxSurfels
+        let oldestKeys = surfels
+            .sorted { lhs, rhs in lhs.value.updatedAt < rhs.value.updatedAt }
+            .prefix(removeCount)
+            .map(\.key)
+        for key in oldestKeys {
+            surfels.removeValue(forKey: key)
+        }
     }
 }

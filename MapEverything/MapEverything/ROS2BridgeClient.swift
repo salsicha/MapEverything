@@ -725,6 +725,85 @@ class ROS2BridgeClient: ObservableObject {
             msg: msg
         )
     }
+
+    static func makeSurfelPointCloudMessage(
+        surfels: [ColoredSurfel],
+        header: [String: Any]
+    ) -> [String: Any] {
+        let pointStep = 40
+        let dataCount = surfels.count * pointStep
+        var data = Data(count: dataCount)
+
+        data.withUnsafeMutableBytes { rawBuffer in
+            guard let pointer = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+            var offset = 0
+            for surfel in surfels {
+                var x = surfel.position.x; var y = surfel.position.y; var z = surfel.position.z
+                var nx = surfel.normal.x; var ny = surfel.normal.y; var nz = surfel.normal.z
+                var radius = surfel.radius
+                var confidence = surfel.confidence
+                var rgb: UInt32 = (UInt32(surfel.color.x) << 16) | (UInt32(surfel.color.y) << 8) | UInt32(surfel.color.z)
+                var observationCount = surfel.observationCount
+                memcpy(pointer + offset, &x, 4); offset += 4
+                memcpy(pointer + offset, &y, 4); offset += 4
+                memcpy(pointer + offset, &z, 4); offset += 4
+                memcpy(pointer + offset, &nx, 4); offset += 4
+                memcpy(pointer + offset, &ny, 4); offset += 4
+                memcpy(pointer + offset, &nz, 4); offset += 4
+                memcpy(pointer + offset, &radius, 4); offset += 4
+                memcpy(pointer + offset, &confidence, 4); offset += 4
+                memcpy(pointer + offset, &rgb, 4); offset += 4
+                memcpy(pointer + offset, &observationCount, 4); offset += 4
+            }
+        }
+
+        return [
+            "header": header,
+            "height": 1,
+            "width": surfels.count,
+            "fields": [
+                ["name": "x", "offset": 0, "datatype": 7, "count": 1],
+                ["name": "y", "offset": 4, "datatype": 7, "count": 1],
+                ["name": "z", "offset": 8, "datatype": 7, "count": 1],
+                ["name": "normal_x", "offset": 12, "datatype": 7, "count": 1],
+                ["name": "normal_y", "offset": 16, "datatype": 7, "count": 1],
+                ["name": "normal_z", "offset": 20, "datatype": 7, "count": 1],
+                ["name": "radius", "offset": 24, "datatype": 7, "count": 1],
+                ["name": "confidence", "offset": 28, "datatype": 7, "count": 1],
+                ["name": "rgb", "offset": 32, "datatype": 6, "count": 1],
+                ["name": "observation_count", "offset": 36, "datatype": 6, "count": 1]
+            ],
+            "is_bigendian": false,
+            "point_step": pointStep,
+            "row_step": surfels.count * pointStep,
+            "data": data.base64EncodedString(),
+            "is_dense": true
+        ]
+    }
+
+    func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
+        guard topicRegistry.isStreamEnabled(.pointCloud), !surfels.isEmpty else { return }
+
+        let msg = Self.makeSurfelPointCloudMessage(
+            surfels: surfels,
+            header: createHeader(frameId: FrameID.map, timestamp: timestamp)
+        )
+        let encodedBytes = encodedPublishPayloadByteCount(
+            topic: topicRegistry.topic(.surfels),
+            msg: msg
+        ) ?? 0
+        recordStreamPayloadMetric(
+            stream: .pointCloud,
+            originalBytes: surfels.count * 40,
+            encodedBytes: encodedBytes,
+            compression: "surfel_pointcloud2_binary_base64"
+        )
+        publishOrBufferLocalSample(
+            kind: .pointCloud,
+            topic: topicRegistry.topic(.surfels),
+            msg: msg
+        )
+    }
     
     func publishMap(meshAnchors: [ARMeshAnchor], timestamp: TimeInterval) {
         guard topicRegistry.isStreamEnabled(.mesh), !meshAnchors.isEmpty else { return }

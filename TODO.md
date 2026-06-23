@@ -53,6 +53,7 @@
 
 - [x] Add mesh publishing fallback through `visualization_msgs/MarkerArray`.
 - [x] Define `reconstructor_msgs/MeshSnapshot` for structured mesh recording.
+- [x] Add colored surfel fusion, PLY export, and ROS `PointCloud2` publication.
 - [x] Add compression and payload-size metrics for camera and point-cloud streams.
 - [x] Add stress tests for large mesh snapshots and long-running point-cloud sessions.
 
