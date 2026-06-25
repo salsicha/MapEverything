@@ -216,6 +216,19 @@ python3 tools/rosbridge-throughput-benchmark.py --dry-run --duration 5
 python3 tools/rosbridge-throughput-benchmark.py --url ws://<RECORDER_IP>:9090 --duration 60
 ```
 
+To run rosbridge and record chunked rosbag2 SQLite files from one terminal, use:
+
+```bash
+python3 tools/run-rosbridge-recorder.py \
+  --setup ~/mapeverything_ws/install/setup.bash \
+  --output bags/mapeverything_field_test \
+  --chunk-size-mb 512
+```
+
+The helper records the default advertised MapEverything topics, rotates `.db3`
+bag chunks with `--max-bag-size`, and accepts `--include-optional`,
+`--topic /extra/topic`, or `--record-all` for broader capture profiles.
+
 ---
 
 ### Step-by-Step Remote ROS2 Workstation Configuration
