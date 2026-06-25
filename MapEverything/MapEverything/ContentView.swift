@@ -72,7 +72,7 @@ struct ContentView: View {
     @AppStorage("ros2WebSocketURL") private var ros2WebSocketURL: String = "ws://192.168.1.100:9090"
     @AppStorage("useImperialUnits") private var useImperialUnits: Bool = false
     
-    @State private var visualizationMode: VisualizationMode = .none
+    @State private var visualizationMode: VisualizationMode = .solidMesh
     @State private var isScanning = false
     @State private var pointCount = 0
     
@@ -112,9 +112,9 @@ struct ContentView: View {
         NavigationStack {
             ZStack(alignment: .bottom) {
                 ARViewContainer(
-                    visualizationMode: .constant(.wireframe),
+                    visualizationMode: $visualizationMode,
                     isScanning: $isScanning,
-                    appMode: .constant(.scan),
+                    appMode: $appMode,
                     measurementText: $measurementText,
                     pointCount: $pointCount,
                     trackingFeedback: $trackingFeedback,
@@ -147,20 +147,24 @@ struct ContentView: View {
                 .padding(.horizontal, 14)
                 .allowsHitTesting(false)
 
-                Button(action: toggleMapping) {
-                    HStack(spacing: 10) {
-                        Image(systemName: isScanning ? "stop.fill" : "play.fill")
-                            .font(.headline.weight(.bold))
-                        Text(isScanning ? "Stop" : "Start")
-                            .font(.headline.weight(.semibold))
+                VStack(spacing: 12) {
+                    visualizationModeControl
+
+                    Button(action: toggleMapping) {
+                        HStack(spacing: 10) {
+                            Image(systemName: isScanning ? "stop.fill" : "play.fill")
+                                .font(.headline.weight(.bold))
+                            Text(isScanning ? "Stop" : "Start")
+                                .font(.headline.weight(.semibold))
+                        }
+                        .foregroundColor(.white)
+                        .frame(width: 168, height: 56)
+                        .background(isScanning ? Color.red : Color.green)
+                        .clipShape(Capsule())
+                        .shadow(color: Color.black.opacity(0.35), radius: 12, x: 0, y: 6)
                     }
-                    .foregroundColor(.white)
-                    .frame(width: 168, height: 56)
-                    .background(isScanning ? Color.red : Color.green)
-                    .clipShape(Capsule())
-                    .shadow(color: Color.black.opacity(0.35), radius: 12, x: 0, y: 6)
+                    .accessibilityLabel(isScanning ? "Stop Mapping" : "Start Mapping")
                 }
-                .accessibilityLabel(isScanning ? "Stop Mapping" : "Start Mapping")
                 .padding(.bottom, 28)
             }
             .navigationBarHidden(true)
@@ -174,7 +178,7 @@ struct ContentView: View {
             }
             .onAppear {
                 appMode = .scan
-                visualizationMode = .wireframe
+                visualizationMode = .solidMesh
                 mappingSession.configure(recorderURL: ros2WebSocketURL)
             }
             .onChange(of: isScanning) { scanning in
@@ -232,6 +236,26 @@ struct ContentView: View {
                 .stroke(Color.white.opacity(0.18), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.25), radius: 8, x: 0, y: 4)
+    }
+
+    private var visualizationModeControl: some View {
+        Picker("Visualization", selection: $visualizationMode) {
+            ForEach(VisualizationMode.allCases) { mode in
+                Image(systemName: mode.iconName)
+                    .tag(mode)
+                    .accessibilityLabel(mode.rawValue)
+            }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 252)
+        .padding(8)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+        )
+        .accessibilityLabel("Visualization")
     }
 
     private func toggleMapping() {

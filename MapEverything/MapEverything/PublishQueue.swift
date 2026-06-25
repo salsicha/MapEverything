@@ -199,6 +199,8 @@ final class PublishQueue {
             }
         } else {
             sentMessages += 1
+            lastError = nil
+            lastErrorAt = nil
         }
 
         publishStats()

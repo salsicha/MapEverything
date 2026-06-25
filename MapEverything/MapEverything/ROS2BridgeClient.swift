@@ -643,9 +643,22 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishImage(frame: ARFrame, timestamp: TimeInterval) {
+        publishImage(
+            pixelBuffer: frame.capturedImage,
+            intrinsics: frame.camera.intrinsics,
+            imageResolution: frame.camera.imageResolution,
+            timestamp: timestamp
+        )
+    }
+
+    func publishImage(
+        pixelBuffer: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution: CGSize,
+        timestamp: TimeInterval
+    ) {
         guard isConnected, topicRegistry.isStreamEnabled(.camera) else { return }
 
-        let pixelBuffer = frame.capturedImage
         let header = createHeader(frameId: FrameID.iphoneCamera, timestamp: timestamp)
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
 
@@ -668,8 +681,8 @@ class ROS2BridgeClient: ObservableObject {
 
         let cameraInfo = Self.makeCameraInfoMessage(
             header: header,
-            intrinsics: frame.camera.intrinsics,
-            imageResolution: frame.camera.imageResolution
+            intrinsics: intrinsics,
+            imageResolution: imageResolution
         )
         send(op: "publish", topic: topicRegistry.topic(.cameraInfo), msg: cameraInfo)
     }

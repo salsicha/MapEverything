@@ -56,12 +56,25 @@ struct PointCloudProcessor {
     ///   - transform: The camera transform to convert points to world coordinates.
     /// - Returns: An array of ColoredPoint representing the processed point cloud with RGB data.
     func processPointCloud(frame: ARFrame, transform: simd_float4x4) -> [ColoredPoint] {
+        guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return [] }
+        return processPointCloud(
+            depthMap: sceneDepth.depthMap,
+            cameraImage: frame.capturedImage,
+            intrinsics: frame.camera.intrinsics,
+            imageResolution: frame.camera.imageResolution,
+            transform: transform
+        )
+    }
+
+    func processPointCloud(
+        depthMap: CVPixelBuffer,
+        cameraImage pixelBuffer: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution resolution: CGSize,
+        transform: simd_float4x4
+    ) -> [ColoredPoint] {
         var processedPoints: [ColoredPoint] = []
-        
-        // Extract dense LiDAR depth map instead of sparse visual features
-        guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return processedPoints }
-        let depthMap = sceneDepth.depthMap
-        
+
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         
@@ -80,7 +93,6 @@ struct PointCloudProcessor {
         // Calculate actual memory stride to prevent EXC_BAD_ACCESS crashes on padded GPU buffers
         let floatsPerRow = CVPixelBufferGetBytesPerRow(depthMap) / MemoryLayout<Float32>.stride
         
-        let pixelBuffer = frame.capturedImage
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
         
@@ -92,8 +104,6 @@ struct PointCloudProcessor {
         let yPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
         let cbcrPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
         
-        let intrinsics = frame.camera.intrinsics
-        let resolution = frame.camera.imageResolution
         let scaleX = Float(depthWidth) / Float(resolution.width)
         let scaleY = Float(depthHeight) / Float(resolution.height)
         let fx = intrinsics[0][0] * scaleX
@@ -157,9 +167,24 @@ struct PointCloudProcessor {
     ///   - depthMap: Dense metric depth aligned to the camera image (Float32, size from DA V2).
     /// - Returns: ColoredPoints in world space using RGB sampled from the camera frame.
     func processPointCloudEnhanced(frame: ARFrame, transform: simd_float4x4, depthMap: RelativeDepthMap) -> [ColoredPoint] {
+        processPointCloudEnhanced(
+            cameraImage: frame.capturedImage,
+            intrinsics: frame.camera.intrinsics,
+            imageResolution: frame.camera.imageResolution,
+            transform: transform,
+            depthMap: depthMap
+        )
+    }
+
+    func processPointCloudEnhanced(
+        cameraImage pixelBuffer: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution resolution: CGSize,
+        transform: simd_float4x4,
+        depthMap: RelativeDepthMap
+    ) -> [ColoredPoint] {
         var processed: [ColoredPoint] = []
 
-        let pixelBuffer = frame.capturedImage
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
@@ -174,8 +199,6 @@ struct PointCloudProcessor {
         let depthW = depthMap.width
         let depthH = depthMap.height
 
-        let intrinsics = frame.camera.intrinsics
-        let resolution = frame.camera.imageResolution
         let scaleX = Float(depthW) / Float(resolution.width)
         let scaleY = Float(depthH) / Float(resolution.height)
         let fx = intrinsics[0][0] * scaleX

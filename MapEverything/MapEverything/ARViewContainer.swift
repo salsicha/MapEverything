@@ -664,14 +664,20 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         depthAnythingProcessor != nil
     }
 
-    private func processFusedMappingFrame(frame: ARFrame, transform: simd_float4x4) async -> [ColoredPoint]? {
+    private func processFusedMappingFrame(
+        timestamp: TimeInterval,
+        cameraImage: CVPixelBuffer,
+        lidarDepthMap: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution: CGSize,
+        transform: simd_float4x4
+    ) async -> [ColoredPoint]? {
         // Rate-limit so the model only runs at ~enhancedFrameInterval. Returning an
         // empty array means "skip this frame" rather than falling back to LiDAR-only.
-        let now = frame.timestamp
         let canRun: Bool = await MainActor.run {
-            guard now - lastEnhancedFrameTime >= enhancedFrameInterval,
+            guard timestamp - lastEnhancedFrameTime >= enhancedFrameInterval,
                   !isRunningEnhancedInference else { return false }
-            lastEnhancedFrameTime = now
+            lastEnhancedFrameTime = timestamp
             isRunningEnhancedInference = true
             return true
         }
@@ -682,12 +688,17 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         }
 
         guard let processor = depthAnythingProcessor else { return nil }
-        guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
 
-        guard let relative = processor.inferRelativeDepth(from: frame.capturedImage) else { return nil }
-        guard let fused = processor.fuseMaximumLikelihood(relative: relative, lidarDepthMap: sceneDepth.depthMap) else { return nil }
+        guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
+        guard let fused = processor.fuseMaximumLikelihood(relative: relative, lidarDepthMap: lidarDepthMap) else { return nil }
 
-        return pointCloudProcessor.processPointCloudEnhanced(frame: frame, transform: transform, depthMap: fused)
+        return pointCloudProcessor.processPointCloudEnhanced(
+            cameraImage: cameraImage,
+            intrinsics: intrinsics,
+            imageResolution: imageResolution,
+            transform: transform,
+            depthMap: fused
+        )
     }
 
     func exportFloorplan(completion: @escaping (URL?) -> Void) {
@@ -992,6 +1003,14 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         
         let transform = frame.camera.transform
         let timestamp = frame.timestamp
+        guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else {
+            isProcessingFrame = false
+            return
+        }
+        let cameraImage = frame.capturedImage
+        let lidarDepthMap = sceneDepth.depthMap
+        let intrinsics = frame.camera.intrinsics
+        let imageResolution = frame.camera.imageResolution
         let cameraPosition = SIMD3<Float>(
             transform.columns.3.x,
             transform.columns.3.y,
@@ -999,25 +1018,26 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         )
         let shouldPublishPointCloud = timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
         let shouldPublishSurfels = timestamp - lastSurfelPublishTime >= surfelPublishInterval
+
+        if ROS2BridgeClient.shared.isConnected {
+            ROS2BridgeClient.shared.publishImage(
+                pixelBuffer: cameraImage,
+                intrinsics: intrinsics,
+                imageResolution: imageResolution,
+                timestamp: timestamp
+            )
+        }
+
+        let newPoints = pointCloudProcessor.processPointCloud(
+            depthMap: lidarDepthMap,
+            cameraImage: cameraImage,
+            intrinsics: intrinsics,
+            imageResolution: imageResolution,
+            transform: transform
+        )
         
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
-            
-            if ROS2BridgeClient.shared.isConnected {
-                ROS2BridgeClient.shared.publishImage(frame: frame, timestamp: timestamp)
-            }
-            
-            let shouldUseFusedDepth = await self.shouldUseFusedMappingDepth()
-            let newPoints: [ColoredPoint]
-            if shouldUseFusedDepth {
-                if let fusedPoints = await self.processFusedMappingFrame(frame: frame, transform: transform) {
-                    newPoints = fusedPoints
-                } else {
-                    newPoints = self.pointCloudProcessor.processPointCloud(frame: frame, transform: transform)
-                }
-            } else {
-                newPoints = self.pointCloudProcessor.processPointCloud(frame: frame, transform: transform)
-            }
 
             if !newPoints.isEmpty {
                 _ = await self.surfelMap.fuse(

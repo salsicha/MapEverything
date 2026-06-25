@@ -922,7 +922,7 @@ struct MapEverythingTests {
         #expect(await waitUntil { stats.latest?.sentMessages == 1 })
         #expect(sends.sentPayloads == ["retry-me", "retry-me"])
         #expect(stats.latest?.failedMessages == 0)
-        #expect(stats.latest?.lastError?.contains("/test/retry") == true)
+        #expect(stats.latest?.lastError == nil)
     }
 
     @Test("Local ROS2 bag storage is disabled by default")
