@@ -195,7 +195,9 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
 
     var currentMode: VisualizationMode = .none
     private var lastPointProcessingTime: TimeInterval = 0
-    private var pointProcessingInterval: TimeInterval = 0.1 // Process points 10 times a second
+    private var pointProcessingInterval: TimeInterval = 0.2 // Process points up to 5 times a second to avoid starving ARKit capture buffers
+    private var lastCameraImagePublishTime: TimeInterval = 0
+    private let cameraImagePublishInterval: TimeInterval = 1.0
     private var lastPointCloudPublishTime: TimeInterval = 0
     private let pointCloudPublishInterval: TimeInterval = 0.2 // Publish ROS point clouds at up to 5Hz
     private var lastSurfelPublishTime: TimeInterval = 0
@@ -1018,23 +1020,27 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         )
         let shouldPublishPointCloud = timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
         let shouldPublishSurfels = timestamp - lastSurfelPublishTime >= surfelPublishInterval
+        let shouldPublishCameraImage = timestamp - lastCameraImagePublishTime >= cameraImagePublishInterval
 
-        if ROS2BridgeClient.shared.isConnected {
-            ROS2BridgeClient.shared.publishImage(
-                pixelBuffer: cameraImage,
+        let newPoints: [ColoredPoint] = autoreleasepool {
+            if shouldPublishCameraImage, ROS2BridgeClient.shared.isConnected {
+                lastCameraImagePublishTime = timestamp
+                ROS2BridgeClient.shared.publishImage(
+                    pixelBuffer: cameraImage,
+                    intrinsics: intrinsics,
+                    imageResolution: imageResolution,
+                    timestamp: timestamp
+                )
+            }
+
+            return pointCloudProcessor.processPointCloud(
+                depthMap: lidarDepthMap,
+                cameraImage: cameraImage,
                 intrinsics: intrinsics,
                 imageResolution: imageResolution,
-                timestamp: timestamp
+                transform: transform
             )
         }
-
-        let newPoints = pointCloudProcessor.processPointCloud(
-            depthMap: lidarDepthMap,
-            cameraImage: cameraImage,
-            intrinsics: intrinsics,
-            imageResolution: imageResolution,
-            transform: transform
-        )
         
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
