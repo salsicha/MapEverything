@@ -308,17 +308,21 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
             }
 
-            HStack(spacing: 12) {
-                Label("\(queueStats.depth)/\(queueStats.capacity)", systemImage: "tray.full")
-                Label("\(queueStats.droppedMessages)", systemImage: "exclamationmark.triangle")
-                Label("\(localBufferStats.pointCloudSamples + localBufferStats.meshSamples)", systemImage: "externaldrive")
-                if localBagStats.isEnabled {
-                    Label("\(localBagStats.messageCount)", systemImage: "externaldrive.badge.plus")
-                }
-                Label(
-                    usesParametricRoomOverlay ? adaptiveMapping.activeMode.displayName : visualizationMode.rawValue,
-                    systemImage: usesParametricRoomOverlay ? "square.3.layers.3d" : visualizationMode.iconName
+            HStack(spacing: 10) {
+                diagnosticsMetric("\(queueStats.depth)/\(queueStats.capacity)", systemImage: "tray.full", minWidth: 56)
+                diagnosticsMetric("\(queueStats.droppedMessages)", systemImage: "exclamationmark.triangle", minWidth: 34)
+                diagnosticsMetric(
+                    "\(localBufferStats.pointCloudSamples + localBufferStats.meshSamples)",
+                    systemImage: "externaldrive",
+                    minWidth: 66
                 )
+                if localBagStats.isEnabled {
+                    diagnosticsMetric(
+                        "\(localBagStats.messageCount)",
+                        systemImage: "externaldrive.badge.plus",
+                        minWidth: 66
+                    )
+                }
             }
             .font(.caption2.monospacedDigit())
             .foregroundColor(.secondary)
@@ -341,6 +345,23 @@ struct ContentView: View {
                 .stroke(Color.white.opacity(0.18), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.25), radius: 8, x: 0, y: 4)
+    }
+
+    private func diagnosticsMetric(
+        _ value: String,
+        systemImage: String,
+        minWidth: CGFloat
+    ) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+                .frame(width: 14)
+            Text(value)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
+        }
+        .frame(minWidth: minWidth, alignment: .leading)
     }
 
     private func toggleMapping() {
