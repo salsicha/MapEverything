@@ -204,6 +204,18 @@ final class LocalROS2BagRecorder: ObservableObject {
         }
     }
 
+    private struct PendingWrite {
+        let topic: String
+        let messageType: String
+        let timestampNanoseconds: Int64
+        let data: Data
+    }
+
+    private static let writeBatchMaxMessages = 32
+    private static let writeBatchMaxBytes = 1_048_576
+    private static let writeBatchFlushDelay: TimeInterval = 0.25
+    private static let insertMessageSQL = "INSERT INTO messages(id, topic_id, timestamp, data) VALUES (?, ?, ?, ?)"
+
     private let queue = DispatchQueue(label: "com.mapeverything.localROS2BagRecorder", qos: .utility)
     private let fileManager: FileManager
     private let baseDirectoryURL: URL?
@@ -226,6 +238,9 @@ final class LocalROS2BagRecorder: ObservableObject {
     private var lastError: String?
     private var lastErrorAt: Date?
     private var acceptsRecords = false
+    private var pendingWrites: [PendingWrite] = []
+    private var pendingWriteBytes = 0
+    private var pendingFlushWorkItem: DispatchWorkItem?
 
     init(fileManager: FileManager = .default, baseDirectoryURL: URL? = nil) {
         self.fileManager = fileManager
@@ -308,7 +323,13 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     func flushAndWait() {
-        queue.sync {}
+        queue.sync {
+            do {
+                try self.flushPendingWrites(publishStatsAfterFlush: true)
+            } catch {
+                self.recordFailure("Failed to flush local rosbag: \(error.localizedDescription)")
+            }
+        }
     }
 
     func listBagSessions() throws -> [LocalROS2BagSession] {
@@ -332,9 +353,12 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     func deleteBagSession(_ session: LocalROS2BagSession) throws {
-        if stats.isRecording,
-           let activeURL = stats.bagDirectoryURL,
-           activeURL.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path {
+        let isActiveSession = queue.sync {
+            (self.acceptsRecords || self.database != nil)
+                && self.bagDirectoryURL?.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path
+        }
+
+        if isActiveSession {
             throw NSError(
                 domain: "LocalROS2BagRecorder",
                 code: 3,
@@ -370,33 +394,17 @@ final class LocalROS2BagRecorder: ObservableObject {
         timestampNanoseconds: Int64 = LocalROS2BagRecorder.nowNanoseconds()
     ) {
         queue.async {
-            guard self.configuration.isEnabled, self.database != nil else { return }
+            guard self.acceptsRecords, self.configuration.isEnabled, self.database != nil else { return }
 
             do {
-                if self.currentChunkMessageCount > 0,
-                   self.currentChunkBytes + data.count > self.configuration.maxChunkBytes {
-                    try self.rotateChunk(startingAt: timestampNanoseconds)
-                }
-
-                let topicID = try self.ensureTopic(topic, messageType: messageType)
-                try self.insertMessage(
-                    id: self.nextMessageID,
-                    topicID: topicID,
-                    timestampNanoseconds: timestampNanoseconds,
-                    data: data
+                try self.enqueuePendingWrite(
+                    PendingWrite(
+                        topic: topic,
+                        messageType: messageType,
+                        timestampNanoseconds: timestampNanoseconds,
+                        data: data
+                    )
                 )
-                self.nextMessageID += 1
-                self.currentChunkMessageCount += 1
-                self.currentChunkBytes += data.count
-                self.currentChunkStartNanoseconds = self.currentChunkStartNanoseconds ?? timestampNanoseconds
-                self.currentChunkEndNanoseconds = timestampNanoseconds
-
-                if var topicInfo = self.topicsByName[topic] {
-                    topicInfo.messageCount += 1
-                    self.topicsByName[topic] = topicInfo
-                }
-
-                self.publishStats(isRecording: true)
             } catch {
                 self.recordFailure("Failed to record \(topic): \(error.localizedDescription)")
             }
@@ -467,6 +475,9 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     private func resetBagState() {
+        cancelPendingFlush()
+        pendingWrites.removeAll()
+        pendingWriteBytes = 0
         database = nil
         bagDirectoryURL = nil
         currentChunkURL = nil
@@ -514,6 +525,12 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     private func closeCurrentBag(writeMetadata: Bool) {
+        do {
+            try flushPendingWrites(publishStatsAfterFlush: false)
+        } catch {
+            recordFailure("Failed to flush local rosbag: \(error.localizedDescription)")
+            return
+        }
         finalizeCurrentChunk()
         closeDatabase()
         if writeMetadata {
@@ -549,6 +566,128 @@ final class LocalROS2BagRecorder: ObservableObject {
         database = nil
     }
 
+    private func enqueuePendingWrite(_ write: PendingWrite) throws {
+        pendingWrites.append(write)
+        pendingWriteBytes += write.data.count
+
+        if pendingWrites.count >= Self.writeBatchMaxMessages
+            || pendingWriteBytes >= Self.writeBatchMaxBytes {
+            try flushPendingWrites(publishStatsAfterFlush: true)
+        } else {
+            schedulePendingFlush()
+        }
+    }
+
+    private func schedulePendingFlush() {
+        guard pendingFlushWorkItem == nil else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            do {
+                try self.flushPendingWrites(publishStatsAfterFlush: true)
+            } catch {
+                self.recordFailure("Failed to flush local rosbag: \(error.localizedDescription)")
+            }
+        }
+        pendingFlushWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + Self.writeBatchFlushDelay, execute: workItem)
+    }
+
+    private func cancelPendingFlush() {
+        pendingFlushWorkItem?.cancel()
+        pendingFlushWorkItem = nil
+    }
+
+    private func flushPendingWrites(publishStatsAfterFlush: Bool) throws {
+        cancelPendingFlush()
+        guard !pendingWrites.isEmpty else { return }
+        guard configuration.isEnabled, database != nil else {
+            pendingWrites.removeAll()
+            pendingWriteBytes = 0
+            return
+        }
+
+        let writes = pendingWrites
+        pendingWrites.removeAll()
+        pendingWriteBytes = 0
+
+        var transactionOpen = false
+        var messageStatement: OpaquePointer?
+
+        func beginTransaction() throws {
+            try execute("BEGIN IMMEDIATE TRANSACTION")
+            transactionOpen = true
+            messageStatement = try prepare(Self.insertMessageSQL)
+        }
+
+        func closeStatement() {
+            if let messageStatement {
+                sqlite3_finalize(messageStatement)
+            }
+            messageStatement = nil
+        }
+
+        func commitTransaction() throws {
+            closeStatement()
+            try execute("COMMIT")
+            transactionOpen = false
+        }
+
+        func rollbackTransaction() {
+            closeStatement()
+            if transactionOpen {
+                try? execute("ROLLBACK")
+                transactionOpen = false
+            }
+        }
+
+        do {
+            for write in writes {
+                if currentChunkMessageCount > 0,
+                   currentChunkBytes + write.data.count > configuration.maxChunkBytes {
+                    if transactionOpen {
+                        try commitTransaction()
+                    }
+                    try rotateChunk(startingAt: write.timestampNanoseconds)
+                }
+
+                if !transactionOpen {
+                    try beginTransaction()
+                }
+
+                let topicID = try ensureTopic(write.topic, messageType: write.messageType)
+                try insertMessage(
+                    id: nextMessageID,
+                    topicID: topicID,
+                    timestampNanoseconds: write.timestampNanoseconds,
+                    data: write.data,
+                    statement: messageStatement
+                )
+                nextMessageID += 1
+                currentChunkMessageCount += 1
+                currentChunkBytes += write.data.count
+                currentChunkStartNanoseconds = currentChunkStartNanoseconds ?? write.timestampNanoseconds
+                currentChunkEndNanoseconds = write.timestampNanoseconds
+
+                if var topicInfo = topicsByName[write.topic] {
+                    topicInfo.messageCount += 1
+                    topicsByName[write.topic] = topicInfo
+                }
+            }
+
+            if transactionOpen {
+                try commitTransaction()
+            }
+
+            if publishStatsAfterFlush {
+                publishStats(isRecording: true)
+            }
+        } catch {
+            rollbackTransaction()
+            throw error
+        }
+    }
+
     private func ensureTopic(_ topic: String, messageType: String) throws -> Int64 {
         let topicInfo: TopicInfo
         if let existing = topicsByName[topic] {
@@ -581,11 +720,13 @@ final class LocalROS2BagRecorder: ObservableObject {
         try stepDone(statement)
     }
 
-    private func insertMessage(id: Int64, topicID: Int64, timestampNanoseconds: Int64, data: Data) throws {
-        let sql = "INSERT INTO messages(id, topic_id, timestamp, data) VALUES (?, ?, ?, ?)"
-        let statement = try prepare(sql)
-        defer { sqlite3_finalize(statement) }
-
+    private func insertMessage(
+        id: Int64,
+        topicID: Int64,
+        timestampNanoseconds: Int64,
+        data: Data,
+        statement: OpaquePointer?
+    ) throws {
         sqlite3_bind_int64(statement, 1, id)
         sqlite3_bind_int64(statement, 2, topicID)
         sqlite3_bind_int64(statement, 3, timestampNanoseconds)
@@ -594,6 +735,8 @@ final class LocalROS2BagRecorder: ObservableObject {
         }
 
         try stepDone(statement)
+        sqlite3_reset(statement)
+        sqlite3_clear_bindings(statement)
     }
 
     private func execute(_ sql: String) throws {
@@ -728,6 +871,9 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     private func recordFailure(_ message: String) {
+        cancelPendingFlush()
+        pendingWrites.removeAll()
+        pendingWriteBytes = 0
         lastError = message
         lastErrorAt = Date()
         closeDatabase()

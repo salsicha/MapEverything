@@ -50,6 +50,17 @@ enum PublishQueueTransportError: LocalizedError {
     }
 }
 
+enum PublishQueueEncodingError: LocalizedError {
+    case invalidJSONObject
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidJSONObject:
+            return "Payload is not a valid JSON object."
+        }
+    }
+}
+
 final class PublishQueue {
     enum DropPolicy {
         case dropOldestPublish
@@ -99,6 +110,10 @@ final class PublishQueue {
     private var lastError: String?
     private var lastErrorAt: Date?
 
+    private var outstandingCount: Int {
+        pending.count + (isSending ? 1 : 0)
+    }
+
     init(configuration: Configuration = .default, sendHandler: @escaping SendHandler) {
         self.configuration = configuration
         self.sendHandler = sendHandler
@@ -129,15 +144,24 @@ final class PublishQueue {
     }
 
     func enqueue(payload: [String: Any], op: String, topic: String) {
+        guard JSONSerialization.isValidJSONObject(payload) else {
+            recordEncodingFailure(topic: topic, error: PublishQueueEncodingError.invalidJSONObject)
+            return
+        }
+
         do {
             let data = try JSONSerialization.data(withJSONObject: payload, options: [])
             enqueueEncodedPayload(data, op: op, topic: topic)
         } catch {
-            queue.async {
-                self.failedMessages += 1
-                self.recordError("Failed to encode \(topic): \(error.localizedDescription)")
-                self.publishStats()
-            }
+            recordEncodingFailure(topic: topic, error: error)
+        }
+    }
+
+    func recordEncodingFailure(topic: String, error: Error) {
+        queue.async {
+            self.failedMessages += 1
+            self.recordError("Failed to encode \(topic): \(error.localizedDescription)")
+            self.publishStats()
         }
     }
 
@@ -212,7 +236,7 @@ final class PublishQueue {
     }
 
     private func makeRoom(for entry: Entry) -> Bool {
-        guard pending.count >= configuration.capacity else { return true }
+        guard outstandingCount >= configuration.capacity else { return true }
 
         switch configuration.dropPolicy {
         case .dropOldestPublish:
@@ -224,6 +248,12 @@ final class PublishQueue {
             }
 
             if entry.op == "publish" {
+                droppedMessages += 1
+                recordError("Dropped incoming message for \(entry.topic): publish queue full.")
+                return false
+            }
+
+            guard !pending.isEmpty else {
                 droppedMessages += 1
                 recordError("Dropped incoming message for \(entry.topic): publish queue full.")
                 return false
@@ -245,7 +275,7 @@ final class PublishQueue {
         onStatsChange?(
             PublishQueueStats(
                 capacity: configuration.capacity,
-                depth: pending.count,
+                depth: outstandingCount,
                 inFlight: isSending ? 1 : 0,
                 sentMessages: sentMessages,
                 droppedMessages: droppedMessages,

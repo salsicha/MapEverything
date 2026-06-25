@@ -249,11 +249,13 @@ class ROS2BridgeClient: ObservableObject {
         if let type = type { payload["type"] = type }
         if let msg = msg { payload["msg"] = msg }
 
+        guard let data = encodeRosbridgePayload(payload, topic: topic) else { return }
+
         if op == "publish", let msg {
-            recordLocalBagPublish(topic: topic, msg: msg)
+            recordLocalBagPublish(topic: topic, msg: msg, encodedData: data)
         }
 
-        publishQueue.enqueue(payload: payload, op: op, topic: topic)
+        publishQueue.enqueueEncodedPayload(data, op: op, topic: topic)
     }
 
     private func publishOrBufferLocalSample(
@@ -267,8 +269,8 @@ class ROS2BridgeClient: ObservableObject {
             "msg": msg
         ]
 
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []) else { return }
-        recordLocalBagPublish(topic: topic, msg: msg)
+        guard let data = encodeRosbridgePayload(payload, topic: topic) else { return }
+        recordLocalBagPublish(topic: topic, msg: msg, encodedData: data)
 
         if isConnected {
             publishQueue.enqueueEncodedPayload(data, op: "publish", topic: topic)
@@ -277,9 +279,29 @@ class ROS2BridgeClient: ObservableObject {
         }
     }
 
-    private func recordLocalBagPublish(topic: String, msg: [String: Any]) {
+    private func encodeRosbridgePayload(_ payload: [String: Any], topic: String) -> Data? {
+        guard JSONSerialization.isValidJSONObject(payload) else {
+            publishQueue.recordEncodingFailure(topic: topic, error: PublishQueueEncodingError.invalidJSONObject)
+            return nil
+        }
+
+        do {
+            return try JSONSerialization.data(withJSONObject: payload, options: [])
+        } catch {
+            publishQueue.recordEncodingFailure(topic: topic, error: error)
+            return nil
+        }
+    }
+
+    private func recordLocalBagPublish(topic: String, msg: [String: Any], encodedData data: Data) {
         let messageType = topicRegistry.definition(forTopic: topic)?.messageType ?? "unknown_msgs/msg/Unknown"
-        localBagRecorder.recordPublishedTopic(topic: topic, messageType: messageType, msg: msg)
+        let timestamp = LocalROS2BagRecorder.timestampNanoseconds(from: msg) ?? LocalROS2BagRecorder.nowNanoseconds()
+        localBagRecorder.recordEncodedPublishPayload(
+            data,
+            topic: topic,
+            messageType: messageType,
+            timestampNanoseconds: timestamp
+        )
     }
 
     private func bufferLocalSample(kind: LocalBufferedSampleKind, topic: String, data: Data) {

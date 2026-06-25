@@ -11,6 +11,47 @@ import ARKit
 import RoomPlan
 import SceneKit
 
+struct MeshRebuildThrottle {
+    let minimumInterval: TimeInterval
+    private var lastScheduledAt: [UUID: TimeInterval] = [:]
+    private var activeTokens: [UUID: UUID] = [:]
+
+    init(minimumInterval: TimeInterval) {
+        self.minimumInterval = minimumInterval
+    }
+
+    mutating func begin(anchorID: UUID, now: TimeInterval, force: Bool = false) -> UUID? {
+        if !force {
+            guard activeTokens[anchorID] == nil else { return nil }
+            if let lastScheduled = lastScheduledAt[anchorID],
+               now - lastScheduled < minimumInterval {
+                return nil
+            }
+        }
+
+        let token = UUID()
+        activeTokens[anchorID] = token
+        lastScheduledAt[anchorID] = now
+        return token
+    }
+
+    mutating func finish(anchorID: UUID, token: UUID) -> Bool {
+        guard activeTokens[anchorID] == token else { return false }
+        activeTokens.removeValue(forKey: anchorID)
+        return true
+    }
+
+    mutating func removeAnchor(_ anchorID: UUID) {
+        activeTokens.removeValue(forKey: anchorID)
+        lastScheduledAt.removeValue(forKey: anchorID)
+    }
+
+    mutating func removeAll() {
+        activeTokens.removeAll()
+        lastScheduledAt.removeAll()
+    }
+}
+
 struct ARViewContainer: UIViewControllerRepresentable {
     @Binding var visualizationMode: VisualizationMode
     @Binding var isScanning: Bool
@@ -180,6 +221,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private let meshSnapshotPublishConfiguration = MeshSnapshotPublishConfiguration.default
     private var anchorEntities: [UUID: AnchorEntity] = [:]
     private var meshUpdateTasks: [UUID: Task<Void, Never>] = [:]
+    private var meshRebuildThrottle = MeshRebuildThrottle(minimumInterval: 0.35)
     
     private var liveSurfelAnchor: AnchorEntity?
     private var liveSurfelEntity: ModelEntity?
@@ -402,6 +444,13 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private func cancelMeshUpdateTasks() {
         meshUpdateTasks.values.forEach { $0.cancel() }
         meshUpdateTasks.removeAll()
+        meshRebuildThrottle.removeAll()
+    }
+
+    private func finishMeshRebuild(anchorID: UUID, token: UUID) {
+        if meshRebuildThrottle.finish(anchorID: anchorID, token: token) {
+            meshUpdateTasks.removeValue(forKey: anchorID)
+        }
     }
 
     var isDepthAnythingModelAvailable: Bool {
@@ -844,19 +893,31 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         for anchor in anchors {
             if let meshAnchor = anchor as? ARMeshAnchor {
                 guard isScanning else { continue }
+                let identifier = meshAnchor.identifier
+                let rebuildToken = meshRebuildThrottle.begin(
+                    anchorID: identifier,
+                    now: ProcessInfo.processInfo.systemUptime,
+                    force: true
+                )
+                guard let rebuildToken else { continue }
+
                 let desc = MeshGenerator.createDescriptor(from: meshAnchor.geometry)
                 
                 // Create and add the tracking anchor immediately on the main thread
                 let anchorEntity = AnchorEntity(anchor: meshAnchor)
-                self.anchorEntities[meshAnchor.identifier] = anchorEntity
+                self.anchorEntities[identifier] = anchorEntity
                 self.arView?.scene.addAnchor(anchorEntity)
                 
                 let isSolid = (currentMode == .solidMesh)
-                let identifier = meshAnchor.identifier
                 
                 meshUpdateTasks[identifier]?.cancel()
                 
                 let task = Task { [weak self] in
+                    defer {
+                        Task { @MainActor in
+                            self?.finishMeshRebuild(anchorID: identifier, token: rebuildToken)
+                        }
+                    }
                     guard let self = self else { return }
                     
                     do {
@@ -891,11 +952,21 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         for anchor in anchors {
             if let meshAnchor = anchor as? ARMeshAnchor,
                let entity = meshEntities[meshAnchor.identifier] {
+                let identifier = meshAnchor.identifier
+                let rebuildToken = meshRebuildThrottle.begin(
+                    anchorID: identifier,
+                    now: ProcessInfo.processInfo.systemUptime
+                )
+                guard let rebuildToken else { continue }
+
                 let desc = MeshGenerator.createDescriptor(from: meshAnchor.geometry)
                 
-                meshUpdateTasks[meshAnchor.identifier]?.cancel()
-                
-                let task = Task { [weak entity] in
+                let task = Task { [weak self, weak entity] in
+                    defer {
+                        Task { @MainActor in
+                            self?.finishMeshRebuild(anchorID: identifier, token: rebuildToken)
+                        }
+                    }
                     guard let entity = entity else { return }
                     do {
                         let meshResource = try await MeshResource(from: [desc])
@@ -912,7 +983,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                         print("Failed to update mesh entity: \(error)")
                     }
                 }
-                meshUpdateTasks[meshAnchor.identifier] = task
+                meshUpdateTasks[identifier] = task
             }
         }
     }
@@ -940,6 +1011,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             if let meshAnchor = anchor as? ARMeshAnchor {
                 meshUpdateTasks[meshAnchor.identifier]?.cancel()
                 meshUpdateTasks.removeValue(forKey: meshAnchor.identifier)
+                meshRebuildThrottle.removeAnchor(meshAnchor.identifier)
                 
                 if let anchorEntity = anchorEntities[meshAnchor.identifier] {
                     arView?.scene.removeAnchor(anchorEntity)

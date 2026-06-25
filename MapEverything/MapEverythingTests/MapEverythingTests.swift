@@ -80,6 +80,83 @@ struct MapEverythingTests {
         #expect(surfel.color.x < 200)
         #expect(surfel.color.x > 100)
     }
+
+    @Test("Colored surfel capped snapshots keep highest-priority surfels")
+    func testColoredSurfelMapCappedSnapshotKeepsHighestPrioritySurfels() async throws {
+        let map = ColoredSurfelMap(voxelSize: 0.05, maxSurfels: 20)
+
+        for index in 0..<5 {
+            let point = ColoredPoint(
+                position: SIMD3<Float>(Float(index) * 0.1 + 0.01, 0.01, -1.0),
+                color: SIMD3<UInt8>(UInt8(20 * index), 30, 40)
+            )
+            _ = await map.fuse(
+                points: [point],
+                observerPosition: SIMD3<Float>(0, 0, 0),
+                timestamp: TimeInterval(index)
+            )
+        }
+
+        let surfels = await map.snapshot(maxCount: 2)
+
+        #expect(surfels.count == 2)
+        #expect(surfels.allSatisfy { $0.position.x > 0.25 })
+    }
+
+    @Test("Colored surfel map trims oldest overflow without losing recent surfels")
+    func testColoredSurfelMapTrimsOldestOverflow() async throws {
+        let map = ColoredSurfelMap(voxelSize: 0.05, maxSurfels: 3)
+
+        for index in 0..<5 {
+            let point = ColoredPoint(
+                position: SIMD3<Float>(Float(index) * 0.1 + 0.01, 0.01, -1.0),
+                color: SIMD3<UInt8>(UInt8(20 * index), 30, 40)
+            )
+            _ = await map.fuse(
+                points: [point],
+                observerPosition: SIMD3<Float>(0, 0, 0),
+                timestamp: TimeInterval(index)
+            )
+        }
+
+        let surfels = await map.snapshot()
+
+        #expect(surfels.count == 3)
+        #expect(surfels.allSatisfy { $0.position.x > 0.15 })
+    }
+
+    @Test("Mesh rebuild throttle gates work per anchor")
+    func testMeshRebuildThrottleGatesPerAnchor() throws {
+        var throttle = MeshRebuildThrottle(minimumInterval: 0.5)
+        let firstAnchor = UUID()
+        let secondAnchor = UUID()
+
+        let initialToken = throttle.begin(anchorID: firstAnchor, now: 1.0)
+        let firstToken = try #require(initialToken)
+        let skippedInFlightToken = throttle.begin(anchorID: firstAnchor, now: 1.1)
+        let otherAnchorToken = throttle.begin(anchorID: secondAnchor, now: 1.1)
+        #expect(skippedInFlightToken == nil)
+        #expect(otherAnchorToken != nil)
+
+        let finishedInitial = throttle.finish(anchorID: firstAnchor, token: firstToken)
+        #expect(finishedInitial)
+        let skippedIntervalToken = throttle.begin(anchorID: firstAnchor, now: 1.2)
+        #expect(skippedIntervalToken == nil)
+
+        let intervalToken = throttle.begin(anchorID: firstAnchor, now: 1.6)
+        let secondToken = try #require(intervalToken)
+        let replacementToken = throttle.begin(anchorID: firstAnchor, now: 1.7, force: true)
+        let forcedToken = try #require(replacementToken)
+
+        let finishedStale = throttle.finish(anchorID: firstAnchor, token: secondToken)
+        let finishedForced = throttle.finish(anchorID: firstAnchor, token: forcedToken)
+        #expect(!finishedStale)
+        #expect(finishedForced)
+
+        throttle.removeAnchor(secondAnchor)
+        let resetAnchorToken = throttle.begin(anchorID: secondAnchor, now: 1.2)
+        #expect(resetAnchorToken != nil)
+    }
     
     @Test("Depth Anything V2 model loads and produces a depth map")
     func testDepthAnythingProcessorInference() throws {
@@ -858,17 +935,48 @@ struct MapEverythingTests {
         queue.enqueueEncodedPayload(Data("third".utf8), op: "publish", topic: "/test/third")
         queue.enqueueEncodedPayload(Data("fourth".utf8), op: "publish", topic: "/test/fourth")
 
-        #expect(await waitUntil { stats.latest?.droppedMessages == 1 && stats.latest?.depth == 2 })
-        #expect(stats.latest?.lastError?.contains("/test/second") == true)
+        #expect(await waitUntil { stats.latest?.droppedMessages == 2 && stats.latest?.depth == 2 })
+        #expect(stats.latest?.lastError?.contains("/test/third") == true)
 
         sends.completeNext(with: nil)
         #expect(await waitUntil { sends.sentPayloads.count == 2 })
         sends.completeNext(with: nil)
-        #expect(await waitUntil { sends.sentPayloads.count == 3 })
-        sends.completeNext(with: nil)
-        #expect(await waitUntil { stats.latest?.sentMessages == 3 })
+        #expect(await waitUntil { stats.latest?.sentMessages == 2 })
 
-        #expect(sends.sentPayloads == ["first", "third", "fourth"])
+        #expect(sends.sentPayloads == ["first", "fourth"])
+        #expect(stats.latest?.depth == 0)
+        #expect(stats.latest?.failedMessages == 0)
+    }
+
+    @Test("Publish queue counts the in-flight send against capacity")
+    func testPublishQueueBackpressureCountsInFlightSend() async throws {
+        let stats = PublishQueueStatsRecorder()
+        let sends = PublishQueueSendRecorder()
+        let queue = PublishQueue(
+            configuration: PublishQueue.Configuration(
+                capacity: 1,
+                maxRetries: 0,
+                retryDelayMilliseconds: 1,
+                dropPolicy: .dropOldestPublish
+            )
+        ) { data, completion in
+            sends.record(data: data, completion: completion)
+        }
+        queue.onStatsChange = stats.record
+
+        queue.enqueueEncodedPayload(Data("first".utf8), op: "publish", topic: "/test/first")
+        #expect(await waitUntil { sends.sentPayloads == ["first"] && stats.latest?.depth == 1 })
+
+        queue.enqueueEncodedPayload(Data("second".utf8), op: "publish", topic: "/test/second")
+        queue.enqueueEncodedPayload(Data("third".utf8), op: "advertise", topic: "/test/third")
+
+        #expect(await waitUntil { stats.latest?.droppedMessages == 2 })
+        #expect(stats.latest?.depth == 1)
+        #expect(stats.latest?.lastError?.contains("/test/third") == true)
+
+        sends.completeNext(with: nil)
+        #expect(await waitUntil { stats.latest?.sentMessages == 1 && stats.latest?.depth == 0 })
+        #expect(sends.sentPayloads == ["first"])
         #expect(stats.latest?.failedMessages == 0)
     }
 
@@ -899,6 +1007,37 @@ struct MapEverythingTests {
         #expect(sends.sentPayloads == ["retry-me", "retry-me"])
         #expect(stats.latest?.failedMessages == 0)
         #expect(stats.latest?.lastError == nil)
+    }
+
+    @Test("Publish queue reports payload encoding failures")
+    func testPublishQueueReportsPayloadEncodingFailures() async throws {
+        let stats = PublishQueueStatsRecorder()
+        let sends = PublishQueueSendRecorder()
+        let queue = PublishQueue(
+            configuration: PublishQueue.Configuration(
+                capacity: 4,
+                maxRetries: 0,
+                retryDelayMilliseconds: 1,
+                dropPolicy: .dropOldestPublish
+            )
+        ) { data, completion in
+            sends.record(data: data, completion: completion)
+        }
+        queue.onStatsChange = stats.record
+
+        queue.enqueue(
+            payload: [
+                "op": "publish",
+                "topic": "/test/bad",
+                "msg": ["invalid": Date()]
+            ],
+            op: "publish",
+            topic: "/test/bad"
+        )
+
+        #expect(await waitUntil { stats.latest?.failedMessages == 1 })
+        #expect(stats.latest?.lastError?.contains("/test/bad") == true)
+        #expect(sends.sentPayloads.isEmpty)
     }
 
     @Test("Local ROS2 bag storage is disabled by default")
@@ -982,6 +1121,47 @@ struct MapEverythingTests {
 
         try recorder.deleteBagSession(listedSession)
         #expect(try recorder.listBagSessions().isEmpty)
+    }
+
+    @Test("Local ROS2 bag recorder flushes pending SQLite batches")
+    func testLocalROS2BagRecorderFlushesPendingSQLiteBatches() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("MapEverythingLocalBagBatch-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: rootURL) }
+
+        let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
+        recorder.start(
+            sessionID: UUID(),
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+        )
+
+        recorder.recordPublishedTopic(
+            topic: "/mapping/status",
+            messageType: "diagnostic_msgs/msg/DiagnosticArray",
+            msg: makeLocalBagMessage(sequence: 1, payloadSize: 128)
+        )
+        recorder.recordPublishedTopic(
+            topic: "/mapping/status",
+            messageType: "diagnostic_msgs/msg/DiagnosticArray",
+            msg: makeLocalBagMessage(sequence: 2, payloadSize: 128)
+        )
+        recorder.flushAndWait()
+
+        let bagDirectory = try #require(
+            try fileManager.contentsOfDirectory(
+                at: rootURL,
+                includingPropertiesForKeys: [.isDirectoryKey]
+            ).first { url in
+                (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }
+        )
+        let chunkURL = bagDirectory.appendingPathComponent("mapeverything_0.db3")
+        #expect(try sqliteInteger(url: chunkURL, sql: "SELECT COUNT(*) FROM messages") == 2)
+        #expect(try sqliteInteger(url: chunkURL, sql: "SELECT COUNT(*) FROM topics WHERE name = '/mapping/status'") == 1)
+
+        recorder.stopAndWait()
     }
 
     @Test("Expanded SwiftData schema stores mapping session records")

@@ -384,6 +384,77 @@ actor ColoredSurfelMap {
         }
     }
 
+    private struct RemovalCandidate {
+        let key: SIMD3<Int>
+        let updatedAt: TimeInterval
+    }
+
+    private struct BinaryHeap<Element> {
+        private(set) var elements: [Element] = []
+        private let hasHigherPriority: (Element, Element) -> Bool
+
+        var count: Int {
+            elements.count
+        }
+
+        var root: Element? {
+            elements.first
+        }
+
+        init(hasHigherPriority: @escaping (Element, Element) -> Bool) {
+            self.hasHigherPriority = hasHigherPriority
+        }
+
+        mutating func insert(_ element: Element) {
+            elements.append(element)
+            siftUp(from: elements.count - 1)
+        }
+
+        mutating func replaceRoot(with element: Element) {
+            guard !elements.isEmpty else {
+                insert(element)
+                return
+            }
+
+            elements[0] = element
+            siftDown(from: 0)
+        }
+
+        private mutating func siftUp(from index: Int) {
+            var child = index
+            while child > 0 {
+                let parent = (child - 1) / 2
+                guard hasHigherPriority(elements[child], elements[parent]) else { return }
+                elements.swapAt(child, parent)
+                child = parent
+            }
+        }
+
+        private mutating func siftDown(from index: Int) {
+            var parent = index
+
+            while true {
+                let left = parent * 2 + 1
+                let right = left + 1
+                var candidate = parent
+
+                if left < elements.count,
+                   hasHigherPriority(elements[left], elements[candidate]) {
+                    candidate = left
+                }
+
+                if right < elements.count,
+                   hasHigherPriority(elements[right], elements[candidate]) {
+                    candidate = right
+                }
+
+                guard candidate != parent else { return }
+                elements.swapAt(parent, candidate)
+                parent = candidate
+            }
+        }
+    }
+
     private var surfels: [SIMD3<Int>: SurfelAccumulator] = [:]
     private var voxelSize: Float
     private var maxSurfels: Int
@@ -455,18 +526,29 @@ actor ColoredSurfelMap {
     }
 
     func snapshot(maxCount: Int? = nil) -> [ColoredSurfel] {
-        let values = surfels.values
-            .sorted { lhs, rhs in
-                if lhs.confidence == rhs.confidence {
-                    return lhs.updatedAt > rhs.updatedAt
-                }
-                return lhs.confidence > rhs.confidence
-            }
-
-        if let maxCount, values.count > maxCount {
-            return values.prefix(maxCount).map(\.surfel)
+        guard let maxCount else {
+            return surfels.values.map(\.surfel)
         }
-        return values.map(\.surfel)
+
+        let limit = max(0, maxCount)
+        guard limit > 0 else { return [] }
+        guard surfels.count > limit else {
+            return surfels.values.map(\.surfel)
+        }
+
+        var selected = BinaryHeap<SurfelAccumulator> {
+            Self.hasLowerSnapshotPriority($0, than: $1)
+        }
+        for surfel in surfels.values {
+            if selected.count < limit {
+                selected.insert(surfel)
+            } else if let lowestSelected = selected.root,
+                      Self.hasHigherSnapshotPriority(surfel, than: lowestSelected) {
+                selected.replaceRoot(with: surfel)
+            }
+        }
+
+        return selected.elements.map(\.surfel)
     }
 
     func clear() {
@@ -493,15 +575,43 @@ actor ColoredSurfelMap {
         return value / length
     }
 
+    private static func hasHigherSnapshotPriority(_ lhs: SurfelAccumulator, than rhs: SurfelAccumulator) -> Bool {
+        if lhs.confidence == rhs.confidence {
+            return lhs.updatedAt > rhs.updatedAt
+        }
+        return lhs.confidence > rhs.confidence
+    }
+
+    private static func hasLowerSnapshotPriority(_ lhs: SurfelAccumulator, than rhs: SurfelAccumulator) -> Bool {
+        if lhs.confidence == rhs.confidence {
+            return lhs.updatedAt < rhs.updatedAt
+        }
+        return lhs.confidence < rhs.confidence
+    }
+
+    private static func isNewerRemovalCandidate(_ lhs: RemovalCandidate, than rhs: RemovalCandidate) -> Bool {
+        lhs.updatedAt > rhs.updatedAt
+    }
+
     private func trimIfNeeded() {
         guard surfels.count > maxSurfels else { return }
         let removeCount = surfels.count - maxSurfels
-        let oldestKeys = surfels
-            .sorted { lhs, rhs in lhs.value.updatedAt < rhs.value.updatedAt }
-            .prefix(removeCount)
-            .map(\.key)
-        for key in oldestKeys {
-            surfels.removeValue(forKey: key)
+
+        var oldest = BinaryHeap<RemovalCandidate> {
+            Self.isNewerRemovalCandidate($0, than: $1)
+        }
+        for (key, surfel) in surfels {
+            let candidate = RemovalCandidate(key: key, updatedAt: surfel.updatedAt)
+            if oldest.count < removeCount {
+                oldest.insert(candidate)
+            } else if let newestRemovalCandidate = oldest.root,
+                      candidate.updatedAt < newestRemovalCandidate.updatedAt {
+                oldest.replaceRoot(with: candidate)
+            }
+        }
+
+        for candidate in oldest.elements {
+            surfels.removeValue(forKey: candidate.key)
         }
     }
 }
