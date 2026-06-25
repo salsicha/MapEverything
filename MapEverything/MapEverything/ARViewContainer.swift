@@ -164,6 +164,11 @@ protocol ARViewControllerDelegate: AnyObject {
 }
 
 class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDelegate, RoomCaptureSessionDelegate {
+    private struct SurfelPreviewMesh {
+        let descriptor: MeshDescriptor
+        let colorAtlas: CGImage
+    }
+
     var arView: ARView? // Using RealityKit's ARView
     var roomCaptureView: RoomCaptureView?
     var capturedRoom: CapturedRoom?
@@ -203,6 +208,9 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private var lastSurfelPublishTime: TimeInterval = 0
     private let surfelPublishInterval: TimeInterval = 1.0
     private let maxPublishedSurfels = 25_000
+    private let maxDisplayedSurfels = 12_000
+    private let surfelVisualizationInterval: TimeInterval = 0.5
+    private var lastSurfelVisualizationTime: TimeInterval = 0
     private var isProcessingFrame = false
     var maxPointLimit: Int = 2_000_000
     var boundingBoxSize: Float = 20.0
@@ -233,6 +241,9 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private var measurementNodes: [ModelEntity] = []
     private var measurementLines: [ModelEntity] = []
     private var loadedPointCloudEntity: Entity?
+    private var liveSurfelAnchor: AnchorEntity?
+    private var liveSurfelEntity: ModelEntity?
+    private var liveSurfelUpdateTask: Task<Void, Never>?
     private var coachingOverlay: ARCoachingOverlayView?
     
     override func viewDidLoad() {
@@ -275,6 +286,10 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         roomCaptureView?.removeFromSuperview()
         arView = nil
         roomCaptureView = nil
+        liveSurfelUpdateTask?.cancel()
+        liveSurfelUpdateTask = nil
+        liveSurfelEntity = nil
+        liveSurfelAnchor = nil
         coachingOverlay = nil
         
         if useRoomPlan {
@@ -521,6 +536,11 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             
             loadedPointCloudEntity?.removeFromParent()
             loadedPointCloudEntity = nil
+            liveSurfelUpdateTask?.cancel()
+            liveSurfelUpdateTask = nil
+            liveSurfelAnchor?.removeFromParent()
+            liveSurfelAnchor = nil
+            liveSurfelEntity = nil
             
             meshUpdateTasks.values.forEach { $0.cancel() }
             meshUpdateTasks.removeAll()
@@ -663,7 +683,9 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
 
     @MainActor
     private func shouldUseFusedMappingDepth() -> Bool {
-        depthAnythingProcessor != nil
+        guard depthAnythingProcessor != nil, !useRoomPlan else { return false }
+        if ProcessInfo.processInfo.thermalState == .critical { return false }
+        return true
     }
 
     private func processFusedMappingFrame(
@@ -770,21 +792,173 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             }
         }
     }
+
+    private func updateLiveSurfelVisualization(with surfels: [ColoredSurfel]) {
+        liveSurfelUpdateTask?.cancel()
+
+        guard currentMode == .surfels else { return }
+        guard !surfels.isEmpty else {
+            liveSurfelEntity?.removeFromParent()
+            liveSurfelEntity = nil
+            return
+        }
+
+        let displayedSurfels = Array(surfels.prefix(maxDisplayedSurfels))
+        liveSurfelUpdateTask = Task { [weak self] in
+            guard let self = self else { return }
+
+            do {
+                guard let previewMesh = Self.makeSurfelPreviewMesh(from: displayedSurfels) else { return }
+                let resource = try await MeshResource(from: [previewMesh.descriptor])
+                let texture = try TextureResource.generate(
+                    from: previewMesh.colorAtlas,
+                    options: TextureResource.CreateOptions(semantic: .color, mipmapsMode: .none)
+                )
+                var material = UnlitMaterial()
+                material.color = UnlitMaterial.BaseColor(
+                    tint: .white,
+                    texture: UnlitMaterial.Texture(texture)
+                )
+                let entity = ModelEntity(mesh: resource, materials: [material])
+
+                guard !Task.isCancelled else { return }
+
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+
+                    self.liveSurfelEntity?.removeFromParent()
+
+                    let anchor: AnchorEntity
+                    if let existingAnchor = self.liveSurfelAnchor {
+                        anchor = existingAnchor
+                    } else {
+                        anchor = AnchorEntity(world: .zero)
+                        self.liveSurfelAnchor = anchor
+                        self.arView?.scene.addAnchor(anchor)
+                    }
+
+                    anchor.addChild(entity)
+                    anchor.isEnabled = self.currentMode == .surfels
+                    self.liveSurfelEntity = entity
+                }
+            } catch {
+                print("Failed to create surfel preview mesh: \(error)")
+            }
+        }
+    }
+
+    private static func makeSurfelPreviewMesh(from surfels: [ColoredSurfel]) -> SurfelPreviewMesh? {
+        var positions: [SIMD3<Float>] = []
+        var normals: [SIMD3<Float>] = []
+        var textureCoordinates: [SIMD2<Float>] = []
+        var indices: [UInt32] = []
+        let atlasSide = max(1, Int(ceil(sqrt(Double(max(surfels.count, 1))))))
+        var atlasPixels = [UInt8](repeating: 0, count: atlasSide * atlasSide * 4)
+
+        positions.reserveCapacity(surfels.count * 3)
+        normals.reserveCapacity(surfels.count * 3)
+        textureCoordinates.reserveCapacity(surfels.count * 3)
+        indices.reserveCapacity(surfels.count * 3)
+
+        for (surfelIndex, surfel) in surfels.enumerated() {
+            guard surfel.position.x.isFinite,
+                  surfel.position.y.isFinite,
+                  surfel.position.z.isFinite else {
+                continue
+            }
+
+            let normal = normalized(surfel.normal, fallback: SIMD3<Float>(0, 1, 0))
+            let helper = abs(simd_dot(normal, SIMD3<Float>(0, 1, 0))) < 0.9
+                ? SIMD3<Float>(0, 1, 0)
+                : SIMD3<Float>(1, 0, 0)
+            let tangent = normalized(simd_cross(helper, normal), fallback: SIMD3<Float>(1, 0, 0))
+            let bitangent = normalized(simd_cross(normal, tangent), fallback: SIMD3<Float>(0, 0, 1))
+            let radius = min(max(surfel.radius, 0.008), 0.045)
+            let base = UInt32(positions.count)
+            let atlasX = surfelIndex % atlasSide
+            let atlasY = surfelIndex / atlasSide
+            let atlasOffset = (atlasY * atlasSide + atlasX) * 4
+            atlasPixels[atlasOffset] = surfel.color.x
+            atlasPixels[atlasOffset + 1] = surfel.color.y
+            atlasPixels[atlasOffset + 2] = surfel.color.z
+            atlasPixels[atlasOffset + 3] = 255
+            let uv = SIMD2<Float>(
+                (Float(atlasX) + 0.5) / Float(atlasSide),
+                (Float(atlasY) + 0.5) / Float(atlasSide)
+            )
+
+            positions.append(surfel.position + tangent * radius)
+            positions.append(surfel.position - tangent * radius * 0.5 + bitangent * radius * 0.86)
+            positions.append(surfel.position - tangent * radius * 0.5 - bitangent * radius * 0.86)
+            normals.append(contentsOf: [normal, normal, normal])
+            textureCoordinates.append(contentsOf: [uv, uv, uv])
+            indices.append(contentsOf: [base, base + 1, base + 2])
+        }
+
+        guard !positions.isEmpty,
+              let colorAtlas = makeSurfelColorAtlas(
+                pixels: atlasPixels,
+                width: atlasSide,
+                height: atlasSide
+              ) else {
+            return nil
+        }
+
+        var descriptor = MeshDescriptor()
+        descriptor.positions = MeshBuffers.Positions(positions)
+        descriptor.normals = MeshBuffers.Normals(normals)
+        descriptor.textureCoordinates = MeshBuffers.TextureCoordinates(textureCoordinates)
+        descriptor.primitives = .triangles(indices)
+        return SurfelPreviewMesh(descriptor: descriptor, colorAtlas: colorAtlas)
+    }
+
+    private static func makeSurfelColorAtlas(pixels: [UInt8], width: Int, height: Int) -> CGImage? {
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        let bitmapInfo = CGBitmapInfo(rawValue:
+            CGImageAlphaInfo.premultipliedLast.rawValue
+            | CGBitmapInfo.byteOrder32Big.rawValue
+        )
+
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: bytesPerPixel * 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    }
+
+    private static func normalized(_ value: SIMD3<Float>, fallback: SIMD3<Float>) -> SIMD3<Float> {
+        let length = simd_length(value)
+        guard length.isFinite, length > 0.000_001 else { return fallback }
+        return value / length
+    }
     
     func updateVisualizationMode(_ mode: VisualizationMode) {
         currentMode = mode
         
         arView?.debugOptions.remove([.showFeaturePoints, .showSceneUnderstanding])
         meshEntities.values.forEach { $0.isEnabled = false }
+        liveSurfelAnchor?.isEnabled = false
         
         switch mode {
-        case .none: break
-        case .pointCloud:
-            arView?.debugOptions.insert(.showFeaturePoints)
+        case .solidMesh:
+            arView?.debugOptions.insert(.showSceneUnderstanding)
+            meshEntities.values.forEach { $0.isEnabled = true }
+        case .surfels:
+            liveSurfelAnchor?.isEnabled = true
         case .wireframe:
             arView?.debugOptions.insert(.showSceneUnderstanding)
-        case .solidMesh:
-            meshEntities.values.forEach { $0.isEnabled = true }
+        case .roomPlan, .none:
+            break
         }
     }
     
@@ -1018,32 +1192,63 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             transform.columns.3.y,
             transform.columns.3.z
         )
-        let shouldPublishPointCloud = timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
-        let shouldPublishSurfels = timestamp - lastSurfelPublishTime >= surfelPublishInterval
-        let shouldPublishCameraImage = timestamp - lastCameraImagePublishTime >= cameraImagePublishInterval
+        let topicRegistry = ROS2TopicRegistry.shared
+        let shouldPublishPointCloud = topicRegistry.isStreamEnabled(.pointCloud)
+            && timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
+        let shouldPublishSurfels = topicRegistry.isStreamEnabled(.surfels)
+            && timestamp - lastSurfelPublishTime >= surfelPublishInterval
+        let shouldPublishCameraImage = topicRegistry.isStreamEnabled(.camera)
+            && timestamp - lastCameraImagePublishTime >= cameraImagePublishInterval
+        let shouldRefreshSurfelVisualization = currentMode == .surfels
+            && timestamp - lastSurfelVisualizationTime >= surfelVisualizationInterval
 
-        let newPoints: [ColoredPoint] = autoreleasepool {
-            if shouldPublishCameraImage, ROS2BridgeClient.shared.isConnected {
-                lastCameraImagePublishTime = timestamp
-                ROS2BridgeClient.shared.publishImage(
-                    pixelBuffer: cameraImage,
-                    intrinsics: intrinsics,
-                    imageResolution: imageResolution,
-                    timestamp: timestamp
-                )
-            }
-
-            return pointCloudProcessor.processPointCloud(
-                depthMap: lidarDepthMap,
-                cameraImage: cameraImage,
+        if shouldPublishCameraImage, ROS2BridgeClient.shared.isConnected {
+            lastCameraImagePublishTime = timestamp
+            ROS2BridgeClient.shared.publishImage(
+                pixelBuffer: cameraImage,
                 intrinsics: intrinsics,
                 imageResolution: imageResolution,
-                transform: transform
+                timestamp: timestamp
             )
         }
-        
+
+        let shouldUseFusedDepth = shouldUseFusedMappingDepth()
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
+
+            let newPoints: [ColoredPoint]
+            if shouldUseFusedDepth {
+                if let fusedPoints = await self.processFusedMappingFrame(
+                    timestamp: timestamp,
+                    cameraImage: cameraImage,
+                    lidarDepthMap: lidarDepthMap,
+                    intrinsics: intrinsics,
+                    imageResolution: imageResolution,
+                    transform: transform
+                ) {
+                    newPoints = fusedPoints
+                } else {
+                    newPoints = autoreleasepool {
+                        self.pointCloudProcessor.processPointCloud(
+                            depthMap: lidarDepthMap,
+                            cameraImage: cameraImage,
+                            intrinsics: intrinsics,
+                            imageResolution: imageResolution,
+                            transform: transform
+                        )
+                    }
+                }
+            } else {
+                newPoints = autoreleasepool {
+                    self.pointCloudProcessor.processPointCloud(
+                        depthMap: lidarDepthMap,
+                        cameraImage: cameraImage,
+                        intrinsics: intrinsics,
+                        imageResolution: imageResolution,
+                        transform: transform
+                    )
+                }
+            }
 
             if !newPoints.isEmpty {
                 _ = await self.surfelMap.fuse(
@@ -1059,11 +1264,24 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                         self.lastPointCloudPublishTime = timestamp
                     }
                 }
-                if shouldPublishSurfels {
-                    let surfelSnapshot = await self.surfelMap.snapshot(maxCount: self.maxPublishedSurfels)
-                    ROS2BridgeClient.shared.publishSurfels(surfelSnapshot, timestamp: timestamp)
-                    await MainActor.run {
-                        self.lastSurfelPublishTime = timestamp
+                if shouldPublishSurfels || shouldRefreshSurfelVisualization {
+                    let snapshotLimit = max(
+                        shouldPublishSurfels ? self.maxPublishedSurfels : 0,
+                        shouldRefreshSurfelVisualization ? self.maxDisplayedSurfels : 0
+                    )
+                    let surfelSnapshot = await self.surfelMap.snapshot(maxCount: snapshotLimit)
+                    if shouldRefreshSurfelVisualization {
+                        let previewSurfels = Array(surfelSnapshot.prefix(self.maxDisplayedSurfels))
+                        await MainActor.run {
+                            self.lastSurfelVisualizationTime = timestamp
+                            self.updateLiveSurfelVisualization(with: previewSurfels)
+                        }
+                    }
+                    if shouldPublishSurfels {
+                        ROS2BridgeClient.shared.publishSurfels(surfelSnapshot, timestamp: timestamp)
+                        await MainActor.run {
+                            self.lastSurfelPublishTime = timestamp
+                        }
                     }
                 }
                 let count = await self.pointManager.addAndFilter(newPoints: newPoints)
@@ -1084,7 +1302,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     }
     
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-        publishMapToROS2IfNeeded()
+        publishMapToROS2IfNeeded(anchors: anchors)
         
         for anchor in anchors {
             if let meshAnchor = anchor as? ARMeshAnchor {
@@ -1105,7 +1323,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                     
                     do {
                         let meshResource = try await MeshResource(from: [desc])
-                        let material = SimpleMaterial(color: UIColor.systemBlue.withAlphaComponent(0.4), isMetallic: false)
+                        let material = UnlitMaterial(color: UIColor.systemCyan.withAlphaComponent(0.85))
                         let modelEntity = ModelEntity(mesh: meshResource, materials: [material])
                         modelEntity.isEnabled = isSolid
                         
@@ -1135,7 +1353,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     }
     
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        publishMapToROS2IfNeeded()
+        publishMapToROS2IfNeeded(anchors: anchors)
         
         for anchor in anchors {
             if let meshAnchor = anchor as? ARMeshAnchor,
@@ -1166,18 +1384,19 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         }
     }
     
-    private func publishMapToROS2IfNeeded() {
+    private func publishMapToROS2IfNeeded(anchors: [ARAnchor]) {
         guard ROS2TopicRegistry.shared.isStreamEnabled(.mesh) else { return }
         
         let currentTime = Date().timeIntervalSince1970
         if currentTime - lastMapPublishTime > meshSnapshotPublishConfiguration.publishInterval {
             lastMapPublishTime = currentTime
             
-            let timestamp = arView?.session.currentFrame?.timestamp ?? ProcessInfo.processInfo.systemUptime
-            let meshAnchors = arView?.session.currentFrame?.anchors.compactMap { $0 as? ARMeshAnchor } ?? []
+            let timestamp = ProcessInfo.processInfo.systemUptime
+            let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
+            let safeMeshes = MeshGenerator.extractSafeMeshes(from: meshAnchors)
             Task.detached(priority: .background) {
-                if !meshAnchors.isEmpty {
-                    ROS2BridgeClient.shared.publishMap(meshAnchors: meshAnchors, timestamp: timestamp)
+                if !safeMeshes.isEmpty {
+                    ROS2BridgeClient.shared.publishMap(safeMeshes: safeMeshes, timestamp: timestamp)
                 }
             }
         }

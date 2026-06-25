@@ -261,7 +261,7 @@ struct MapEverythingTests {
 
     @Test("Mesh publishing advertises MarkerArray fallback and structured MeshSnapshot")
     func testMeshPublishingTopicsAndSchema() throws {
-        let registry = ROS2TopicRegistry()
+        let registry = ROS2TopicRegistry(enabledStreams: [.mesh])
         let markerTopic = registry.definition(.meshMarkers)
         let snapshotTopic = registry.definition(.meshSnapshot)
         let advertisedIDs = Set(registry.advertisedTopics().map(\.id))
@@ -617,10 +617,18 @@ struct MapEverythingTests {
         let registry = ROS2TopicRegistry()
         let allTopics = registry.allTopics()
         let advertisedTopics = registry.advertisedTopics()
+        let advertisedIDs = Set(advertisedTopics.map(\.id))
 
         #expect(allTopics.count == ROS2TopicID.allCases.count)
         #expect(Set(allTopics.map(\.id)) == Set(ROS2TopicID.allCases))
-        #expect(Set(advertisedTopics.map(\.id)).isSuperset(of: [.cameraCompressed, .cameraInfo, .pointCloud, .surfels, .meshSnapshot, .satelliteTileInfo, .demTile]))
+        #expect(advertisedIDs.isSuperset(of: [.pose, .surfels, .gpsFix, .gpsMetadata, .satelliteImage, .satelliteTileInfo, .demTile]))
+        #expect(!advertisedIDs.contains(.odom))
+        #expect(!advertisedIDs.contains(.cameraCompressed))
+        #expect(!advertisedIDs.contains(.cameraInfo))
+        #expect(!advertisedIDs.contains(.pointCloud))
+        #expect(!advertisedIDs.contains(.imu))
+        #expect(!advertisedIDs.contains(.meshMarkers))
+        #expect(!advertisedIDs.contains(.meshSnapshot))
 
         let advertisedPayload = advertisedTopics.map { definition in
             [
@@ -715,6 +723,7 @@ struct MapEverythingTests {
         let decodedData = try #require(Data(base64Encoded: encodedData))
 
         #expect(surfelTopic.topic == "/reconstructor/surfels")
+        #expect(surfelTopic.stream == .surfels)
         #expect(surfelTopic.messageType == "sensor_msgs/msg/PointCloud2")
         #expect(msg["point_step"] as? Int == 40)
         #expect(msg["row_step"] as? Int == 40)
@@ -844,6 +853,10 @@ struct MapEverythingTests {
             isCached: true
         )
         let model = GeoTileModel(payload: payload, cachePath: cachePath)
+        let tileInfoMessage = ROS2BridgeClient().makeGeoTileInfoMessage(
+            tile: payload,
+            header: ["stamp": ["sec": 10, "nanosec": 20], "frame_id": "earth"]
+        )
 
         #expect(cachePath.hasPrefix("USGS_3DEP/3DEPElevation/\(time)/\(coordinate.z)/"))
         #expect(cachePath.hasSuffix("/\(coordinate.y).tif"))
@@ -855,10 +868,18 @@ struct MapEverythingTests {
         #expect(model.sourcePolicyJSON.contains("\"recordable_by_default\":true"))
         #expect(pixel.x >= 0 && pixel.x <= Double(provider.tileSizePixels))
         #expect(pixel.y >= 0 && pixel.y <= Double(provider.tileSizePixels))
+        #expect(tileInfoMessage["device_pixel_x"] as? Double == pixel.x)
+        #expect(tileInfoMessage["device_pixel_y"] as? Double == pixel.y)
+        #expect(tileInfoMessage["tile_width"] as? Int == pixel.width)
+        #expect(tileInfoMessage["tile_height"] as? Int == pixel.height)
+        #expect(tileInfoMessage["pixel_origin"] as? String == "upper_left")
+        #expect(tileInfoMessage["pixel_units"] as? String == "pixels")
         #expect(bounds.west < location.coordinate.longitude)
         #expect(bounds.east > location.coordinate.longitude)
         #expect(bounds.south < location.coordinate.latitude)
         #expect(bounds.north > location.coordinate.latitude)
+        #expect(JSONSerialization.isValidJSONObject(tileInfoMessage))
+        _ = try JSONSerialization.data(withJSONObject: tileInfoMessage, options: [])
     }
 
     @Test("Publish queue drops oldest publish when capacity is exceeded")

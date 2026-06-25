@@ -9,6 +9,7 @@ import ARKit
 import RealityKit
 
 struct SafeARMesh {
+    let identifier: UUID
     let vertices: [SIMD3<Float>]
     let indices: [UInt32]
     let transform: simd_float4x4
@@ -94,7 +95,12 @@ enum MeshGenerator {
                     indices.append(contentsOf: [tPtr[0], tPtr[1], tPtr[2]])
                 }
             }
-            return SafeARMesh(vertices: vertices, indices: indices, transform: anchor.transform)
+            return SafeARMesh(
+                identifier: anchor.identifier,
+                vertices: vertices,
+                indices: indices,
+                transform: anchor.transform
+            )
         }
     }
 }

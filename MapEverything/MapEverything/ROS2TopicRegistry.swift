@@ -107,18 +107,10 @@ final class ROS2TopicRegistry {
 
     private static let defaultEnabledStreams: Set<MappingSensorStream> = [
         .pose,
-        .tf,
-        .imu,
-        .camera,
-        .pointCloud,
-        .mesh,
+        .surfels,
         .gps,
-        .radio,
         .satelliteImagery,
-        .dem,
-        .diagnostics,
-        .session,
-        .indoorLocalization
+        .dem
     ]
 
     private static let defaultDefinitions: [ROS2TopicDefinition] = [
@@ -188,7 +180,7 @@ final class ROS2TopicRegistry {
         ),
         ROS2TopicDefinition(
             id: .surfels,
-            stream: .pointCloud,
+            stream: .surfels,
             topic: "/reconstructor/surfels",
             messageType: "sensor_msgs/msg/PointCloud2",
             defaultRateHz: 1,
@@ -212,7 +204,7 @@ final class ROS2TopicRegistry {
         ),
         ROS2TopicDefinition(
             id: .odom,
-            stream: .pose,
+            stream: .odometry,
             topic: "/reconstructor/odom",
             messageType: "nav_msgs/msg/Odometry",
             defaultRateHz: 30,

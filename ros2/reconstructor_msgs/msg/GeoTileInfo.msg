@@ -11,6 +11,12 @@ uint32 tile_x
 uint32 tile_y
 string bounds
 string device_location
+float64 device_pixel_x
+float64 device_pixel_y
+uint32 tile_width
+uint32 tile_height
+string pixel_origin
+string pixel_units
 string format
 string mime_type
 string source_url

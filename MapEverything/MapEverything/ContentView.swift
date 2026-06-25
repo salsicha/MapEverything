@@ -11,18 +11,20 @@ import AVFoundation
 import SceneKit
 
 enum VisualizationMode: String, CaseIterable, Identifiable {
-    case none = "None"
-    case pointCloud = "Point Cloud"
-    case wireframe = "Wireframe"
     case solidMesh = "Solid Mesh"
+    case surfels = "Surfels"
+    case wireframe = "Wireframe"
+    case roomPlan = "RoomPlan"
+    case none = "None"
     var id: Self { self }
 
     var iconName: String {
         switch self {
-        case .none: return "eye.slash"
-        case .pointCloud: return "circle.dotted"
-        case .wireframe: return "square.grid.3x3"
         case .solidMesh: return "cube.fill"
+        case .surfels: return "circle.dotted"
+        case .wireframe: return "square.grid.3x3"
+        case .roomPlan: return "square.3.layers.3d"
+        case .none: return "eye.slash"
         }
     }
 }
@@ -71,6 +73,7 @@ struct ContentView: View {
     @AppStorage("ros2Enabled") private var ros2Enabled: Bool = false
     @AppStorage("ros2WebSocketURL") private var ros2WebSocketURL: String = "ws://192.168.1.100:9090"
     @AppStorage("useImperialUnits") private var useImperialUnits: Bool = false
+    @AppStorage(LocalROS2BagRecorderConfiguration.enabledStorageKey) private var localROS2BagStorageEnabled: Bool = false
     
     @State private var visualizationMode: VisualizationMode = .solidMesh
     @State private var isScanning = false
@@ -95,6 +98,7 @@ struct ContentView: View {
     @State private var showGallery = false
     @State private var showSettings = false
     @State private var showClearConfirmation = false
+    @State private var showLocalBagBrowser = false
     @State private var hasCameraPermission = false
     
     var body: some View {
@@ -123,7 +127,7 @@ struct ContentView: View {
                     maxPointLimit: maxPointLimit,
                     voxelSize: Float(voxelSize),
                     boundingBoxSize: Float(boundingBoxSize),
-                    useRoomPlan: adaptiveMapping.usesRoomPlanCapture,
+                    useRoomPlan: usesParametricRoomOverlay,
                     useImperialUnits: useImperialUnits,
                     onSave: { newModel in
                         modelContext.insert(newModel)
@@ -140,32 +144,16 @@ struct ContentView: View {
                 .edgesIgnoringSafeArea(.all)
 
                 VStack {
-                    recorderDiagnosticsPanel
+                    HStack(alignment: .top, spacing: 12) {
+                        recorderDiagnosticsPanel
+                            .allowsHitTesting(false)
+                        Spacer(minLength: 8)
+                        scannerActionRail
+                    }
                     Spacer()
                 }
                 .padding(.top, 54)
                 .padding(.horizontal, 14)
-                .allowsHitTesting(false)
-
-                VStack(spacing: 12) {
-                    visualizationModeControl
-
-                    Button(action: toggleMapping) {
-                        HStack(spacing: 10) {
-                            Image(systemName: isScanning ? "stop.fill" : "play.fill")
-                                .font(.headline.weight(.bold))
-                            Text(isScanning ? "Stop" : "Start")
-                                .font(.headline.weight(.semibold))
-                        }
-                        .foregroundColor(.white)
-                        .frame(width: 168, height: 56)
-                        .background(isScanning ? Color.red : Color.green)
-                        .clipShape(Capsule())
-                        .shadow(color: Color.black.opacity(0.35), radius: 12, x: 0, y: 6)
-                    }
-                    .accessibilityLabel(isScanning ? "Stop Mapping" : "Start Mapping")
-                }
-                .padding(.bottom, 28)
             }
             .navigationBarHidden(true)
             .alert("AR Session Error", isPresented: Binding<Bool>(
@@ -179,12 +167,92 @@ struct ContentView: View {
             .onAppear {
                 appMode = .scan
                 visualizationMode = .solidMesh
-                mappingSession.configure(recorderURL: ros2WebSocketURL)
+                mappingSession.configure(
+                    recorderURL: ros2WebSocketURL,
+                    remoteStreamingEnabled: ros2Enabled
+                )
             }
             .onChange(of: isScanning) { scanning in
                 UIApplication.shared.isIdleTimerDisabled = scanning
             }
+            .onChange(of: ros2Enabled) { enabled in
+                mappingSession.configure(
+                    recorderURL: ros2WebSocketURL,
+                    remoteStreamingEnabled: enabled
+                )
+                if isScanning {
+                    mappingSession.restart(
+                        recorderURL: ros2WebSocketURL,
+                        remoteStreamingEnabled: enabled
+                    )
+                }
+            }
+            .sheet(isPresented: $showLocalBagBrowser) {
+                LocalROS2BagBrowserView()
+            }
         }
+    }
+
+    private var scannerActionRail: some View {
+        VStack(spacing: 10) {
+            startButton
+            localBagButton
+            shareLocalBagsButton
+        }
+    }
+
+    private var startButton: some View {
+        Button(action: toggleMapping) {
+            actionRailIcon(
+                systemName: isScanning ? "stop.fill" : "play.fill",
+                foregroundColor: .white,
+                backgroundColor: isScanning ? .red : .green
+            )
+        }
+        .accessibilityLabel(isScanning ? "Stop Mapping" : "Start Mapping")
+    }
+
+    private var localBagButton: some View {
+        Button(action: toggleLocalBagStorage) {
+            actionRailIcon(
+                systemName: localROS2BagStorageEnabled ? "externaldrive.badge.checkmark" : "externaldrive.badge.plus",
+                foregroundColor: localROS2BagStorageEnabled ? .white : .primary,
+                backgroundColor: localROS2BagStorageEnabled ? .blue : nil
+            )
+        }
+        .accessibilityLabel(localROS2BagStorageEnabled ? "Disable Save Local" : "Enable Save Local")
+    }
+
+    private var shareLocalBagsButton: some View {
+        Button {
+            showLocalBagBrowser = true
+        } label: {
+            actionRailIcon(
+                systemName: "square.and.arrow.up",
+                foregroundColor: .primary,
+                backgroundColor: nil
+            )
+        }
+        .accessibilityLabel("Share Local Bags")
+    }
+
+    private func actionRailIcon(
+        systemName: String,
+        foregroundColor: Color,
+        backgroundColor: Color?
+    ) -> some View {
+        Image(systemName: systemName)
+            .font(.title3.weight(.bold))
+            .foregroundColor(foregroundColor)
+            .frame(width: 56, height: 56)
+            .background(backgroundColor ?? Color.clear)
+            .background(.ultraThinMaterial)
+            .clipShape(Circle())
+            .overlay(
+                Circle()
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.35), radius: 10, x: 0, y: 5)
     }
 
     private var recorderDiagnosticsPanel: some View {
@@ -213,7 +281,10 @@ struct ContentView: View {
                 if localBagStats.isEnabled {
                     Label("\(localBagStats.messageCount)", systemImage: "externaldrive.badge.plus")
                 }
-                Label(adaptiveMapping.activeMode.displayName, systemImage: adaptiveMapping.usesRoomPlanCapture ? "square.3.layers.3d" : "sparkles.rectangle.stack")
+                Label(
+                    usesParametricRoomOverlay ? adaptiveMapping.activeMode.displayName : visualizationMode.rawValue,
+                    systemImage: usesParametricRoomOverlay ? "square.3.layers.3d" : visualizationMode.iconName
+                )
             }
             .font(.caption2.monospacedDigit())
             .foregroundColor(.secondary)
@@ -238,35 +309,28 @@ struct ContentView: View {
         .shadow(color: Color.black.opacity(0.25), radius: 8, x: 0, y: 4)
     }
 
-    private var visualizationModeControl: some View {
-        Picker("Visualization", selection: $visualizationMode) {
-            ForEach(VisualizationMode.allCases) { mode in
-                Image(systemName: mode.iconName)
-                    .tag(mode)
-                    .accessibilityLabel(mode.rawValue)
-            }
-        }
-        .pickerStyle(.segmented)
-        .frame(width: 252)
-        .padding(8)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.white.opacity(0.18), lineWidth: 1)
-        )
-        .accessibilityLabel("Visualization")
-    }
-
     private func toggleMapping() {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         isScanning.toggle()
 
         if isScanning {
-            mappingSession.start(recorderURL: ros2WebSocketURL)
+            mappingSession.start(
+                recorderURL: ros2WebSocketURL,
+                remoteStreamingEnabled: ros2Enabled
+            )
         } else {
             mappingSession.stop()
         }
+    }
+
+    private func toggleLocalBagStorage() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        localROS2BagStorageEnabled.toggle()
+        mappingSession.refreshLocalBagRecording()
+    }
+
+    private var usesParametricRoomOverlay: Bool {
+        adaptiveMapping.usesRoomPlanCapture && visualizationMode == .roomPlan
     }
     
     private var saveDialogView: some View {
@@ -278,8 +342,8 @@ struct ContentView: View {
                 }
 
                 Section("Will be saved") {
-                    Label("\(pointCount) \(adaptiveMapping.usesRoomPlanCapture ? "elements" : "points")", systemImage: adaptiveMapping.usesRoomPlanCapture ? "square.3.layers.3d" : "circle.dotted")
-                    if !adaptiveMapping.usesRoomPlanCapture {
+                    Label("\(pointCount) \(usesParametricRoomOverlay ? "elements" : "points")", systemImage: usesParametricRoomOverlay ? "square.3.layers.3d" : "circle.dotted")
+                    if !usesParametricRoomOverlay {
                         Label("3D mesh (USDZ + OBJ)", systemImage: "cube")
                         Label("Blueprint PDF", systemImage: "doc.richtext")
                         Label("Flythrough video", systemImage: "video")
@@ -965,7 +1029,7 @@ struct SettingsView: View {
                     )
                 }
                 Section(header: Text("ROS2 Recorder")) {
-                    Toggle("Enable Mapping Stream", isOn: $ros2Enabled)
+                    Toggle("Enable Remote ROS2 Stream", isOn: $ros2Enabled)
                     if ros2Enabled {
                         TextField("WebSocket URL (rosbridge)", text: $ros2WebSocketURL)
                             .autocapitalization(.none)
@@ -1232,6 +1296,11 @@ struct LocalROS2BagSessionDetailView: View {
                 if isActive {
                     Label("Recording", systemImage: "record.circle.fill")
                         .foregroundColor(.red)
+                }
+                if !session.files.isEmpty {
+                    ShareLink(items: session.files.map(\.url)) {
+                        Label("Share Bag Files", systemImage: "square.and.arrow.up")
+                    }
                 }
             }
 

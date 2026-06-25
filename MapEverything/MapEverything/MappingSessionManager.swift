@@ -8,10 +8,12 @@ import Combine
 
 enum MappingSensorStream: String, CaseIterable, Identifiable, Codable, Hashable {
     case pose
+    case odometry
     case tf
     case imu
     case camera
     case pointCloud
+    case surfels
     case mesh
     case gps
     case radio
@@ -26,10 +28,12 @@ enum MappingSensorStream: String, CaseIterable, Identifiable, Codable, Hashable 
     var displayName: String {
         switch self {
         case .pose: return "Pose"
+        case .odometry: return "Odometry"
         case .tf: return "TF"
         case .imu: return "IMU"
         case .camera: return "Camera"
         case .pointCloud: return "Point Cloud"
+        case .surfels: return "Surfels"
         case .mesh: return "Mesh"
         case .gps: return "GPS"
         case .radio: return "Radio"
@@ -77,6 +81,7 @@ final class MappingSessionManager: ObservableObject {
     @Published private(set) var state: MappingSessionState = .idle
     @Published private(set) var recorderURL: String
     @Published private(set) var enabledStreams: Set<MappingSensorStream>
+    @Published private(set) var remoteStreamingEnabled: Bool
     @Published private(set) var startedAt: Date?
     @Published private(set) var endedAt: Date?
     @Published private(set) var lastError: String?
@@ -98,6 +103,7 @@ final class MappingSessionManager: ObservableObject {
     var sessionMetadata: [String: String] {
         var metadata: [String: String] = [
             "recorder_url": recorderURL,
+            "remote_ros2_streaming_enabled": String(remoteStreamingEnabled),
             "bridge_transport": ROS2BridgeTransportProfile.current.kind.rawValue,
             "bridge_transport_decision": ROS2BridgeTransportProfile.current.decision,
             "local_bag_storage_enabled": String(LocalROS2BagRecorderConfiguration.load().isEnabled),
@@ -140,6 +146,7 @@ final class MappingSessionManager: ObservableObject {
         radioObservationPublisher: RadioObservationPublisher? = nil,
         localBagRecorder: LocalROS2BagRecorder? = nil,
         recorderURL: String = "ws://192.168.1.100:9090",
+        remoteStreamingEnabled: Bool = false,
         enabledStreams: Set<MappingSensorStream>? = nil
     ) {
         self.bridge = bridge ?? ROS2BridgeClient.shared
@@ -152,12 +159,20 @@ final class MappingSessionManager: ObservableObject {
         self.radioObservationPublisher = radioObservationPublisher ?? RadioObservationPublisher.shared
         self.localBagRecorder = localBagRecorder ?? LocalROS2BagRecorder.shared
         self.recorderURL = recorderURL
+        self.remoteStreamingEnabled = remoteStreamingEnabled
         self.enabledStreams = enabledStreams ?? Self.defaultStreams
     }
 
-    func configure(recorderURL: String? = nil, enabledStreams: Set<MappingSensorStream>? = nil) {
+    func configure(
+        recorderURL: String? = nil,
+        remoteStreamingEnabled: Bool? = nil,
+        enabledStreams: Set<MappingSensorStream>? = nil
+    ) {
         if let recorderURL {
             self.recorderURL = recorderURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let remoteStreamingEnabled {
+            self.remoteStreamingEnabled = remoteStreamingEnabled
         }
         if let enabledStreams {
             self.enabledStreams = enabledStreams
@@ -165,14 +180,14 @@ final class MappingSessionManager: ObservableObject {
         ROS2TopicRegistry.shared.configure(enabledStreams: self.enabledStreams)
     }
 
-    func start(recorderURL: String? = nil) {
-        configure(recorderURL: recorderURL)
+    func start(recorderURL: String? = nil, remoteStreamingEnabled: Bool? = nil) {
+        configure(recorderURL: recorderURL, remoteStreamingEnabled: remoteStreamingEnabled)
 
         if isActive {
             return
         }
 
-        guard isValidRecorderURL(self.recorderURL) else {
+        guard !self.remoteStreamingEnabled || isValidRecorderURL(self.recorderURL) else {
             fail("Invalid ROS2 recorder WebSocket URL.")
             return
         }
@@ -190,14 +205,26 @@ final class MappingSessionManager: ObservableObject {
 
         MapGeoreferencer.shared.reset()
         localBagRecorder.start(sessionID: sessionID)
-        bridge.connect(to: self.recorderURL)
-        geoTilePublisher.start()
-        indoorLocalizationManager.start()
-        currentWiFiTelemetryManager.start()
-        bleBeaconTelemetryManager.start()
-        networkPathDiagnosticsManager.start()
-        recorderEndpointProbeManager.start(recorderURL: self.recorderURL)
-        radioObservationPublisher.start(sessionID: sessionID)
+        if self.remoteStreamingEnabled {
+            bridge.connect(to: self.recorderURL)
+        } else {
+            bridge.disconnect()
+        }
+        if enabledStreams.contains(.satelliteImagery) || enabledStreams.contains(.dem) {
+            geoTilePublisher.start()
+        }
+        if enabledStreams.contains(.gps) || enabledStreams.contains(.indoorLocalization) {
+            indoorLocalizationManager.start()
+        }
+        if enabledStreams.contains(.radio) {
+            currentWiFiTelemetryManager.start()
+            bleBeaconTelemetryManager.start()
+            networkPathDiagnosticsManager.start()
+            if self.remoteStreamingEnabled {
+                recorderEndpointProbeManager.start(recorderURL: self.recorderURL)
+            }
+            radioObservationPublisher.start(sessionID: sessionID)
+        }
         state = .active
         publishSessionMetadata(event: "started")
     }
@@ -217,9 +244,18 @@ final class MappingSessionManager: ObservableObject {
         localBagRecorder.stop()
     }
 
-    func restart(recorderURL: String? = nil) {
+    func restart(recorderURL: String? = nil, remoteStreamingEnabled: Bool? = nil) {
         stop()
-        start(recorderURL: recorderURL)
+        start(recorderURL: recorderURL, remoteStreamingEnabled: remoteStreamingEnabled)
+    }
+
+    func refreshLocalBagRecording() {
+        if isActive {
+            localBagRecorder.start(sessionID: sessionID)
+            publishSessionMetadata(event: "local_bag_recording_updated")
+        } else {
+            localBagRecorder.stop()
+        }
     }
 
     func setStream(_ stream: MappingSensorStream, isEnabled: Bool) {
@@ -287,17 +323,9 @@ final class MappingSessionManager: ObservableObject {
 
     private static let defaultStreams: Set<MappingSensorStream> = [
         .pose,
-        .tf,
-        .imu,
-        .camera,
-        .pointCloud,
-        .mesh,
+        .surfels,
         .gps,
-        .radio,
         .satelliteImagery,
-        .dem,
-        .diagnostics,
-        .session,
-        .indoorLocalization
+        .dem
     ]
 }

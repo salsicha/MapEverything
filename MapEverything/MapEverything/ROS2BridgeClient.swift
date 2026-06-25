@@ -98,6 +98,7 @@ class ROS2BridgeClient: ObservableObject {
     private let localSampleBufferConfiguration = LocalSampleBufferConfiguration.default
     private let localSampleBufferQueue = DispatchQueue(label: "com.reconstructor.localSampleBuffer", qos: .utility)
     private var diagnosticsTimer: DispatchSourceTimer?
+    private var reconnectWorkItem: DispatchWorkItem?
     private lazy var publishQueue: PublishQueue = {
         let queue = PublishQueue { [weak self] data, completion in
             self?.sendQueuedPayload(data, completion: completion)
@@ -134,6 +135,8 @@ class ROS2BridgeClient: ObservableObject {
         guard let wsURL = URL(string: url) else { return }
         
         // Explicitly close any lingering connection to prevent socket exhaustion on reconnects
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
         webSocket?.cancel(with: .normalClosure, reason: nil)
         publishQueue.reset()
         lastOdometrySample = nil
@@ -157,6 +160,8 @@ class ROS2BridgeClient: ObservableObject {
 
         let closeConnection = { [weak self] in
             guard let self else { return }
+            self.reconnectWorkItem?.cancel()
+            self.reconnectWorkItem = nil
             self.publishQueue.discardPending()
             self.lastOdometrySample = nil
             self.webSocket?.cancel(with: .normalClosure, reason: nil)
@@ -178,23 +183,40 @@ class ROS2BridgeClient: ObservableObject {
             switch result {
             case .success(_):
                 self?.listenForDisconnection()
-            case .failure(_):
-                DispatchQueue.main.async { 
-                    self?.isConnected = false 
-                    self?.attemptReconnect()
-                }
+            case .failure(let error):
+                self?.handleConnectionFailure(error)
             }
         }
     }
     
     private func attemptReconnect() {
         guard let url = currentURL else { return }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) { [weak self] in
+        guard reconnectWorkItem == nil else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
             DispatchQueue.main.async {
+                self?.reconnectWorkItem = nil
                 if UserDefaults.standard.bool(forKey: "ros2Enabled") && !(self?.isConnected ?? false) {
                     self?.connect(to: url)
                 }
             }
+        }
+        reconnectWorkItem = workItem
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0, execute: workItem)
+    }
+
+    private func handleConnectionFailure(_ error: Error) {
+        DispatchQueue.main.async {
+            guard self.isConnected || self.webSocket != nil else { return }
+            print("ROS2 Bridge connection unavailable: \(error.localizedDescription)")
+            self.stopDiagnostics()
+            self.motionManager.stopDeviceMotionUpdates()
+            self.publishQueue.discardPending()
+            self.lastOdometrySample = nil
+            self.webSocket?.cancel(with: .goingAway, reason: nil)
+            self.webSocket = nil
+            self.isConnected = false
+            self.attemptReconnect()
         }
     }
     
@@ -365,9 +387,9 @@ class ROS2BridgeClient: ObservableObject {
         }
 
         let message = URLSessionWebSocketTask.Message.data(data)
-        webSocket.send(message) { error in
+        webSocket.send(message) { [weak self] error in
             if let error = error {
-                print("ROS2 Bridge send error: \(error)")
+                self?.handleConnectionFailure(error)
             }
             completion(error)
         }
@@ -441,7 +463,7 @@ class ROS2BridgeClient: ObservableObject {
     // MARK: - Publishers
     
     func publishPose(_ transform: simd_float4x4, timestamp: TimeInterval) {
-        guard isConnected else { return }
+        guard isConnected, topicRegistry.isStreamEnabled(.pose) else { return }
         let pos = transform.columns.3
         let quat = simd_quatf(transform)
         
@@ -456,7 +478,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishOdometry(_ transform: simd_float4x4, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.pose) else { return }
+        guard isConnected, topicRegistry.isStreamEnabled(.odometry) else { return }
 
         let position = SIMD3<Float>(
             transform.columns.3.x,
@@ -795,7 +817,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
-        guard topicRegistry.isStreamEnabled(.pointCloud), !surfels.isEmpty else { return }
+        guard topicRegistry.isStreamEnabled(.surfels), !surfels.isEmpty else { return }
 
         let msg = Self.makeSurfelPointCloudMessage(
             surfels: surfels,
@@ -806,7 +828,7 @@ class ROS2BridgeClient: ObservableObject {
             msg: msg
         ) ?? 0
         recordStreamPayloadMetric(
-            stream: .pointCloud,
+            stream: .surfels,
             originalBytes: surfels.count * 40,
             encodedBytes: encodedBytes,
             compression: "surfel_pointcloud2_binary_base64"
@@ -819,19 +841,23 @@ class ROS2BridgeClient: ObservableObject {
     }
     
     func publishMap(meshAnchors: [ARMeshAnchor], timestamp: TimeInterval) {
-        guard topicRegistry.isStreamEnabled(.mesh), !meshAnchors.isEmpty else { return }
+        publishMap(safeMeshes: MeshGenerator.extractSafeMeshes(from: meshAnchors), timestamp: timestamp)
+    }
+
+    func publishMap(safeMeshes: [SafeARMesh], timestamp: TimeInterval) {
+        guard topicRegistry.isStreamEnabled(.mesh), !safeMeshes.isEmpty else { return }
 
         var markers: [[String: Any]] = []
         var trianglePointsIncluded = 0
-        for anchor in meshAnchors {
+        for mesh in safeMeshes {
             let remainingPointBudget = meshSnapshotConfiguration.maxTrianglePoints - trianglePointsIncluded
             guard remainingPointBudget >= 3 else { break }
 
-            let points = meshTrianglePoints(for: anchor, maxPointCount: remainingPointBudget)
+            let points = meshTrianglePoints(for: mesh, maxPointCount: remainingPointBudget)
             guard !points.isEmpty else { continue }
             trianglePointsIncluded += points.count
 
-            let markerId = abs(anchor.identifier.hashValue) % Int(Int32.max)
+            let markerId = abs(mesh.identifier.hashValue) % Int(Int32.max)
 
             let marker: [String: Any] = [
                 "header": createHeader(frameId: "map", timestamp: timestamp),
@@ -880,7 +906,7 @@ class ROS2BridgeClient: ObservableObject {
             snapshotID: UUID().uuidString,
             source: "arkit_mesh",
             frameID: FrameID.map,
-            anchorCount: meshAnchors.count,
+            anchorCount: safeMeshes.count,
             trianglePoints: snapshotPoints,
             originalTrianglePointCount: trianglePointsIncluded,
             maxPayloadBytes: meshSnapshotConfiguration.maxPayloadBytes,
@@ -903,6 +929,40 @@ class ROS2BridgeClient: ObservableObject {
             compression: "mesh_snapshot_json"
         )
         publishOrBufferLocalSample(kind: .mesh, topic: snapshotTopic, msg: snapshotMessage)
+    }
+
+    private func meshTrianglePoints(for mesh: SafeARMesh, maxPointCount: Int) -> [[String: Float]] {
+        let maxFaceCount = min(mesh.indices.count / 3, maxPointCount / 3)
+        guard maxFaceCount > 0 else { return [] }
+
+        var worldVertices: [simd_float3] = []
+        worldVertices.reserveCapacity(mesh.vertices.count)
+        for vertex in mesh.vertices {
+            let worldVertex = simd_mul(mesh.transform, simd_float4(vertex.x, vertex.y, vertex.z, 1.0))
+            worldVertices.append(simd_float3(worldVertex.x, worldVertex.y, worldVertex.z))
+        }
+
+        var points: [[String: Float]] = []
+        points.reserveCapacity(maxFaceCount * 3)
+        for faceIndex in 0..<maxFaceCount {
+            let baseIndex = faceIndex * 3
+            let v1 = Int(mesh.indices[baseIndex])
+            let v2 = Int(mesh.indices[baseIndex + 1])
+            let v3 = Int(mesh.indices[baseIndex + 2])
+
+            guard worldVertices.indices.contains(v1),
+                  worldVertices.indices.contains(v2),
+                  worldVertices.indices.contains(v3) else { continue }
+
+            let p1 = worldVertices[v1]
+            let p2 = worldVertices[v2]
+            let p3 = worldVertices[v3]
+            points.append(["x": p1.x, "y": p1.y, "z": p1.z])
+            points.append(["x": p2.x, "y": p2.y, "z": p2.z])
+            points.append(["x": p3.x, "y": p3.y, "z": p3.z])
+        }
+
+        return points
     }
 
     private func meshTrianglePoints(for anchor: ARMeshAnchor, maxPointCount: Int) -> [[String: Float]] {
@@ -1242,9 +1302,10 @@ class ROS2BridgeClient: ObservableObject {
         send(op: "publish", topic: topicRegistry.topic(.radio), msg: msg)
     }
 
-    private func createGeoTileInfoMessage(_ tile: GeoTilePayload, timestamp: TimeInterval) -> [String: Any] {
+    func makeGeoTileInfoMessage(tile: GeoTilePayload, header: [String: Any]) -> [String: Any] {
+        let pixel = tile.deviceLocation.pixel
         var msg: [String: Any] = [
-            "header": createHeader(frameId: "earth", timestamp: timestamp),
+            "header": header,
             "provider": tile.provider.name,
             "layer": tile.provider.layer,
             "kind": tile.provider.kind.rawValue,
@@ -1254,6 +1315,12 @@ class ROS2BridgeClient: ObservableObject {
             "tile_y": tile.coordinate.y,
             "bounds": rosJSONString(tile.bounds.rosMessage),
             "device_location": rosJSONString(tile.deviceLocation.rosMessage),
+            "device_pixel_x": pixel.x,
+            "device_pixel_y": pixel.y,
+            "tile_width": pixel.width,
+            "tile_height": pixel.height,
+            "pixel_origin": pixel.origin,
+            "pixel_units": pixel.units,
             "format": tile.provider.format,
             "mime_type": tile.provider.mimeType,
             "source_url": tile.sourceURL.absoluteString,
@@ -1268,6 +1335,13 @@ class ROS2BridgeClient: ObservableObject {
         }
 
         return msg
+    }
+
+    private func createGeoTileInfoMessage(_ tile: GeoTilePayload, timestamp: TimeInterval) -> [String: Any] {
+        makeGeoTileInfoMessage(
+            tile: tile,
+            header: createHeader(frameId: "earth", timestamp: timestamp)
+        )
     }
 
     func publishSessionMetadata(_ snapshot: MappingSessionSnapshot, timestamp: TimeInterval) {
@@ -1428,7 +1502,7 @@ class ROS2BridgeClient: ObservableObject {
                 diagnosticStatus(
                     name: "reconstructor/stream_payload_metrics",
                     level: 0,
-                    message: payloadMetricSnapshots.isEmpty ? "No camera, point-cloud, or mesh payloads published yet" : "Stream payload metrics nominal",
+                    message: payloadMetricSnapshots.isEmpty ? "No payload metrics published yet" : "Stream payload metrics nominal",
                     values: streamPayloadDiagnosticValues(payloadMetricSnapshots)
                 ),
                 diagnosticStatus(

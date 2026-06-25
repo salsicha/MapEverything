@@ -10,7 +10,7 @@ Visualization Manager:
       Plane: XY
       Reference Frame: <Fixed Frame>
     - Class: rviz_default_plugins/TF
-      Enabled: true
+      Enabled: false
       Name: TF
       Show Arrows: true
       Show Axes: true
@@ -21,7 +21,7 @@ Visualization Manager:
       Topic:
         Value: /reconstructor/pose
     - Class: rviz_default_plugins/Odometry
-      Enabled: true
+      Enabled: false
       Name: Odometry
       Topic:
         Value: /reconstructor/odom
@@ -31,7 +31,7 @@ Visualization Manager:
       Topic:
         Value: /reconstructor/gps/fix
     - Class: rviz_default_plugins/PointCloud2
-      Enabled: true
+      Enabled: false
       Name: Point Cloud
       Size (m): 0.02
       Style: Points
@@ -45,18 +45,18 @@ Visualization Manager:
       Topic:
         Value: /reconstructor/surfels
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: Mesh Markers
       Topic:
         Value: /reconstructor/map
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
       Name: Camera Image
       Transport Hint: compressed
       Topic:
         Value: /reconstructor/camera/image/compressed
     - Class: rviz_default_plugins/Image
-      Enabled: false
+      Enabled: true
       Name: Satellite Image
       Transport Hint: compressed
       Topic:

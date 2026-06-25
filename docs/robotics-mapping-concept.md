@@ -4,7 +4,7 @@
 
 MapEverything should pivot from a general room-scanning and remodeling utility into a robotics mapping payload for iPhone and iPad Pro hardware. The app becomes a mobile sensor node that captures local geometry, geospatial context, radio observations, and device pose, then publishes synchronized ROS2 messages to a workstation or robot for rosbag recording, map fusion, and downstream autonomy workflows.
 
-The app should prioritize reliable field mapping over consumer design features. A successful session produces a time-synchronized ROS2 bag containing camera-derived pose, LiDAR point clouds, reconstructed mesh, GPS fixes, radio signal observations, satellite imagery tiles, DEM/elevation tiles, device diagnostics, and session metadata.
+The app should prioritize reliable field mapping over consumer design features. A successful default session produces a time-synchronized ROS2 bag containing ARKit-derived pose, GPS fixes, colored surfels, satellite imagery tiles, and DEM/elevation tiles, with camera, raw point-cloud, mesh, radio, diagnostics, and session metadata available as opt-in profiles.
 
 MapEverything has one operator mode: record. Starting a session publishes the configured robotics topic set over ROS2; stopping a session stops publication. Stream selection, topic filtering, and data retention belong on the recorder-side ROS2/rosbag setup, not in per-stream app toggles. The iPhone is not treated as the session recorder of record by default, aside from transient retry buffers and provider caches needed to publish reliably; an explicit off-by-default local SQLite bag option can mirror outgoing rosbridge payloads into chunked on-device fallback files.
 
@@ -31,14 +31,15 @@ This differs from room-scanning apps because the primary output is not a floorpl
 ### Pose and Motion
 
 - Use ARKit camera transforms as the high-rate local pose source.
-- Publish `geometry_msgs/PoseStamped` and `/tf` transforms.
-- Add `nav_msgs/Odometry` for consumers that expect odometry-like pose, twist, and covariance.
-- Continue publishing `sensor_msgs/Imu` from CoreMotion.
+- Publish `geometry_msgs/PoseStamped` by default and keep `/tf` transforms available as an opt-in profile.
+- Keep `nav_msgs/Odometry` available as an opt-in profile for consumers that expect odometry-like pose, twist, and covariance.
+- Keep `sensor_msgs/Imu` from CoreMotion available as an opt-in profile.
 - Track ARKit quality, world-tracking state, and relocalization state as diagnostics.
 
 ### LiDAR, Point Cloud, and Mesh
 
-- Continue publishing downsampled `sensor_msgs/PointCloud2`.
+- Publish the bounded colored surfel map by default.
+- Keep downsampled raw `sensor_msgs/PointCloud2` available as an opt-in profile.
 - Publish reconstructed AR mesh as either:
   - `visualization_msgs/MarkerArray` for RViz compatibility.
   - A custom `reconstructor_msgs/MeshSnapshot` for structured recording if a custom message package is installed.
@@ -101,7 +102,7 @@ Provider requirements:
 Recommended output:
 
 - `sensor_msgs/CompressedImage` for the raster tile.
-- Custom `reconstructor_msgs/GeoTileInfo` with bounding box, CRS, zoom, resolution, provider, and attribution.
+- Custom `reconstructor_msgs/GeoTileInfo` with bounding box, CRS, zoom, resolution, provider, attribution, and device pixel coordinates.
 - Optional `nav_msgs/OccupancyGrid` only for derived costmap-like layers, not raw imagery.
 
 ### DEM and Elevation Maps
@@ -131,19 +132,19 @@ Recommended output:
 
 | Topic | Message Type | Rate | Purpose |
 | --- | --- | --- | --- |
-| `/tf` | `tf2_msgs/msg/TFMessage` | 10-30 Hz | Frame tree from geospatial and AR local frames. |
+| `/tf` | `tf2_msgs/msg/TFMessage` | opt-in | Frame tree from geospatial and AR local frames. |
 | `/reconstructor/pose` | `geometry_msgs/msg/PoseStamped` | 10-30 Hz | ARKit camera pose in local map frame. |
-| `/reconstructor/odom` | `nav_msgs/msg/Odometry` | 10-30 Hz | Odometry-style pose for robotics consumers. |
-| `/reconstructor/imu` | `sensor_msgs/msg/Imu` | 50-100 Hz | Device IMU. |
+| `/reconstructor/odom` | `nav_msgs/msg/Odometry` | opt-in | Odometry-style pose for robotics consumers. |
+| `/reconstructor/imu` | `sensor_msgs/msg/Imu` | opt-in | Device IMU. |
 | `/reconstructor/gps/fix` | `sensor_msgs/msg/NavSatFix` | 1-10 Hz | GPS position and accuracy. |
-| `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 1-10 Hz | Camera frames for context and replay. |
-| `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | 1-10 Hz | Downsampled LiDAR or fused point cloud. |
+| `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | opt-in | Camera frames for context and replay. |
+| `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | opt-in | Downsampled LiDAR or fused point cloud. |
 | `/reconstructor/surfels` | `sensor_msgs/msg/PointCloud2` | 0.5-2 Hz | Incrementally fused colored surfel map with normals, radius, confidence, and observation counts. |
 | `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | 0.2-2 Hz | RViz-friendly mesh and semantic objects. |
 | `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | 0.5-5 Hz | Wi-Fi, BLE, link, or external radio measurements. |
 | `/reconstructor/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Satellite imagery tile payloads. |
-| `/reconstructor/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery georeference metadata. |
-| `/reconstructor/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM/elevation raster payloads. |
+| `/reconstructor/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery georeference metadata and device pixel coordinates. |
+| `/reconstructor/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM/elevation raster payloads and device pixel coordinates. |
 | `/reconstructor/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, sensor, permission, bridge, and recorder health. |
 | `/reconstructor/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session metadata and configuration. |
 
@@ -166,7 +167,7 @@ Initial messages:
 
 `RadioObservation.msg` is schema version 1 and uses `std_msgs/Header` plus optional `geometry_msgs/Point` map position fields. The stable fields include session ID, channel ID, observation kind, source API, source ID, radio type, optional geodetic position, Wi-Fi SSID/BSSID/normalized signal strength, BLE peripheral/service/RSSI fields, Network.framework path fields, recorder probe RTT/throughput fields, external-adapter frequency/RSSI/SNR/quality fields, success/error, and `metadata_json` for channel-specific payloads. Unset numeric fields use `0.0` for rosbridge JSON compatibility; unset strings and arrays are empty.
 
-The recorder device must build this package before recording custom topics with `rosbag2`. The starter RViz configuration is `ros2/rviz/mapeverything.rviz`; it covers native pose, GPS, point-cloud, mesh, camera, and satellite image displays, with disabled placeholder layers for radio and DEM converter outputs.
+The recorder device must build this package before recording custom topics with `rosbag2`. The starter RViz configuration is `ros2/rviz/mapeverything.rviz`; it covers native pose, GPS, surfels, and satellite image displays, with disabled placeholder layers for optional radio, DEM, mesh, camera, and raw point-cloud converter outputs.
 
 Colored surface reconstruction uses the standard `/reconstructor/surfels`
 `PointCloud2` topic rather than a custom message. Each point represents one
@@ -181,7 +182,7 @@ later Gaussian-splatting refinement pipeline.
 ### Core Services
 
 - `MappingSessionManager`: owns session lifecycle, permissions, recorder connection state, and topic configuration.
-- `PosePublisher`: publishes ARKit pose, odometry, TF, and tracking diagnostics.
+- `PosePublisher`: publishes ARKit pose by default, with odometry, TF, and tracking diagnostics available in opt-in profiles.
 - `LocationPublisher`: wraps CoreLocation and publishes GPS, heading, accuracy, and georeference updates.
 - `RadioTelemetryProvider`: collects Wi-Fi, BLE, network path, and active probe measurements.
 - `MeshPublisher`: batches mesh anchor snapshots and point-cloud updates.

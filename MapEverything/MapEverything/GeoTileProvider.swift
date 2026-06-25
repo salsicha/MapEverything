@@ -124,14 +124,17 @@ struct GeoTilePixelCoordinate {
     let width: Int
     let height: Int
 
+    var origin: String { "upper_left" }
+    var units: String { "pixels" }
+
     var rosMessage: [String: Any] {
         [
             "x": x,
             "y": y,
             "width": width,
             "height": height,
-            "origin": "upper_left",
-            "units": "pixels"
+            "origin": origin,
+            "units": units
         ]
     }
 

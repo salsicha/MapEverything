@@ -151,8 +151,10 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
                         date: now
                     )
                     publish(payload: payload, timestamp: ProcessInfo.processInfo.systemUptime)
-                    lastPublishedAt = Date()
-                    lastError = nil
+                    await MainActor.run {
+                        self.lastPublishedAt = Date()
+                        self.lastError = nil
+                    }
                     lastFailure = nil
                     break
                 } catch {
@@ -162,7 +164,9 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
 
             if let lastFailure {
                 let providerNames = providerCandidates.map(\.name).joined(separator: ", ")
-                lastError = "GeoTile fetch failed for \(providerNames): \(lastFailure.error.localizedDescription)"
+                await MainActor.run {
+                    self.lastError = "GeoTile fetch failed for \(providerNames): \(lastFailure.error.localizedDescription)"
+                }
             }
         }
     }

@@ -39,28 +39,18 @@ interfaces are available.
 
 ## Recording With rosbag2
 
-Record the standard streams and custom streams together:
+Record the lightweight default streams together:
 
 ```bash
 source ~/mapeverything_ws/install/setup.bash
 ros2 bag record \
-  /tf \
   /reconstructor/pose \
-  /reconstructor/odom \
-  /reconstructor/imu \
   /reconstructor/gps/fix \
   /reconstructor/gps/metadata \
-  /reconstructor/pointcloud \
-  /reconstructor/camera/image/compressed \
-  /reconstructor/map \
-  /reconstructor/mesh_snapshot \
-  /reconstructor/radio \
+  /reconstructor/surfels \
   /reconstructor/satellite/image/compressed \
   /reconstructor/satellite/tile_info \
-  /reconstructor/dem/tile \
-  /reconstructor/indoor_localization \
-  /reconstructor/session \
-  /reconstructor/status
+  /reconstructor/dem/tile
 ```
 
 Replay with:
@@ -73,9 +63,9 @@ ros2 bag play <bag_directory> --clock
 Useful inspection commands:
 
 ```bash
-ros2 topic echo /reconstructor/session
-ros2 topic echo /reconstructor/radio
+ros2 topic echo /reconstructor/satellite/tile_info
 ros2 topic echo /reconstructor/dem/tile
+ros2 interface show reconstructor_msgs/msg/GeoTileInfo
 ros2 interface show reconstructor_msgs/msg/GeoRasterTile
 ```
 
@@ -88,13 +78,10 @@ source ~/mapeverything_ws/install/setup.bash
 rviz2 -d <repo>/ros2/rviz/mapeverything.rviz
 ```
 
-It opens native RViz displays for TF, pose, odometry, GPS fix, point cloud,
-the `/reconstructor/surfels` colored surface map, camera image, satellite image,
-and the `/reconstructor/map` mesh marker layer.
-The structured custom topics `/reconstructor/radio`,
-`/reconstructor/satellite/tile_info`, `/reconstructor/dem/tile`,
-`/reconstructor/mesh_snapshot`, `/reconstructor/gps/metadata`,
-`/reconstructor/indoor_localization`, and `/reconstructor/session` are intended
+It opens native RViz displays for pose, GPS fix,
+the `/reconstructor/surfels` colored surface map, and satellite image.
+The structured custom topics `/reconstructor/satellite/tile_info`,
+`/reconstructor/dem/tile`, and `/reconstructor/gps/metadata` are intended
 for rosbag2 recording and topic inspection. RViz does not render those custom
 message payloads directly unless a local converter node or RViz plugin maps
 them to standard `MarkerArray`, `Image`, `PointCloud2`, or `Map` topics.
@@ -121,3 +108,7 @@ objects as JSON strings. This keeps the recorder package compact while preservin
 provider policies, georeference details, radio catalog metadata, bridge
 transport details, local bag storage status, adaptive mapping mode decisions,
 and diagnostics in rosbag2.
+`GeoTileInfo` and `GeoRasterTile` also expose `device_pixel_x`,
+`device_pixel_y`, `tile_width`, `tile_height`, `pixel_origin`, and `pixel_units`
+as typed scalar fields so recorder-side code can place the phone inside each
+downloaded satellite or DEM tile without parsing nested JSON.

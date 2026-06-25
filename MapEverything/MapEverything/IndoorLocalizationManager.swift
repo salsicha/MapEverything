@@ -153,7 +153,7 @@ final class IndoorLocalizationManager: NSObject, ObservableObject, CLLocationMan
     private func startLocationUpdates() {
         locationManager.startUpdatingLocation()
         isHeadingAvailable = CLLocationManager.headingAvailable()
-        if isHeadingAvailable {
+        if isHeadingAvailable, topicRegistry.isStreamEnabled(.indoorLocalization) {
             locationManager.startUpdatingHeading()
         } else {
             lastHeadingAccuracy = -1
@@ -171,10 +171,12 @@ final class IndoorLocalizationManager: NSObject, ObservableObject, CLLocationMan
         locationManager.requestTemporaryFullAccuracyAuthorization(
             withPurposeKey: Self.preciseLocationPurposeKey
         ) { [weak self] error in
-            guard let self else { return }
-            self.updateAuthorizationState()
-            if let error {
-                self.lastError = "Precise location request failed: \(error.localizedDescription)"
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.updateAuthorizationState()
+                if let error {
+                    self.lastError = "Precise location request failed: \(error.localizedDescription)"
+                }
             }
         }
     }
