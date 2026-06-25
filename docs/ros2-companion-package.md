@@ -44,6 +44,8 @@ Record the lightweight default streams together:
 ```bash
 source ~/mapeverything_ws/install/setup.bash
 ros2 bag record \
+  /reconstructor/camera/image/compressed \
+  /reconstructor/camera/camera_info \
   /reconstructor/pose \
   /reconstructor/gps/fix \
   /reconstructor/gps/metadata \

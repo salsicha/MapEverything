@@ -107,6 +107,7 @@ final class ROS2TopicRegistry {
 
     private static let defaultEnabledStreams: Set<MappingSensorStream> = [
         .pose,
+        .camera,
         .pointCloud,
         .gps,
         .satelliteImagery,
@@ -167,7 +168,7 @@ final class ROS2TopicRegistry {
             stream: .camera,
             topic: "/reconstructor/camera/image/compressed",
             messageType: "sensor_msgs/msg/CompressedImage",
-            defaultRateHz: 10,
+            defaultRateHz: 2,
             isImplemented: true
         ),
         ROS2TopicDefinition(
@@ -175,7 +176,7 @@ final class ROS2TopicRegistry {
             stream: .camera,
             topic: "/reconstructor/camera/camera_info",
             messageType: "sensor_msgs/msg/CameraInfo",
-            defaultRateHz: 10,
+            defaultRateHz: 2,
             isImplemented: true
         ),
         ROS2TopicDefinition(

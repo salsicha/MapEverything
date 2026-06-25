@@ -230,7 +230,8 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private var lastPointProcessingTime: TimeInterval = 0
     private var pointProcessingInterval: TimeInterval = 0.2 // Process points up to 5 times a second to avoid starving ARKit capture buffers
     private var lastCameraImagePublishTime: TimeInterval = 0
-    private let cameraImagePublishInterval: TimeInterval = 1.0
+    private let cameraImagePublishInterval: TimeInterval = 0.5 // Publish camera images at up to 2Hz
+    private var isPublishingCameraImage = false
     private var lastPointCloudPublishTime: TimeInterval = 0
     private let pointCloudPublishInterval: TimeInterval = 0.2 // Publish ROS point clouds at up to 5Hz
     private let maxDisplayedSurfels = 12_000
@@ -1334,17 +1335,26 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             && timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
         let shouldPublishCameraImage = topicRegistry.isStreamEnabled(.camera)
             && timestamp - lastCameraImagePublishTime >= cameraImagePublishInterval
+            && !isPublishingCameraImage
         let shouldRefreshSurfelVisualization = currentMode == .surfels
             && timestamp - lastSurfelVisualizationTime >= surfelVisualizationInterval
 
         if shouldPublishCameraImage, ROS2BridgeClient.shared.isConnected {
             lastCameraImagePublishTime = timestamp
-            ROS2BridgeClient.shared.publishImage(
-                pixelBuffer: cameraImage,
-                intrinsics: intrinsics,
-                imageResolution: imageResolution,
-                timestamp: timestamp
-            )
+            isPublishingCameraImage = true
+            Task.detached(priority: .utility) { [weak self, cameraImage, intrinsics, imageResolution, timestamp] in
+                defer {
+                    Task { @MainActor in
+                        self?.isPublishingCameraImage = false
+                    }
+                }
+                ROS2BridgeClient.shared.publishImage(
+                    pixelBuffer: cameraImage,
+                    intrinsics: intrinsics,
+                    imageResolution: imageResolution,
+                    timestamp: timestamp
+                )
+            }
         }
 
         Task.detached(priority: .userInitiated) { [weak self] in

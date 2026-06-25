@@ -621,10 +621,8 @@ struct MapEverythingTests {
 
         #expect(allTopics.count == ROS2TopicID.allCases.count)
         #expect(Set(allTopics.map(\.id)) == Set(ROS2TopicID.allCases))
-        #expect(advertisedIDs.isSuperset(of: [.pose, .pointCloud, .gpsFix, .gpsMetadata, .satelliteImage, .satelliteTileInfo, .demTile]))
+        #expect(advertisedIDs.isSuperset(of: [.pose, .cameraCompressed, .cameraInfo, .pointCloud, .gpsFix, .gpsMetadata, .satelliteImage, .satelliteTileInfo, .demTile]))
         #expect(!advertisedIDs.contains(.odom))
-        #expect(!advertisedIDs.contains(.cameraCompressed))
-        #expect(!advertisedIDs.contains(.cameraInfo))
         #expect(!advertisedIDs.contains(.surfels))
         #expect(!advertisedIDs.contains(.imu))
         #expect(!advertisedIDs.contains(.meshMarkers))

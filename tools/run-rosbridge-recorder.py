@@ -22,6 +22,8 @@ from typing import Sequence
 
 DEFAULT_TOPICS = [
     "/reconstructor/pose",
+    "/reconstructor/camera/image/compressed",
+    "/reconstructor/camera/camera_info",
     "/reconstructor/pointcloud",
     "/reconstructor/gps/fix",
     "/reconstructor/gps/metadata",
@@ -36,8 +38,6 @@ OPTIONAL_TOPICS = [
     "/reconstructor/imu",
     "/reconstructor/map",
     "/reconstructor/mesh_snapshot",
-    "/reconstructor/camera/image/compressed",
-    "/reconstructor/camera/camera_info",
     "/reconstructor/radio",
     "/reconstructor/indoor_localization",
     "/reconstructor/session",
@@ -255,7 +255,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--include-optional",
         action="store_true",
-        help="Also record optional MapEverything topics such as TF, IMU, mesh, camera, radio, session, and status.",
+        help="Also record optional MapEverything topics such as TF, IMU, mesh, radio, session, and status.",
     )
     parser.add_argument(
         "--record-all",

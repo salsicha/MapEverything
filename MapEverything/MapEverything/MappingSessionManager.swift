@@ -323,6 +323,7 @@ final class MappingSessionManager: ObservableObject {
 
     private static let defaultStreams: Set<MappingSensorStream> = [
         .pose,
+        .camera,
         .pointCloud,
         .gps,
         .satelliteImagery,

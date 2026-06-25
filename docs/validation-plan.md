@@ -23,7 +23,7 @@ The validation suite covers:
 
 ## Rosbridge Throughput Benchmark
 
-Use the benchmark harness to publish representative default-profile Depth Anything point-cloud, satellite, and DEM messages at target field rates. Camera and mesh profiles are opt-in stress cases:
+Use the benchmark harness to publish representative default-profile camera, Depth Anything point-cloud, satellite, and DEM messages at target field rates. Mesh remains an opt-in stress case:
 
 ```bash
 python3 tools/rosbridge-throughput-benchmark.py --dry-run --duration 5
@@ -51,7 +51,7 @@ Pass criteria:
 - Observed rates remain within 10 percent of the target rate for each profile.
 - The rosbridge process does not drop the WebSocket connection during a 60 second run.
 - The rosbridge queue does not show sustained growth when optional diagnostics are enabled.
-- Optional camera and mesh stress profiles do not starve point-cloud, satellite, or DEM publications.
+- Camera capture at 2 Hz and optional mesh stress profiles do not starve point-cloud, satellite, or DEM publications.
 
 ## Physical Device Test Matrix
 
@@ -67,11 +67,13 @@ Use a LiDAR-capable iPhone or iPad on the same network as the recorder workstati
 2. Start a bag recording:
 
    ```bash
-   ros2 bag record -o mapeverything_validation \
-    /reconstructor/pose \
-    /reconstructor/gps/fix \
-    /reconstructor/gps/metadata \
-    /reconstructor/pointcloud \
+ros2 bag record -o mapeverything_validation \
+ /reconstructor/pose \
+ /reconstructor/camera/image/compressed \
+ /reconstructor/camera/camera_info \
+ /reconstructor/gps/fix \
+ /reconstructor/gps/metadata \
+ /reconstructor/pointcloud \
     /reconstructor/satellite/image/compressed \
     /reconstructor/satellite/tile_info \
     /reconstructor/dem/tile
@@ -82,7 +84,7 @@ Use a LiDAR-capable iPhone or iPad on the same network as the recorder workstati
 | Area | Procedure | Pass Criteria |
 | :--- | :--- | :--- |
 | GPS | Start outdoors with precise location enabled, then walk at least 20 meters. | `/reconstructor/gps/fix` publishes finite lat/lon, covariance reflects accuracy, and `/reconstructor/gps/metadata` includes georeference JSON after an accurate fix. |
-| LiDAR + Depth Anything | Record in LiDAR + Depth Anything mode while moving around varied geometry. | `/reconstructor/pointcloud` publishes a stable colored fused point cloud in `map` without requiring raw camera topics. |
+| LiDAR + Depth Anything | Record in LiDAR + Depth Anything mode while moving around varied geometry. | `/reconstructor/pointcloud` publishes a stable colored fused point cloud in `map`, while camera image and camera_info remain near the 2 Hz budget. |
 | BLE | Configure one or more beacon filters and enable Bluetooth. | `/reconstructor/radio` includes BLE observations or `/reconstructor/status` explains permission/filter state. |
 | Wi-Fi | Join the recorder network with Location permission and Wi-Fi info entitlement enabled. | Session metadata reports current Wi-Fi telemetry and avoids broad scan claims. |
 | Satellite fetch | Record with a valid outdoor GPS fix and network access. | `/reconstructor/satellite/tile_info` publishes bounds, CRS, attribution, source policy, and `device_pixel_x`/`device_pixel_y`, with imagery on `/reconstructor/satellite/image/compressed`. |
