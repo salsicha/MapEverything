@@ -390,14 +390,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     private func freezeCurrentMeshForInspection() {
-        if let latestDepthAnythingMeshSnapshot,
-           let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
-            delegate?.didUpdateStoppedInspectionScene(scene)
-            return
-        }
-
         guard let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
               !anchors.isEmpty else {
+            if let latestDepthAnythingMeshSnapshot,
+               let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
+                delegate?.didUpdateStoppedInspectionScene(scene)
+                return
+            }
+
             delegate?.didUpdateStoppedInspectionScene(nil)
             return
         }
@@ -807,7 +807,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         
         switch mode {
         case .solidMesh:
-            liveDepthMeshAnchor?.isEnabled = true
+            meshEntities.values.forEach { $0.isEnabled = true }
         case .surfels:
             liveSurfelAnchor?.isEnabled = true
         case .wireframe:
@@ -864,8 +864,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
             && !isPublishingCameraImage
         let shouldRefreshSurfelVisualization = currentMode == .surfels
             && timestamp - lastSurfelVisualizationTime >= surfelVisualizationInterval
-        let shouldRefreshDepthMeshVisualization = currentMode == .solidMesh
-            && timestamp - lastDepthMeshVisualizationTime >= depthMeshVisualizationInterval
+        let shouldRefreshDepthMeshVisualization = false
 
         if shouldPublishCameraImage, ROS2BridgeClient.shared.isConnected {
             lastCameraImagePublishTime = timestamp
@@ -989,11 +988,98 @@ class ARViewController: UIViewController, ARSessionDelegate {
         if isScanning {
             publishMapToROS2IfNeeded(anchors: anchors)
         }
+
+        for anchor in anchors {
+            guard isScanning, let meshAnchor = anchor as? ARMeshAnchor else { continue }
+
+            let identifier = meshAnchor.identifier
+            let rebuildToken = meshRebuildThrottle.begin(
+                anchorID: identifier,
+                now: ProcessInfo.processInfo.systemUptime,
+                force: true
+            )
+            guard let rebuildToken else { continue }
+
+            let descriptor = MeshGenerator.createWorldDescriptor(from: meshAnchor)
+            let anchorEntity = AnchorEntity(world: .zero)
+            anchorEntities[identifier] = anchorEntity
+            arView?.scene.addAnchor(anchorEntity)
+
+            meshUpdateTasks[identifier]?.cancel()
+            let isSolidMesh = currentMode == .solidMesh
+
+            let task = Task { [weak self] in
+                defer {
+                    Task { @MainActor in
+                        self?.finishMeshRebuild(anchorID: identifier, token: rebuildToken)
+                    }
+                }
+
+                do {
+                    let meshResource = try await MeshResource(from: [descriptor])
+                    let material = UnlitMaterial(color: UIColor.systemCyan)
+                    let entity = ModelEntity(mesh: meshResource, materials: [material])
+                    entity.isEnabled = isSolidMesh
+
+                    guard !Task.isCancelled else { return }
+
+                    await MainActor.run { [weak self] in
+                        guard !Task.isCancelled,
+                              let self,
+                              let targetAnchor = self.anchorEntities[identifier] else { return }
+
+                        self.meshEntities[identifier] = entity
+                        targetAnchor.addChild(entity)
+                    }
+                } catch {
+                    print("Failed to create mesh entity: \(error)")
+                }
+            }
+            meshUpdateTasks[identifier] = task
+        }
     }
     
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         guard isScanning else { return }
         publishMapToROS2IfNeeded(anchors: anchors)
+
+        for anchor in anchors {
+            guard let meshAnchor = anchor as? ARMeshAnchor,
+                  let entity = meshEntities[meshAnchor.identifier] else { continue }
+
+            let identifier = meshAnchor.identifier
+            let rebuildToken = meshRebuildThrottle.begin(
+                anchorID: identifier,
+                now: ProcessInfo.processInfo.systemUptime
+            )
+            guard let rebuildToken else { continue }
+
+            let descriptor = MeshGenerator.createWorldDescriptor(from: meshAnchor)
+            let task = Task { [weak self, weak entity] in
+                defer {
+                    Task { @MainActor in
+                        self?.finishMeshRebuild(anchorID: identifier, token: rebuildToken)
+                    }
+                }
+
+                guard let entity else { return }
+
+                do {
+                    let meshResource = try await MeshResource(from: [descriptor])
+                    guard !Task.isCancelled else { return }
+
+                    await MainActor.run {
+                        guard !Task.isCancelled else { return }
+                        guard var modelComponent = entity.components[ModelComponent.self] else { return }
+                        modelComponent.mesh = meshResource
+                        entity.components.set(modelComponent)
+                    }
+                } catch {
+                    print("Failed to update mesh entity: \(error)")
+                }
+            }
+            meshUpdateTasks[identifier] = task
+        }
     }
     
     private func publishMapToROS2IfNeeded(anchors: [ARAnchor]) {

@@ -934,14 +934,15 @@ struct TopDownSceneView: UIViewRepresentable {
         scnView.pointOfView = cameraNode
         addInspectionLighting(to: scene, center: center, radius: sceneRadius)
 
-        let floor = SCNFloor()
-        floor.reflectivity = 0
+        let floorSize = CGFloat(max(sceneRadius * 2.2, 1.0))
+        let floor = SCNPlane(width: floorSize, height: floorSize)
         let floorMaterial = SCNMaterial()
         floorMaterial.diffuse.contents = UIColor.systemGray5
         floor.materials = [floorMaterial]
         let floorNode = SCNNode(geometry: floor)
         floorNode.name = "inspection_floor"
         floorNode.position = SCNVector3(0, minBound.y - 0.001, 0)
+        floorNode.eulerAngles.x = -.pi / 2
         scene.rootNode.addChildNode(floorNode)
 
         return scnView
