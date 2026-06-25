@@ -1,12 +1,12 @@
 # Proposed Robotics Mapping Features
 
-This roadmap refocuses MapEverything as a robotics mapping app. The app should act as an iPhone-based ROS2 sensor payload that captures pose, LiDAR geometry, camera context, GPS, radio signal observations, satellite imagery, and DEM/elevation data for recording on another device.
+This roadmap tracks MapEverything as a robotics mapping app. The app acts as an iPhone-based ROS2 sensor payload that captures pose, LiDAR geometry, camera context, GPS, radio signal observations, satellite imagery, and DEM/elevation data for recording on another device.
 
 The detailed concept is in [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md). Implementation tasks are tracked in [TODO.md](TODO.md).
 
 ## Product Direction
 
-MapEverything should become a robust field-mapping node for robotics teams. The primary output should be a synchronized ROS2 data stream and rosbag recording, not a consumer floorplan or remodeling asset.
+MapEverything is a robust field-mapping node for robotics teams. The primary output is a synchronized ROS2 data stream and rosbag recording, not a consumer floorplan/design asset.
 
 The app has one operator mode: record. Start publishes the configured topic set, stop ends publication, and the recorder-side ROS2 system decides which topics to subscribe to, bag, replay, or discard. The iPhone should not hold local session recordings beyond transient buffers and caches required for reliable publication.
 

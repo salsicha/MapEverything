@@ -80,8 +80,8 @@
 - [x] Add off-by-default local SQLite bag storage for chunked on-device ROS2 topic capture.
 - [x] Add local bag browser UI for listing, deleting, and sharing on-device bag files.
 - [x] Add a local SQLite-to-native ROS2 bag conversion script.
-- [x] Add migration tests for existing `EnvironmentModel` data.
-- [x] Add cleanup logic for orphaned point-cloud, mesh, imagery, DEM, and session files.
+- [x] Retire legacy `EnvironmentModel` saved-scan persistence after replacing local exports with session records and local ROS2 bag chunks.
+- [x] Remove orphaned point-cloud, mesh, blueprint, video, preview, and legacy cleanup/export helpers from the record-mode app.
 
 ## P2 - Adaptive Indoor/Outdoor Mapping
 
@@ -131,6 +131,7 @@
 - [x] Keep RoomPlan as an optional semantic layer unless it conflicts with the robotics-first workflow.
 - [x] Define MapEverything as a single record-mode ROS2 publisher with external recorder-side data retention by default and optional local SQLite bag fallback.
 - [x] Keep rosbridge WebSocket as the production bridge for now; no native ROS2/DDS iOS client or recorder-side binary receiver is integrated in this build.
+- [x] Remove unused measurement, remodeling, landscaping, saved-scan gallery, and legacy export trigger code from the single record-mode app.
 
 ## Open Product Decisions
 

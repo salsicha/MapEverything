@@ -8,7 +8,6 @@ import SwiftData
 
 enum MapEverythingModelSchema {
     static let models: [any PersistentModel.Type] = [
-        EnvironmentModel.self,
         MappingSessionModel.self,
         SensorStreamModel.self,
         GeoTileModel.self

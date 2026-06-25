@@ -17,24 +17,13 @@ struct ARViewContainer: UIViewControllerRepresentable {
     @Binding var stoppedInspectionScene: SCNScene?
     @Binding var isPreparingMapper: Bool
     @Binding var isDepthAnythingReady: Bool
-    @Binding var appMode: AppMode
-    @Binding var measurementText: String
     @Binding var pointCount: Int
     @Binding var trackingFeedback: String
     @Binding var errorMessage: String?
-    @Binding var isProcessing: Bool
     var maxPointLimit: Int
     var voxelSize: Float
     var boundingBoxSize: Float
     var useRoomPlan: Bool
-    var useImperialUnits: Bool
-    var onSave: ((EnvironmentModel) -> Void)?
-    var onFloorplanExported: ((URL) -> Void)?
-    @Binding var triggerSaveName: String?
-    @Binding var triggerClear: Bool
-    @Binding var triggerExportFloorplan: Bool
-    @Binding var triggerUndoMeasurement: Bool
-    @Binding var environmentToLoad: EnvironmentModel?
     
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -52,71 +41,10 @@ struct ARViewContainer: UIViewControllerRepresentable {
         
         uiViewController.updateVisualizationMode(visualizationMode)
         uiViewController.isScanning = isScanning
-        uiViewController.appMode = appMode
         uiViewController.maxPointLimit = maxPointLimit
         uiViewController.voxelSize = voxelSize
         uiViewController.boundingBoxSize = boundingBoxSize
         uiViewController.useRoomPlan = useRoomPlan
-        uiViewController.useImperialUnits = useImperialUnits
-        
-        if let name = triggerSaveName {
-            triggerSaveName = nil
-            DispatchQueue.main.async {
-                self.isProcessing = true
-                uiViewController.saveCurrentScan(name: name) { model in
-                    DispatchQueue.main.async {
-                        if let model = model {
-                            self.onSave?(model)
-                            UINotificationFeedbackGenerator().notificationOccurred(.success)
-                        } else {
-                            UINotificationFeedbackGenerator().notificationOccurred(.error)
-                        }
-                        self.isProcessing = false
-                    }
-                }
-            }
-        }
-        
-        if triggerClear {
-            triggerClear = false
-            DispatchQueue.main.async {
-                uiViewController.clearScan()
-            }
-        }
-
-        if triggerUndoMeasurement {
-            triggerUndoMeasurement = false
-            DispatchQueue.main.async {
-                uiViewController.undoLastMeasurement()
-            }
-        }
-
-        if triggerExportFloorplan {
-            triggerExportFloorplan = false
-            DispatchQueue.main.async {
-                uiViewController.exportFloorplan { url in
-                    DispatchQueue.main.async {
-                        if let url = url {
-                            self.onFloorplanExported?(url)
-                        } else {
-                            self.errorMessage = "No walls detected yet. Scan the room to detect walls before exporting."
-                        }
-                    }
-                }
-            }
-        }
-
-        if let env = environmentToLoad {
-            environmentToLoad = nil
-            DispatchQueue.main.async {
-                self.isProcessing = true
-                uiViewController.loadEnvironment(env) {
-                    DispatchQueue.main.async {
-                        self.isProcessing = false
-                    }
-                }
-            }
-        }
     }
     
     class Coordinator: NSObject, ARViewControllerDelegate {
@@ -129,12 +57,6 @@ struct ARViewContainer: UIViewControllerRepresentable {
         func didUpdatePointCount(_ count: Int) {
             DispatchQueue.main.async {
                 self.parent.pointCount = count
-            }
-        }
-        
-        func didUpdateMeasurement(_ text: String) {
-            DispatchQueue.main.async {
-                self.parent.measurementText = text
             }
         }
         
@@ -174,7 +96,6 @@ struct ARViewContainer: UIViewControllerRepresentable {
 
 protocol ARViewControllerDelegate: AnyObject {
     func didUpdatePointCount(_ count: Int)
-    func didUpdateMeasurement(_ text: String)
     func didUpdateTrackingFeedback(_ text: String)
     func didFailWithError(_ error: Error)
     func didReachScanLimit(limit: Int)
@@ -214,8 +135,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             }
         }
     }
-    var appMode: AppMode = .scan
-    
     private let pointManager = PointCloudManager()
     private let surfelMap = ColoredSurfelMap()
     private let pointCloudProcessor = PointCloudProcessor()
@@ -256,17 +175,12 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             }
         }
     }
-    var useImperialUnits: Bool = false
-    
     private var meshEntities: [UUID: ModelEntity] = [:]
     private var lastMapPublishTime: TimeInterval = 0
     private let meshSnapshotPublishConfiguration = MeshSnapshotPublishConfiguration.default
     private var anchorEntities: [UUID: AnchorEntity] = [:]
     private var meshUpdateTasks: [UUID: Task<Void, Never>] = [:]
     
-    private var measurementNodes: [ModelEntity] = []
-    private var measurementLines: [ModelEntity] = []
-    private var loadedPointCloudEntity: Entity?
     private var liveSurfelAnchor: AnchorEntity?
     private var liveSurfelEntity: ModelEntity?
     private var liveSurfelUpdateTask: Task<Void, Never>?
@@ -358,12 +272,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             overlay.goal = .anyPlane
             av.addSubview(overlay)
             coachingOverlay = overlay
-            
-            let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
-            av.addGestureRecognizer(tapGesture)
-            
-            let longPressGesture = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-            av.addGestureRecognizer(longPressGesture)
             
             arView = av
             if isScanning {
@@ -496,255 +404,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         meshUpdateTasks.removeAll()
     }
 
-    // MARK: - Data Management
-    func saveCurrentScan(name: String, completion: @escaping (EnvironmentModel?) -> Void) {
-        var bgTask: UIBackgroundTaskIdentifier = .invalid
-        bgTask = UIApplication.shared.beginBackgroundTask(withName: "SaveEnvironment") {
-            UIApplication.shared.endBackgroundTask(bgTask)
-            bgTask = .invalid
-        }
-        let finalizeSave: (EnvironmentModel?) -> Void = { model in
-            completion(model)
-            if bgTask != .invalid {
-                UIApplication.shared.endBackgroundTask(bgTask)
-            }
-        }
-        
-        let filename = UUID().uuidString
-        
-        let processSnapshot: (@escaping (String?) -> Void) -> Void = { [weak self] snapshotCompletion in
-            guard let self = self else { snapshotCompletion(nil); return }
-            
-            if self.useRoomPlan, let rcv = self.roomCaptureView {
-                let renderer = UIGraphicsImageRenderer(bounds: rcv.bounds)
-                let snapshotImage = renderer.image { _ in
-                    rcv.drawHierarchy(in: rcv.bounds, afterScreenUpdates: true)
-                }
-                DispatchQueue.global(qos: .userInitiated).async {
-                    if let docDir = FileManager.default.cloudDocumentsURL, let jpegData = snapshotImage.jpegData(compressionQuality: 0.7) {
-                        let thumbName = "\(filename)_thumb.jpg"
-                        try? jpegData.write(to: docDir.appendingPathComponent(thumbName))
-                        DispatchQueue.main.async { snapshotCompletion(thumbName) }
-                    } else {
-                        DispatchQueue.main.async { snapshotCompletion(nil) }
-                    }
-                }
-            } else if let av = self.arView {
-                av.snapshot(saveToHDR: false) { image in
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        if let image = image, let docDir = FileManager.default.cloudDocumentsURL, let jpegData = image.jpegData(compressionQuality: 0.7) {
-                            let thumbName = "\(filename)_thumb.jpg"
-                            try? jpegData.write(to: docDir.appendingPathComponent(thumbName))
-                            DispatchQueue.main.async { snapshotCompletion(thumbName) }
-                        } else {
-                            DispatchQueue.main.async { snapshotCompletion(nil) }
-                        }
-                    }
-                }
-            } else {
-                snapshotCompletion(nil)
-            }
-        }
-        
-        processSnapshot { savedThumbnailPath in
-            if self.useRoomPlan {
-                guard let capturedRoom = self.capturedRoom else {
-                    finalizeSave(nil)
-                    return
-                }
-                
-                let usdzPath = "\(filename)_room.usdz"
-                
-                Task.detached(priority: .userInitiated) {
-                    if let docDir = FileManager.default.cloudDocumentsURL {
-                        let fileURL = docDir.appendingPathComponent(usdzPath)
-                        do {
-                            try capturedRoom.export(to: fileURL, exportOptions: .parametric)
-                            
-                            var savedBlueprintPath: String? = nil
-                            if let pdfURL = BlueprintExporter.exportToPDF(capturedRoom: capturedRoom, filename: "\(filename)_blueprint") {
-                                savedBlueprintPath = pdfURL.lastPathComponent
-                            }
-                            
-                            let model = EnvironmentModel(name: name, filePathToPointCloudData: nil, arWorldMapPath: nil, meshPath: usdzPath, blueprintPath: savedBlueprintPath, videoPath: nil, thumbnailPath: savedThumbnailPath)
-                            await MainActor.run { finalizeSave(model) }
-                        } catch {
-                            print("Failed to export room plan: \(error)")
-                            await MainActor.run { finalizeSave(nil) }
-                        }
-                    } else {
-                        await MainActor.run { finalizeSave(nil) }
-                    }
-                }
-                return
-            }
-
-            Task {
-                let surfels = await self.surfelMap.snapshot()
-                let cleanedPoints = await self.pointManager.getCleanedPoints(maxDistance: self.boundingBoxSize)
-                
-                let savedPath = await Task.detached(priority: .userInitiated) {
-                    if !surfels.isEmpty {
-                        return PointCloudStorageManager.shared.saveBinaryPLY(surfels: surfels, to: filename)
-                    }
-                    return PointCloudStorageManager.shared.saveBinaryPLY(points: cleanedPoints, to: filename)
-                }.value
-                
-                guard let savedPath = savedPath else {
-                    finalizeSave(nil)
-                    return
-                }
-                
-                guard let arView = self.arView else { finalizeSave(nil); return }
-                let frame = arView.session.currentFrame
-                let meshAnchors = frame?.anchors.compactMap { $0 as? ARMeshAnchor } ?? []
-                let safeMeshes = MeshGenerator.extractSafeMeshes(from: meshAnchors) // Must happen synchronously to prevent EXC_BAD_ACCESS in background task
-                
-                arView.session.getCurrentWorldMap { worldMap, error in
-                    Task.detached(priority: .userInitiated) {
-                        var savedMeshPath: String? = nil
-                        var savedObjPath: String? = nil
-                        var savedBlueprintPath: String? = nil
-                        var savedVideoPath: String? = nil
-                        
-                        if !safeMeshes.isEmpty {
-                            if let exportURLs = MeshExporter.exportToOBJAndUSDZ(safeMeshes: safeMeshes, filename: "\(filename)_mesh") {
-                                savedMeshPath = exportURLs.usdzURL?.lastPathComponent
-                                savedObjPath = exportURLs.objURL.lastPathComponent
-                                if let videoURL = await VideoExporter.exportFlythrough(objURL: exportURLs.objURL, filename: "\(filename)_video") {
-                                    savedVideoPath = videoURL.lastPathComponent
-                                }
-                            }
-                            if let pdfURL = BlueprintExporter.exportToPDF(safeMeshes: safeMeshes, filename: "\(filename)_blueprint") {
-                                savedBlueprintPath = pdfURL.lastPathComponent
-                            }
-                        }
-                        
-                        var savedMapPath: String? = nil
-                        if let map = worldMap {
-                            if let data = try? NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true) {
-                                let mapFilename = "\(filename)_map.arworldmap"
-                                if let docDir = FileManager.default.cloudDocumentsURL {
-                                    let fileURL = docDir.appendingPathComponent(mapFilename)
-                                    try? data.write(to: fileURL)
-                                    savedMapPath = mapFilename
-                                }
-                            }
-                        }
-                        
-                        let model = EnvironmentModel(name: name, filePathToPointCloudData: savedPath, arWorldMapPath: savedMapPath, meshPath: savedMeshPath, objPath: savedObjPath, blueprintPath: savedBlueprintPath, videoPath: savedVideoPath, thumbnailPath: savedThumbnailPath)
-                        await MainActor.run {
-                            finalizeSave(model)
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    func clearScan() {
-        if useRoomPlan {
-            capturedRoom = nil
-            roomCaptureView?.captureSession.stop()
-            delegate?.didUpdatePointCount(0)
-            delegate?.didUpdateMeasurement("Room cleared.")
-            
-            // Fully recreate the RoomCaptureView to visually wipe the scanned geometry from the screen
-            DispatchQueue.main.async {
-                self.setupViews()
-            }
-            return
-        }
-
-        Task { [weak self] in
-            guard let self = self else { return }
-            await pointManager.clear()
-            await surfelMap.clear()
-            delegate?.didUpdatePointCount(0)
-            
-            measurementNodes.forEach { $0.anchor?.removeFromParent() }
-            measurementNodes.removeAll()
-            measurementLines.forEach { $0.anchor?.removeFromParent() }
-            measurementLines.removeAll()
-            
-            loadedPointCloudEntity?.removeFromParent()
-            loadedPointCloudEntity = nil
-            liveSurfelUpdateTask?.cancel()
-            liveSurfelUpdateTask = nil
-            liveSurfelAnchor?.removeFromParent()
-            liveSurfelAnchor = nil
-            liveSurfelEntity = nil
-            
-            meshUpdateTasks.values.forEach { $0.cancel() }
-            meshUpdateTasks.removeAll()
-            
-            if isScanning,
-               let configuration = arView?.session.configuration as? ARWorldTrackingConfiguration {
-                configuration.initialWorldMap = nil // ensure it doesn't re-load the map on clear
-                arView?.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
-            }
-        }
-    }
-    
-    func loadEnvironment(_ env: EnvironmentModel, completion: @escaping () -> Void) {
-        clearScan()
-        guard let docDir = FileManager.default.cloudDocumentsURL else {
-            completion()
-            return
-        }
-        
-        if let mapPath = env.arWorldMapPath {
-            let fileURL = docDir.appendingPathComponent(mapPath)
-            if let data = try? Data(contentsOf: fileURL),
-               let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-                if isScanning,
-                   let configuration = arView?.session.configuration as? ARWorldTrackingConfiguration {
-                    configuration.initialWorldMap = worldMap
-                    arView?.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
-                    
-                    // Request the user to scan the room to relocalize the map
-                    coachingOverlay?.goal = .tracking
-                    coachingOverlay?.setActive(true, animated: true)
-                }
-            }
-        }
-        
-        if let plyPath = env.filePathToPointCloudData {
-            Task.detached(priority: .userInitiated) { [weak self] in
-                let loadedPoints = PointCloudStorageManager.shared.loadBinaryPLY(from: plyPath)
-                await MainActor.run {
-                    if let points = loadedPoints {
-                        self?.visualizeLoadedPointCloud(points, completion: completion)
-                    } else {
-                        completion()
-                    }
-                }
-            }
-        } else if let meshPath = env.meshPath {
-            // Load and visualize the saved USDZ parametric model for RoomPlan scans
-            Task.detached(priority: .userInitiated) { [weak self] in
-                guard let self = self else { return }
-                
-                let usdzURL = docDir.appendingPathComponent(meshPath)
-                do {
-                    try await MainActor.run {
-                        let entity = try Entity.loadModel(contentsOf: usdzURL)
-                        let anchor = AnchorEntity(world: .zero)
-                        anchor.addChild(entity)
-                        self.arView?.scene.addAnchor(anchor)
-                        self.loadedPointCloudEntity = entity
-                        completion()
-                    }
-                } catch {
-                    print("Failed to load USDZ: \(error)")
-                    await MainActor.run { completion() }
-                }
-            }
-        } else {
-            completion()
-        }
-    }
-    
     var isDepthAnythingModelAvailable: Bool {
         depthAnythingProcessor != nil
     }
@@ -858,74 +517,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             transform: transform,
             depthMap: fused
         )
-    }
-
-    func exportFloorplan(completion: @escaping (URL?) -> Void) {
-        let walls: [BlueprintExporter.WallSegment]
-
-        if useRoomPlan, let room = capturedRoom {
-            walls = BlueprintExporter.extractWallSegments(from: room)
-        } else if let anchors = arView?.session.currentFrame?.anchors {
-            walls = BlueprintExporter.extractWallSegments(from: anchors)
-        } else {
-            completion(nil)
-            return
-        }
-
-        guard !walls.isEmpty else {
-            completion(nil)
-            return
-        }
-
-        let filename = "floorplan_\(UUID().uuidString)"
-        let url = BlueprintExporter.exportDimensionedFloorplan(
-            walls: walls,
-            filename: filename,
-            useImperialUnits: useImperialUnits
-        )
-        completion(url)
-    }
-
-    private func visualizeLoadedPointCloud(_ points: [ColoredPoint], completion: @escaping () -> Void) {
-        loadedPointCloudEntity?.removeFromParent()
-        
-        let pointSize: Float = 0.003
-        var positions: [SIMD3<Float>] = []
-        var indices: [UInt32] = []
-        positions.reserveCapacity(points.count * 3)
-        indices.reserveCapacity(points.count * 3)
-        for (i, pt) in points.enumerated() {
-            let p = pt.position
-            let base = UInt32(i * 3)
-            positions.append(p + SIMD3<Float>(-pointSize, 0, 0))
-            positions.append(p + SIMD3<Float>(pointSize, 0, 0))
-            positions.append(p + SIMD3<Float>(0, pointSize, 0))
-            indices.append(contentsOf: [base, base + 1, base + 2])
-        }
-        var desc = MeshDescriptor()
-        desc.positions = MeshBuffers.Positions(positions)
-        desc.primitives = .triangles(indices)
-        
-        Task { [weak self] in
-            guard let self = self else { return }
-            
-            do {
-                let resource = try await MeshResource(from: [desc])
-                let material = UnlitMaterial(color: .white)
-                let entity = ModelEntity(mesh: resource, materials: [material])
-                
-                await MainActor.run {
-                    let anchor = AnchorEntity(world: .zero)
-                    anchor.addChild(entity)
-                    self.arView?.scene.addAnchor(anchor)
-                    self.loadedPointCloudEntity = entity
-                    completion()
-                }
-            } catch {
-                print("Failed to generate point cloud mesh: \(error)")
-                await MainActor.run { completion() }
-            }
-        }
     }
 
     private func updateLiveSurfelVisualization(with surfels: [ColoredSurfel]) {
@@ -1098,198 +689,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         }
     }
     
-    @objc func handleTap(_ sender: UITapGestureRecognizer) {
-        guard appMode != .scan else { return }
-        guard let arView = arView else { return }
-        
-        let location = sender.location(in: arView)
-        guard let result = arView.raycast(from: location, allowing: .estimatedPlane, alignment: .any).first else { return }
-        
-        let generator = UIImpactFeedbackGenerator(style: .medium)
-        generator.impactOccurred()
-        
-        if appMode == .measure {
-            let arAnchor = ARAnchor(name: "measurement", transform: result.worldTransform)
-            arView.session.add(anchor: arAnchor)
-        } else if appMode == .homeRemodel {
-            let arAnchor = ARAnchor(name: "remodel", transform: result.worldTransform)
-            arView.session.add(anchor: arAnchor)
-        } else if appMode == .landscape {
-            let arAnchor = ARAnchor(name: "landscape", transform: result.worldTransform)
-            arView.session.add(anchor: arAnchor)
-        }
-    }
-    
-    @objc func handleLongPress(_ sender: UILongPressGestureRecognizer) {
-        guard sender.state == .began else { return }
-        guard let arView = arView else { return }
-        let location = sender.location(in: arView)
-        
-        if let entity = arView.entity(at: location) as? ModelEntity {
-            if entity == loadedPointCloudEntity { return }
-            
-            let generator = UIImpactFeedbackGenerator(style: .heavy)
-            generator.impactOccurred()
-            
-            if let anchorEntity = entity.anchor {
-                if let id = anchorEntity.anchorIdentifier,
-                   let arAnchor = arView.session.currentFrame?.anchors.first(where: { $0.identifier == id }) {
-                    arView.session.remove(anchor: arAnchor)
-                }
-                anchorEntity.removeFromParent()
-                
-                if let index = measurementNodes.firstIndex(of: entity) {
-                    measurementNodes.forEach { $0.anchor?.removeFromParent() }
-                    measurementNodes.removeAll()
-                    measurementLines.forEach { $0.anchor?.removeFromParent() }
-                    measurementLines.removeAll()
-                    delegate?.didUpdateMeasurement("Measurement cleared.")
-                }
-            }
-        }
-    }
-    
-    // MARK: - Node Spawning
-    func undoLastMeasurement() {
-        guard !measurementNodes.isEmpty else {
-            delegate?.didUpdateMeasurement("")
-            return
-        }
-
-        let lastNode = measurementNodes.removeLast()
-        lastNode.anchor?.removeFromParent()
-
-        if let lastLine = measurementLines.popLast() {
-            lastLine.anchor?.removeFromParent()
-        }
-
-        if measurementNodes.count >= 2 {
-            if measurementNodes.count > 2 {
-                let area = calculatePolygonArea(nodes: measurementNodes)
-                if useImperialUnits {
-                    delegate?.didUpdateMeasurement(String(format: "Area: %.2f sq ft", area * 10.7639))
-                } else {
-                    delegate?.didUpdateMeasurement(String(format: "Area: %.2f sq m", area))
-                }
-            } else {
-                let p1 = measurementNodes[0].position(relativeTo: nil)
-                let p2 = measurementNodes[1].position(relativeTo: nil)
-                let d = simd_distance(p1, p2)
-                if useImperialUnits {
-                    delegate?.didUpdateMeasurement(String(format: "Distance: %.2f ft", d * 3.28084))
-                } else {
-                    delegate?.didUpdateMeasurement(String(format: "Distance: %.2f m", d))
-                }
-            }
-        } else if measurementNodes.count == 1 {
-            delegate?.didUpdateMeasurement("Point 1 placed. Tap to continue path.")
-        } else {
-            delegate?.didUpdateMeasurement("")
-        }
-    }
-
-    private func spawnMeasurementNode(for anchor: ARAnchor) {
-        let sphere = MeshResource.generateSphere(radius: 0.02)
-        let material = SimpleMaterial(color: .red, isMetallic: false)
-        let entity = ModelEntity(mesh: sphere, materials: [material])
-        
-        let anchorEntity = AnchorEntity(anchor: anchor)
-        anchorEntity.addChild(entity)
-        arView?.scene.addAnchor(anchorEntity)
-        
-        measurementNodes.append(entity)
-        
-        if measurementNodes.count > 1 {
-            let p1 = measurementNodes[measurementNodes.count - 2].position(relativeTo: nil)
-            let p2 = measurementNodes[measurementNodes.count - 1].position(relativeTo: nil)
-            let distance = simd_distance(p1, p2)
-            
-            // Draw connecting line
-            let midpoint = (p1 + p2) / 2
-            let direction = normalize(p2 - p1)
-            let defaultUp = SIMD3<Float>(0, 1, 0)
-            
-            // Prevent NaN singularity crash when vector points straight down
-            let rotation: simd_quatf
-            if simd_dot(defaultUp, direction) < -0.9999 {
-                rotation = simd_quatf(angle: .pi, axis: SIMD3<Float>(1, 0, 0))
-            } else {
-                rotation = simd_quatf(from: defaultUp, to: direction)
-            }
-            
-            let cylinder = MeshResource.generateCylinder(height: distance, radius: 0.005)
-            let lineMaterial = SimpleMaterial(color: .yellow, isMetallic: false)
-            let lineEntity = ModelEntity(mesh: cylinder, materials: [lineMaterial])
-            lineEntity.position = midpoint
-            lineEntity.orientation = rotation
-            
-            let lineAnchor = AnchorEntity(world: midpoint)
-            lineAnchor.addChild(lineEntity)
-            arView?.scene.addAnchor(lineAnchor)
-            measurementLines.append(lineEntity)
-            
-            if measurementNodes.count > 2 {
-                let area = calculatePolygonArea(nodes: measurementNodes)
-                if useImperialUnits {
-                    delegate?.didUpdateMeasurement(String(format: "Area: %.2f sq ft", area * 10.7639))
-                } else {
-                    delegate?.didUpdateMeasurement(String(format: "Area: %.2f sq m", area))
-                }
-            } else {
-                if useImperialUnits {
-                    delegate?.didUpdateMeasurement(String(format: "Distance: %.2f ft", distance * 3.28084))
-                } else {
-                    delegate?.didUpdateMeasurement(String(format: "Distance: %.2f m", distance))
-                }
-            }
-        } else {
-            delegate?.didUpdateMeasurement("Point 1 placed. Tap to continue path.")
-        }
-    }
-    
-    private func calculatePolygonArea(nodes: [ModelEntity]) -> Float {
-        var crossSum = simd_float3(0, 0, 0)
-        let n = nodes.count
-        for i in 0..<n {
-            let p1 = nodes[i].position(relativeTo: nil)
-            let p2 = nodes[(i + 1) % n].position(relativeTo: nil) // Connect back to origin mathematically
-            crossSum += simd_cross(p1, p2)
-        }
-        return 0.5 * simd_length(crossSum)
-    }
-    
-    private func spawnRemodelNode(for anchor: ARAnchor) {
-        let entity: ModelEntity
-        if let usdzModel = try? Entity.loadModel(named: "remodel") {
-            entity = usdzModel
-        } else {
-            let box = MeshResource.generateBox(size: 0.5)
-            let material = SimpleMaterial(color: UIColor.systemBlue.withAlphaComponent(0.6), isMetallic: false)
-            entity = ModelEntity(mesh: box, materials: [material])
-            entity.position.y += 0.25
-        }
-        
-        let anchorEntity = AnchorEntity(anchor: anchor)
-        anchorEntity.addChild(entity)
-        arView?.scene.addAnchor(anchorEntity)
-    }
-    
-    private func spawnLandscapeNode(for anchor: ARAnchor) {
-        let entity: ModelEntity
-        if let usdzModel = try? Entity.loadModel(named: "landscape") {
-            entity = usdzModel
-        } else {
-            let cone = MeshResource.generateCone(height: 1.5, radius: 0.5)
-            let material = SimpleMaterial(color: .systemGreen, isMetallic: false)
-            entity = ModelEntity(mesh: cone, materials: [material])
-            entity.position.y += 0.75
-        }
-        
-        let anchorEntity = AnchorEntity(anchor: anchor)
-        anchorEntity.addChild(entity)
-        arView?.scene.addAnchor(anchorEntity)
-    }
-
     // MARK: - ARSessionDelegate
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         guard isScanning else { return }
@@ -1481,12 +880,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                     }
                 }
                 meshUpdateTasks[identifier] = task
-            } else if anchor.name == "measurement" {
-                spawnMeasurementNode(for: anchor)
-            } else if anchor.name == "remodel" {
-                spawnRemodelNode(for: anchor)
-            } else if anchor.name == "landscape" {
-                spawnLandscapeNode(for: anchor)
             }
         }
     }

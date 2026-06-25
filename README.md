@@ -56,18 +56,15 @@ parametrics     dense geometry
 * **Adaptive Mapping Policy:** Scores RoomPlan suitability, outdoor GPS context, LiDAR confidence, Depth Anything availability, thermal pressure, and operator override state. It prefers RoomPlan inside enclosed rooms and switches to LiDAR + Depth Anything outdoors or in spaces where room semantics are weak.
 * **Geospatial Context:** GPS, heading, ENU frame registration, satellite imagery, and DEM/elevation tiles run alongside either mapping engine so outdoor datasets carry terrain and map context rather than only local AR geometry.
 
-### 2. Multi-Format Serialization & Export
-A high-performance pipeline serializes inspection/export artifacts to the iOS local file system and syncs metadata over **SwiftData**. The authoritative robotics recording remains the external rosbag recorder unless local SQLite bag storage is explicitly enabled; local files support review, sharing, cache-backed publication, and field fallback. Exporting produces a standard iOS Share Sheet with files including:
-* **`.ply` (Binary PLY):** A high-density point cloud or surfel file encoding `x, y, z` floating coordinates and `red, green, blue` color attributes. Surfel PLY exports also include normals, radius, confidence, and observation counts for surface-oriented rendering or offline meshing.
-* **`.obj` (Wavefront 3D):** A standardized, polygonal mesh representing the tracked surfaces, textured with standard gray materials ready for importing into Blender, CAD, or Unity.
-* **`.usdz` (Universal Scene Description):** Apple’s native AR file format. Meshes are baked with physically plausible PBR materials for realistic lighting in iOS QuickLook or iMessage.
-* **`.pdf` (Dimensioned Blueprint):** A top-down 2D vector graphic blueprint featuring thick dark walls, red offset dimension ticks, measurement labels (in metric or imperial), and a graphic scale bar.
-* **`.mp4` (Cinematic Flythrough):** A 10-second, high-definition 1080x1080 3D cinematic video orbit rendered on the GPU via SceneKit, ideal for instant progress reports.
+### 2. ROS and Local Bag Recording
+MapEverything treats the external ROS2 recorder as the authoritative dataset sink. The iPhone publishes synchronized pose, camera, point cloud, GPS, geotile, DEM, radio, and diagnostics topics through rosbridge, while an optional on-device fallback mirrors those same rosbridge JSON payloads into chunked rosbag2-style SQLite files.
 
-### 3. Spatial Interaction & Planning Overlay
-* **Linear & Closed-Polygon Measure Tool:** Drop interactive nodes directly on real-world planes. Calculated linear paths automatically update. Placing 3+ nodes triggers a mathematical polygon cross-product operation, yielding a closed surface area (square feet or square meters) in real-time.
-* **Remodeling Mode:** Drop 3D volumetric boxes into the scene representing structural limits, appliances, or storage to map room volume restrictions.
-* **Landscaping Mode:** Spawn volumetric cones and custom green foliage markers to lay out site bounds, plant coordinates, or site grading limits.
+Local bag storage is off by default and controlled from the main recording surface. The **Save Local** control enables or disables on-device chunking, and **Share Local Bags** opens the recorded-session browser for deleting old sessions or sharing `metadata.yaml` and `.db3` chunks through the iOS share sheet.
+
+### 3. Record-Mode Operator Experience
+* **Single Mapping Surface:** The first screen is the live mapping view with start/stop, local bag save, local bag share, ROS bridge IP entry, and published-topic chips.
+* **Stopped Map Inspection:** After stopping a scan, the reconstructed surface mesh remains centered on screen for touch-driven pan, tilt, and pinch inspection.
+* **Field Recording Fallback:** The local bag controls mirror outgoing ROS publish payloads into chunked SQLite files on device when enabled, then expose those chunks through the share sheet.
 
 ---
 
@@ -75,65 +72,27 @@ A high-performance pipeline serializes inspection/export artifacts to the iOS lo
 
 ### Core App Setup
 1. Download, build, and run the app from **Xcode 15+** on a LiDAR-equipped iOS device (e.g., iPhone 12 Pro or newer, iPad Pro 2020 or newer).
-2. Authorize **Camera Permissions** on launch. 
-3. Tap the **Gear Icon** in the top right corner to customize settings:
-   - **Voxel Size:** Adjust the spacing of the grid (e.g., `0.05m` for detailed indoor scans, `0.1m` for outdoor terrain).
-   - **Max Point Limit:** Limit points (up to 2M) to avoid high memory spikes.
-   - **Units:** Toggle between Metric (meters/sq m) and Imperial (feet/sq ft) values.
-   - **Scan Mode:** Manually switch between LiDAR + Depth Anything point-cloud capture and ML-driven **RoomPlan** extraction. Adaptive indoor/outdoor switching is tracked in [TODO.md](TODO.md).
+2. Authorize **Camera Permissions** on launch.
+3. Enter the recorder workstation address in the **ROS bridge IP** field. The app builds a `ws://<host>:9090` rosbridge URL unless you enter a full WebSocket URL.
+4. Toggle **ROS** on when publishing to a remote rosbridge recorder. Leave it off when using only local SQLite bag capture.
+5. Tap **Save Local** before recording if you want on-device chunked SQLite bag files for field fallback.
 
 ---
 
-### How to Scan in Point Cloud & Mesh Mode
-1. Set the scan selector to **LiDAR Mode**.
-2. Point the camera at a surface and tap the central red **Record Icon** to initiate depth collection.
-3. Walk slowly and steadily. 
+### How to Record a Mapping Session
+1. Wait for the startup overlay to show **Ready** or **Ready Without Depth Model**.
+2. Tap **Start Mapping**. ARKit begins tracking, Depth Anything/LiDAR fusion starts, and enabled ROS/local bag streams begin publishing.
+3. Walk slowly and steadily.
    * *Move Slower Warnings:* If tracking is degraded by quick sweeps, a warning hum will trigger via the haptic motor and display a caution banner.
-   * *Thermal State Throttling:* MapEverything monitors CPU temperature. If the device starts heating up, the frame-processing interval is automatically scaled from 10Hz down to 2Hz to prevent thermal crashes.
-4. Toggle between the **Visualization modes** in real-time using the segmented controls:
-   * `Point Cloud`: Displays live feature points.
-   * `Wireframe`: RealityKit’s overlay showing active surface triangulation.
-   * `Solid Mesh`: Renders a solid color bounding surface mapping the reconstructed terrain.
-5. Tap the green **Checkmark Icon** to stop scanning. Enter a scan name and hit **Save**. A background task will serialize files to your local folder/iCloud.
+   * *Thermal State Throttling:* MapEverything monitors CPU temperature. If the device starts heating up, the frame-processing interval is automatically scaled down to avoid thermal crashes.
+4. Watch the bottom topic chips for the advertised `/mapping/...` topics and the recorder panel for queue depth, dropped publish count, local buffer count, and local bag message count.
+5. Tap **Stop Mapping**. Publication stops, AR capture pauses, and the current mesh remains available for on-device inspection with pan, tilt, and pinch gestures.
+6. Tap **Share Local Bags** to list recorded bag sessions and share individual `metadata.yaml` or `.db3` chunks.
 
 ---
 
-### How to Use the Spatial Planning & Measurement Tools
-Ensure scanning is paused or running in Point Cloud mode. Use the segmented mode bar to choose a mode:
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│ [ Scan Mode ]   [ Measure Mode ]   [ Remodel Mode ]   [ Landscape ]     │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-#### 📏 Measuring Distances & Area
-1. Tap **Measure**.
-2. Tap anywhere on a tracked surface or plane in the camera viewport. A red spheres marker will drop.
-3. Tap a second location. A yellow cylinder line will connect the two, and the HUD will display the linear distance (e.g., `Distance: 3.28 ft` / `1.00 m`).
-4. Tap a third location. A closed triangular overlay is drawn. The HUD will immediately compute and display the closed surface area (e.g., `Area: 10.76 sq ft` / `1.00 sq m`).
-5. Continue tapping to add edges to your custom room footprint.
-6. **To delete nodes:** Long-press any dropped red marker sphere. The selected node and its relative lines will be removed.
-
-#### 🔨 Remodeling & Landscaping Visualization
-1. Tap **Remodel** or **Landscape**.
-2. Tap the floor or any horizontal plane. 
-   - In **Remodel Mode**, a volumetric, semi-transparent blue planning cube (0.5m dimension) spawns.
-   - In **Landscape Mode**, an upright green planning cone (1.5m high) spawns to lay out foliage or grading pillars.
-3. Tap and drag spawned shapes to position them.
-4. Long-press on a placed shape to remove it from your AR scene.
-
----
-
-### RoomPlan Modeling & Top-Down Blueprint Generation
-1. Go to **Settings** and enable **Use RoomPlan Mode**.
-2. Tap the red **Record Icon**. The interface will change to Apple's standardized, immersive RoomPlan UI.
-3. Scan the room, aiming the camera at corners, floors, walls, and doorways. Bounding box meshes of chairs, tables, doors, and arches will float into view.
-4. Tap the **Checkmark Icon** to save. This creates a parametric room model.
-5. Go to the **Gallery View (Photos Icon)**:
-   - Tap a scan card to select it.
-   - Tap the **Floorplan Button (Ruler Icon)**. The app parses the 3D USDZ geometry, extracts all vertical walls, doors, and windows, and generates a vectorized PDF.
-   - Tap the **Preview Button (Eye Icon)** to open the models in AR QuickLook. You can inspect, measure, or place the virtual room in your current physical space.
+### Adaptive RoomPlan and Outdoor Mapping
+The adaptive mapping policy can select RoomPlan for enclosed interiors when room semantics are strong, or the LiDAR + Depth Anything path for outdoor and open-area mapping. The chosen mode, confidence, and reasons are published in `/mapping/session` and `/mapping/status` so the recorder can explain which capture path produced the data.
 
 ---
 
@@ -147,7 +106,7 @@ Transport decision: MapEverything continues to use `rosbridge_suite` over WebSoc
 
 The companion ROS2 custom message package lives in [ros2/reconstructor_msgs](ros2/reconstructor_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
 
-Local SQLite bag storage is available in Settings and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The Settings screen includes a local bag browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
+Local SQLite bag storage is controlled by the **Save Local** button and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The **Share Local Bags** button opens a browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
 
 Use [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) to convert shared local chunks into a native ROS2 bag. Run it from a sourced ROS2 workspace that can import `rosbag2_py`, `rclpy`, and `reconstructor_msgs`:
 
@@ -168,7 +127,7 @@ See [docs/ios-radio-restrictions.md](docs/ios-radio-restrictions.md) for operato
 
 Current Wi-Fi signal quality uses Apple's public `NEHotspotNetwork.fetchCurrent` API. It only reports the network the device is already associated with, requires Location permission, and requires the app target's `com.apple.developer.networking.wifi-info` entitlement. MapEverything now includes that entitlement file and publishes the entitlement, permission, last fetch, and normalized signal-strength state through session metadata and `/mapping/status`; broad Wi-Fi scans are not available through normal iOS public APIs.
 
-BLE beacon telemetry uses Apple's public `CoreBluetooth.CBCentralManager` API and only scans after service UUIDs, peripheral UUIDs, or local-name prefixes are configured in Settings. It reports Bluetooth permission state, scan state, configured filters, recent beacon RSSI values, and summarized advertisement metadata through session metadata and `/mapping/status`.
+BLE beacon telemetry uses Apple's public `CoreBluetooth.CBCentralManager` API and only scans after service UUIDs, peripheral UUIDs, or local-name prefixes are configured for the deployment. It reports Bluetooth permission state, scan state, configured filters, recent beacon RSSI values, and summarized advertisement metadata through session metadata and `/mapping/status`.
 
 Network path diagnostics use `NWPathMonitor` to report reachability, active and available interface types, expensive/constrained state, IPv4/IPv6/DNS support, and unsatisfied reasons through session metadata and `/mapping/status`. This describes the active network path, not raw RF signal power.
 
@@ -279,10 +238,8 @@ You should see log output confirming that the websocket server is running:
 1. Find your workstation's local IP address (e.g., by running `hostname -I` or `ifconfig` in the terminal).
 2. Connect both the iOS device and your workstation to the **same Wi-Fi network**.
 3. Open **MapEverything** on your iPhone or iPad.
-4. Tap the **Gear Icon (Settings)**:
-   - Toggle **Enable ROS2 Bridge** on.
-   - Enter your workstation’s WebSocket URL: `ws://<YOUR_WORKSTATION_IP>:9090` (e.g., `ws://192.168.1.150:9090`).
-5. Close Settings. The ROS2 status icon (antenna wave) in the top-left HUD will glow **green** when a connection is established.
+4. Enter your workstation address in the **ROS bridge IP** field. You can enter either a host such as `192.168.1.150` or a full URL such as `ws://192.168.1.150:9090`.
+5. Toggle **ROS** on. The recorder status in the HUD reports the connection state and turns green once rosbridge is connected.
 
 ---
 
@@ -318,7 +275,7 @@ Configure your RViz2 workspace using the settings below:
 ## ⚙️ Technical System Architecture
 
 ### Mapping Mode Architecture
-`MappingSessionManager` owns the record-mode lifecycle, enabled streams, recorder URL, bridge transport, and session metadata. SwiftData persists the expanded mapping schema through `MapEverythingModelSchema`, including legacy `EnvironmentModel` records plus `MappingSessionModel`, `SensorStreamModel`, and `GeoTileModel`.
+`MappingSessionManager` owns the record-mode lifecycle, enabled streams, recorder URL, bridge transport, and session metadata. SwiftData persists the active mapping schema through `MapEverythingModelSchema`, including `MappingSessionModel`, `SensorStreamModel`, and `GeoTileModel`.
 
 The adaptive mapping router belongs above the capture engines. It observes RoomPlan availability, AR tracking state, LiDAR depth confidence, Depth Anything health, GPS quality, Core Location indoor metadata, terrain tile coverage, thermal pressure, and operator override state. The router then selects one of two primary capture paths:
 
@@ -328,7 +285,7 @@ The adaptive mapping router belongs above the capture engines. It observes RoomP
 The selected mode, confidence, reason codes, and any operator override are reflected in `/mapping/session` and `/mapping/status` so the remote recorder can explain what it captured.
 
 ### Outlier Filtration Pipeline
-The point cloud goes through three distinct stages of cleanup before saving:
+The point cloud goes through three distinct stages of cleanup before publishing or recording:
 1. **Camera Space Projector:** Standard pinhole-camera unprojection translates depth pixel coordinates into a 3D coordinate vector in camera-relative coordinates:
    
    $$X_c = \frac{(x - c_x) \cdot \text{Depth}}{f_x}$$

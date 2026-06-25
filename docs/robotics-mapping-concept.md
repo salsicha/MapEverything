@@ -2,7 +2,7 @@
 
 ## Summary
 
-MapEverything should pivot from a general room-scanning and remodeling utility into a robotics mapping payload for iPhone and iPad Pro hardware. The app becomes a mobile sensor node that captures local geometry, geospatial context, radio observations, and device pose, then publishes synchronized ROS2 messages to a workstation or robot for rosbag recording, map fusion, and downstream autonomy workflows.
+MapEverything is a robotics mapping payload for iPhone and iPad Pro hardware. The app acts as a mobile sensor node that captures local geometry, geospatial context, radio observations, and device pose, then publishes synchronized ROS2 messages to a workstation or robot for rosbag recording, map fusion, and downstream autonomy workflows.
 
 The app should prioritize reliable field mapping over consumer design features. A successful default session produces a time-synchronized ROS2 bag containing ARKit-derived pose, low-rate camera frames with intrinsics, GPS fixes, Depth Anything fused point clouds, satellite imagery tiles, and DEM/elevation tiles, with mesh, radio, diagnostics, and session metadata available as opt-in profiles.
 
@@ -191,7 +191,7 @@ path.
 
 ### UI Changes
 
-- Replace remodeling/landscape-first navigation with a single record-mode mapping view.
+- Keep the app centered on a single record-mode mapping view.
 - Add prominent recorder connection status, publish rates, queue depth, and dropped-message counts.
 - Keep stream selection and default rosbag retention out of the app UI; configure subscriptions and recording policy on the recorder side. Use the local SQLite bag toggle only as an explicit field fallback.
 - Keep map area defaults for satellite/DEM tile radius, zoom, provider, and cache behavior in build/config or recorder-side session setup.

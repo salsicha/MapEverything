@@ -23,35 +23,11 @@ final class MapEverythingUITests: XCTestCase {
     }
 
     @MainActor
-    func testMainInterfaceElementsExist() throws {
+    func testAppLaunches() throws {
         let app = XCUIApplication()
         app.launch()
 
-        // Check for Heads Up Display Status (Initial State)
-        XCTAssertTrue(app.staticTexts["Paused"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["Points: 0"].waitForExistence(timeout: 2))
-        
-        // Test App Mode Segments
-        let measureButton = app.segmentedControls.buttons["Measure"]
-        XCTAssertTrue(measureButton.waitForExistence(timeout: 2))
-        measureButton.tap()
-        
-        let remodelButton = app.segmentedControls.buttons["Remodel"]
-        XCTAssertTrue(remodelButton.waitForExistence(timeout: 2))
-        remodelButton.tap()
-        
-        let landscapeButton = app.segmentedControls.buttons["Landscape"]
-        XCTAssertTrue(landscapeButton.waitForExistence(timeout: 2))
-        landscapeButton.tap()
-        
-        // Test Visualization Mode Segments
-        let wireframeButton = app.segmentedControls.buttons["Wireframe"]
-        XCTAssertTrue(wireframeButton.waitForExistence(timeout: 2))
-        wireframeButton.tap()
-        
-        let solidMeshButton = app.segmentedControls.buttons["Solid Mesh"]
-        XCTAssertTrue(solidMeshButton.waitForExistence(timeout: 2))
-        solidMeshButton.tap()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
     }
 
     @MainActor

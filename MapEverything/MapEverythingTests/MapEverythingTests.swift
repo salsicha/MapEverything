@@ -20,14 +20,20 @@ struct MapEverythingTests {
     @Test("Filters out points beyond 20 meters")
     func testPointCloudProcessorOutlierRemoval() {
         let processor = PointCloudProcessor()
-        let validPoint = ColoredPoint(position: SIMD3<Float>(1.0, 2.0, 3.0))
+        let validPoints = [
+            ColoredPoint(position: SIMD3<Float>(1.0, 2.0, 3.0)),
+            ColoredPoint(position: SIMD3<Float>(1.04, 2.0, 3.0)),
+            ColoredPoint(position: SIMD3<Float>(1.0, 2.04, 3.0)),
+            ColoredPoint(position: SIMD3<Float>(1.0, 2.0, 3.04))
+        ]
         let outlierPoint = ColoredPoint(position: SIMD3<Float>(30.0, 0.0, 0.0))
         
-        let points = [validPoint, outlierPoint]
+        let points = validPoints + [outlierPoint]
         let filtered = processor.removeOutliers(points: points, maxDistance: 20.0)
         
-        #expect(filtered.count == 1)
-        #expect(filtered.first == validPoint)
+        #expect(filtered.count == validPoints.count)
+        #expect(!filtered.contains(outlierPoint))
+        #expect(validPoints.allSatisfy { filtered.contains($0) })
     }
     
     @Test("Downsamples points within the same voxel")
@@ -75,57 +81,6 @@ struct MapEverythingTests {
         #expect(surfel.color.x > 100)
     }
     
-    @Test("Successfully saves and loads PLY files to disk")
-    func testStorageManagerSaveAndLoadPLY() {
-        let manager = PointCloudStorageManager.shared
-        let points = [ColoredPoint(position: SIMD3<Float>(1.0, 2.0, 3.0)), ColoredPoint(position: SIMD3<Float>(4.0, 5.0, 6.0))]
-        let testFilename = "test_pointcloud_\(UUID().uuidString)"
-        
-        let savedFile = manager.saveBinaryPLY(points: points, to: testFilename)
-        #expect(savedFile != nil)
-        #expect(savedFile == "\(testFilename).ply")
-        
-        let loadedPoints = manager.loadBinaryPLY(from: savedFile!)
-        #expect(loadedPoints != nil)
-        #expect(loadedPoints?.count == 2)
-        #expect(loadedPoints?.first == points.first)
-    }
-
-    @Test("Successfully saves surfel PLY files with point-cloud compatible loading")
-    func testStorageManagerSaveAndLoadSurfelPLY() throws {
-        let manager = PointCloudStorageManager.shared
-        let filename = "test_surfels_\(UUID().uuidString)"
-        let surfels = [
-            ColoredSurfel(
-                position: SIMD3<Float>(1.0, 2.0, 3.0),
-                normal: SIMD3<Float>(0, 1, 0),
-                color: SIMD3<UInt8>(10, 20, 30),
-                radius: 0.04,
-                confidence: 0.8,
-                observationCount: 3
-            )
-        ]
-
-        let savedFile = try #require(manager.saveBinaryPLY(surfels: surfels, to: filename))
-        let loadedPoints = try #require(manager.loadBinaryPLY(from: savedFile))
-
-        #expect(savedFile == "\(filename).ply")
-        #expect(loadedPoints.count == 1)
-        #expect(loadedPoints.first?.position == surfels.first?.position)
-        #expect(loadedPoints.first?.color == surfels.first?.color)
-    }
-
-    @Test("Environment model initializes correctly")
-    func testEnvironmentModelInitialization() {
-        let date = Date()
-        let model = EnvironmentModel(name: "Test Scan", creationDate: date, filePathToPointCloudData: "path/to/file.ply")
-
-        #expect(model.name == "Test Scan")
-        #expect(model.creationDate == date)
-        #expect(model.filePathToPointCloudData == "path/to/file.ply")
-        #expect(model.id != nil)
-    }
-
     @Test("Depth Anything V2 model loads and produces a depth map")
     func testDepthAnythingProcessorInference() throws {
         let processor = DepthAnythingProcessor()
@@ -1029,22 +984,13 @@ struct MapEverythingTests {
         #expect(try recorder.listBagSessions().isEmpty)
     }
 
-    @Test("Expanded SwiftData schema preserves EnvironmentModel and stores mapping records")
+    @Test("Expanded SwiftData schema stores mapping session records")
     @MainActor
-    func testMappingPersistenceModelsAndEnvironmentMigration() throws {
+    func testMappingPersistenceModels() throws {
         let schema = MapEverythingModelSchema.schema
         let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
         let container = try ModelContainer(for: schema, configurations: [configuration])
         let context = ModelContext(container)
-
-        let environment = EnvironmentModel(
-            id: UUID(),
-            name: "Existing Environment",
-            creationDate: Date(timeIntervalSince1970: 1_700_000_000),
-            filePathToPointCloudData: "existing_scan.ply",
-            meshPath: "existing_mesh.usdz"
-        )
-        context.insert(environment)
 
         let sessionID = UUID()
         let snapshot = MappingSessionSnapshot(
@@ -1108,14 +1054,9 @@ struct MapEverythingTests {
 
         try context.save()
 
-        let environments = try context.fetch(FetchDescriptor<EnvironmentModel>())
         let sessions = try context.fetch(FetchDescriptor<MappingSessionModel>())
         let streams = try context.fetch(FetchDescriptor<SensorStreamModel>())
         let tiles = try context.fetch(FetchDescriptor<GeoTileModel>())
-
-        #expect(environments.count == 1)
-        #expect(environments.first?.name == "Existing Environment")
-        #expect(environments.first?.filePathToPointCloudData == "existing_scan.ply")
 
         #expect(sessions.count == 1)
         #expect(sessions.first?.sessionID == sessionID)
@@ -1153,73 +1094,6 @@ struct MapEverythingTests {
         let flushed = buffer.flush()
         #expect(flushed.map(\.deduplicationKey) == [second.deduplicationKey, third.deduplicationKey])
         #expect(buffer.count == 0)
-    }
-
-    @Test("Cleanup removes orphaned point-cloud mesh imagery DEM and session files")
-    func testMappingFileCleanupRemovesOrphans() throws {
-        let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory
-            .appendingPathComponent("MapEverythingCleanup-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? fileManager.removeItem(at: root) }
-
-        let referencedPaths: Set<String> = [
-            "kept_scan.ply",
-            "kept_mesh.usdz",
-            "kept_satellite.jpg",
-            "kept_dem.tif",
-            "kept_session.mcap"
-        ]
-        let orphanPaths = [
-            "orphan_scan.ply",
-            "orphan_mesh.obj",
-            "orphan_satellite.png",
-            "orphan_dem.tiff",
-            "orphan_session.db3"
-        ]
-        let ignoredPath = "operator_notes.txt"
-
-        for path in referencedPaths.union(orphanPaths).union([ignoredPath]) {
-            let url = root.appendingPathComponent(path)
-            try Data(path.utf8).write(to: url)
-        }
-
-        let result = MappingFileCleanupManager.removeOrphanedDocumentFiles(
-            in: root,
-            referencedPaths: referencedPaths,
-            fileManager: fileManager
-        )
-
-        #expect(Set(result.removedFiles) == Set(orphanPaths))
-        for path in referencedPaths {
-            #expect(fileManager.fileExists(atPath: root.appendingPathComponent(path).path))
-        }
-        for path in orphanPaths {
-            #expect(!fileManager.fileExists(atPath: root.appendingPathComponent(path).path))
-        }
-        #expect(fileManager.fileExists(atPath: root.appendingPathComponent(ignoredPath).path))
-
-        let cacheRoot = root.appendingPathComponent("Cache", isDirectory: true)
-        let keptTilePath = "USGS_3DEP/3DEPElevation/static/12/818/1583.tif"
-        let orphanTilePath = "GeoTiles/USGS_3DEP/3DEPElevation/static/12/818/1584.tif"
-        let keptTileURL = cacheRoot
-            .appendingPathComponent("GeoTiles", isDirectory: true)
-            .appendingPathComponent(keptTilePath)
-        let orphanTileURL = cacheRoot.appendingPathComponent(orphanTilePath)
-        try fileManager.createDirectory(at: keptTileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: orphanTileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data([1]).write(to: keptTileURL)
-        try Data([2]).write(to: orphanTileURL)
-
-        let cacheResult = MappingFileCleanupManager.removeOrphanedCacheFiles(
-            in: cacheRoot,
-            referencedPaths: [keptTilePath],
-            fileManager: fileManager
-        )
-
-        #expect(cacheResult.removedFiles == [orphanTilePath])
-        #expect(fileManager.fileExists(atPath: keptTileURL.path))
-        #expect(!fileManager.fileExists(atPath: orphanTileURL.path))
     }
 
     private func makeRadioObservation(timestamp: TimeInterval, sourceID: String) -> RadioObservationMessage {
