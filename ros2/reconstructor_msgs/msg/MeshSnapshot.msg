@@ -1,4 +1,4 @@
-# Structured triangle-list mesh snapshot emitted on /reconstructor/mesh_snapshot.
+# Structured triangle-list mesh snapshot emitted on /mapping/mesh_snapshot.
 
 std_msgs/Header header
 uint32 schema_version

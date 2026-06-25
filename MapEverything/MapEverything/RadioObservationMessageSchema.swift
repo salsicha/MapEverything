@@ -29,7 +29,7 @@ final class RadioObservationMessageSchema {
     let messageType = "reconstructor_msgs/msg/RadioObservation"
     let packageName = "reconstructor_msgs"
     let messageName = "RadioObservation"
-    let topic = "/reconstructor/radio"
+    let topic = "/mapping/radio"
     let schemaVersion = 1
     let dependencies = [
         "std_msgs/msg/Header",
@@ -124,7 +124,7 @@ final class RadioObservationMessageSchema {
         RadioObservationMessageField(
             name: "session_id",
             type: "string",
-            description: "Mapping session UUID that ties the radio observation to /reconstructor/session.",
+            description: "Mapping session UUID that ties the radio observation to /mapping/session.",
             unsetValue: ""
         ),
         RadioObservationMessageField(

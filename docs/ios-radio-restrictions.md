@@ -10,7 +10,7 @@ Apple also documents `NEHotspotHelper`, but that API is for apps that help users
 
 Operator guidance:
 
-- Treat `/reconstructor/radio` Wi-Fi observations as current associated network quality only.
+- Treat `/mapping/radio` Wi-Fi observations as current associated network quality only.
 - For AP survey heatmaps, use an external Wi-Fi scanner, router/controller API, or companion ROS2 node.
 - Fuse external Wi-Fi observations by timestamp and, when available, MapEverything pose or GPS.
 

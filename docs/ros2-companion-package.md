@@ -44,15 +44,15 @@ Record the lightweight default streams together:
 ```bash
 source ~/mapeverything_ws/install/setup.bash
 ros2 bag record \
-  /reconstructor/camera/image/compressed \
-  /reconstructor/camera/camera_info \
-  /reconstructor/pose \
-  /reconstructor/gps/fix \
-  /reconstructor/gps/metadata \
-  /reconstructor/pointcloud \
-  /reconstructor/satellite/image/compressed \
-  /reconstructor/satellite/tile_info \
-  /reconstructor/dem/tile
+  /mapping/camera/image/compressed \
+  /mapping/camera/camera_info \
+  /mapping/pose \
+  /mapping/gps/fix \
+  /mapping/gps/metadata \
+  /mapping/pointcloud \
+  /mapping/satellite/image/compressed \
+  /mapping/satellite/tile_info \
+  /mapping/dem/tile
 ```
 
 Replay with:
@@ -65,8 +65,8 @@ ros2 bag play <bag_directory> --clock
 Useful inspection commands:
 
 ```bash
-ros2 topic echo /reconstructor/satellite/tile_info
-ros2 topic echo /reconstructor/dem/tile
+ros2 topic echo /mapping/satellite/tile_info
+ros2 topic echo /mapping/dem/tile
 ros2 interface show reconstructor_msgs/msg/GeoTileInfo
 ros2 interface show reconstructor_msgs/msg/GeoRasterTile
 ```
@@ -81,22 +81,22 @@ rviz2 -d <repo>/ros2/rviz/mapeverything.rviz
 ```
 
 It opens native RViz displays for pose, GPS fix,
-the `/reconstructor/pointcloud` Depth Anything fused point cloud, and satellite image.
-The structured custom topics `/reconstructor/satellite/tile_info`,
-`/reconstructor/dem/tile`, and `/reconstructor/gps/metadata` are intended
+the `/mapping/pointcloud` Depth Anything fused point cloud, and satellite image.
+The structured custom topics `/mapping/satellite/tile_info`,
+`/mapping/dem/tile`, and `/mapping/gps/metadata` are intended
 for rosbag2 recording and topic inspection. RViz does not render those custom
 message payloads directly unless a local converter node or RViz plugin maps
 them to standard `MarkerArray`, `Image`, `PointCloud2`, or `Map` topics.
 
-`/reconstructor/pointcloud` intentionally stays on standard `sensor_msgs/PointCloud2`.
+`/mapping/pointcloud` intentionally stays on standard `sensor_msgs/PointCloud2`.
 It carries `x`, `y`, `z`, and packed `rgb` fields from the Depth Anything + LiDAR
 fused depth path so rosbag2 can record it without custom message generation.
 
 The config includes disabled placeholder displays for common converter outputs:
 
-- `/reconstructor/radio/markers`
-- `/reconstructor/dem/image`
-- `/reconstructor/dem/markers`
+- `/mapping/radio/markers`
+- `/mapping/dem/image`
+- `/mapping/dem/markers`
 
 Enable those displays only after starting compatible converter nodes.
 

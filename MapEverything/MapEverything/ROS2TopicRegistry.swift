@@ -118,7 +118,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .pose,
             stream: .pose,
-            topic: "/reconstructor/pose",
+            topic: "/mapping/pose",
             messageType: "geometry_msgs/msg/PoseStamped",
             defaultRateHz: 30,
             isImplemented: true
@@ -126,7 +126,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .pointCloud,
             stream: .pointCloud,
-            topic: "/reconstructor/pointcloud",
+            topic: "/mapping/pointcloud",
             messageType: "sensor_msgs/msg/PointCloud2",
             defaultRateHz: 5,
             isImplemented: true
@@ -134,7 +134,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .imu,
             stream: .imu,
-            topic: "/reconstructor/imu",
+            topic: "/mapping/imu",
             messageType: "sensor_msgs/msg/Imu",
             defaultRateHz: 100,
             isImplemented: true
@@ -142,7 +142,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .meshMarkers,
             stream: .mesh,
-            topic: "/reconstructor/map",
+            topic: "/mapping/map",
             messageType: "visualization_msgs/msg/MarkerArray",
             defaultRateHz: 0.5,
             isImplemented: true
@@ -166,7 +166,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .cameraCompressed,
             stream: .camera,
-            topic: "/reconstructor/camera/image/compressed",
+            topic: "/mapping/camera/image/compressed",
             messageType: "sensor_msgs/msg/CompressedImage",
             defaultRateHz: 2,
             isImplemented: true
@@ -174,7 +174,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .cameraInfo,
             stream: .camera,
-            topic: "/reconstructor/camera/camera_info",
+            topic: "/mapping/camera/camera_info",
             messageType: "sensor_msgs/msg/CameraInfo",
             defaultRateHz: 2,
             isImplemented: true
@@ -182,7 +182,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .surfels,
             stream: .surfels,
-            topic: "/reconstructor/surfels",
+            topic: "/mapping/surfels",
             messageType: "sensor_msgs/msg/PointCloud2",
             defaultRateHz: 1,
             isImplemented: false
@@ -190,7 +190,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .gpsFix,
             stream: .gps,
-            topic: "/reconstructor/gps/fix",
+            topic: "/mapping/gps/fix",
             messageType: "sensor_msgs/msg/NavSatFix",
             defaultRateHz: 1,
             isImplemented: true
@@ -198,7 +198,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .gpsMetadata,
             stream: .gps,
-            topic: "/reconstructor/gps/metadata",
+            topic: "/mapping/gps/metadata",
             messageType: "reconstructor_msgs/msg/GPSMetadata",
             defaultRateHz: 1,
             isImplemented: true
@@ -206,7 +206,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .odom,
             stream: .odometry,
-            topic: "/reconstructor/odom",
+            topic: "/mapping/odom",
             messageType: "nav_msgs/msg/Odometry",
             defaultRateHz: 30,
             isImplemented: true
@@ -214,7 +214,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .status,
             stream: .diagnostics,
-            topic: "/reconstructor/status",
+            topic: "/mapping/status",
             messageType: "diagnostic_msgs/msg/DiagnosticArray",
             defaultRateHz: 1,
             isImplemented: true
@@ -222,7 +222,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .session,
             stream: .session,
-            topic: "/reconstructor/session",
+            topic: "/mapping/session",
             messageType: "reconstructor_msgs/msg/MappingSession",
             defaultRateHz: nil,
             isImplemented: true
@@ -230,7 +230,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .radio,
             stream: .radio,
-            topic: "/reconstructor/radio",
+            topic: "/mapping/radio",
             messageType: "reconstructor_msgs/msg/RadioObservation",
             defaultRateHz: 2,
             isImplemented: true
@@ -238,7 +238,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .indoorLocalization,
             stream: .indoorLocalization,
-            topic: "/reconstructor/indoor_localization",
+            topic: "/mapping/indoor_localization",
             messageType: "reconstructor_msgs/msg/IndoorLocalization",
             defaultRateHz: 1,
             isImplemented: true
@@ -246,7 +246,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .satelliteImage,
             stream: .satelliteImagery,
-            topic: "/reconstructor/satellite/image/compressed",
+            topic: "/mapping/satellite/image/compressed",
             messageType: "sensor_msgs/msg/CompressedImage",
             defaultRateHz: nil,
             isImplemented: true
@@ -254,7 +254,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .satelliteTileInfo,
             stream: .satelliteImagery,
-            topic: "/reconstructor/satellite/tile_info",
+            topic: "/mapping/satellite/tile_info",
             messageType: "reconstructor_msgs/msg/GeoTileInfo",
             defaultRateHz: nil,
             isImplemented: true
@@ -262,7 +262,7 @@ final class ROS2TopicRegistry {
         ROS2TopicDefinition(
             id: .demTile,
             stream: .dem,
-            topic: "/reconstructor/dem/tile",
+            topic: "/mapping/dem/tile",
             messageType: "reconstructor_msgs/msg/GeoRasterTile",
             defaultRateHz: nil,
             isImplemented: true

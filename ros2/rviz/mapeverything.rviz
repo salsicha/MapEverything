@@ -19,56 +19,56 @@ Visualization Manager:
       Enabled: true
       Name: Pose
       Topic:
-        Value: /reconstructor/pose
+        Value: /mapping/pose
     - Class: rviz_default_plugins/Odometry
       Enabled: false
       Name: Odometry
       Topic:
-        Value: /reconstructor/odom
+        Value: /mapping/odom
     - Class: rviz_default_plugins/NavSat
       Enabled: true
       Name: GPS Fix
       Topic:
-        Value: /reconstructor/gps/fix
+        Value: /mapping/gps/fix
     - Class: rviz_default_plugins/PointCloud2
       Enabled: true
       Name: Depth Anything Point Cloud
       Size (m): 0.02
       Style: Points
       Topic:
-        Value: /reconstructor/pointcloud
+        Value: /mapping/pointcloud
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: Mesh Markers
       Topic:
-        Value: /reconstructor/map
+        Value: /mapping/map
     - Class: rviz_default_plugins/Image
       Enabled: false
       Name: Camera Image
       Transport Hint: compressed
       Topic:
-        Value: /reconstructor/camera/image/compressed
+        Value: /mapping/camera/image/compressed
     - Class: rviz_default_plugins/Image
       Enabled: true
       Name: Satellite Image
       Transport Hint: compressed
       Topic:
-        Value: /reconstructor/satellite/image/compressed
+        Value: /mapping/satellite/image/compressed
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: Radio Observation Overlay
       Topic:
-        Value: /reconstructor/radio/markers
+        Value: /mapping/radio/markers
     - Class: rviz_default_plugins/Image
       Enabled: false
       Name: DEM Raster Overlay
       Topic:
-        Value: /reconstructor/dem/image
+        Value: /mapping/dem/image
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: DEM Terrain Markers
       Topic:
-        Value: /reconstructor/dem/markers
+        Value: /mapping/dem/markers
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

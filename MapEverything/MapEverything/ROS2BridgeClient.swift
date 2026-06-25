@@ -818,7 +818,7 @@ class ROS2BridgeClient: ObservableObject {
 
     func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
         // Surfels remain an internal reconstruction/export format. ROS output
-        // uses /reconstructor/pointcloud from Depth Anything fused depth.
+        // uses /mapping/pointcloud from Depth Anything fused depth.
     }
     
     func publishMap(meshAnchors: [ARMeshAnchor], timestamp: TimeInterval) {
@@ -1438,13 +1438,13 @@ class ROS2BridgeClient: ObservableObject {
             "header": createHeader(frameId: "iphone_camera", timestamp: ProcessInfo.processInfo.systemUptime),
             "status": [
                 diagnosticStatus(
-                    name: "reconstructor/ros2_bridge",
+                    name: "mapping/ros2_bridge",
                     level: isConnected ? 0 : 2,
                     message: isConnected ? "Connected to ROS2 recorder" : "Disconnected from ROS2 recorder",
                     values: bridgeDiagnosticValues
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/publish_queue",
+                    name: "mapping/publish_queue",
                     level: diagnosticLevel(for: queueStats),
                     message: diagnosticMessage(for: queueStats),
                     values: [
@@ -1459,7 +1459,7 @@ class ROS2BridgeClient: ObservableObject {
                     ]
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/local_sample_buffer",
+                    name: "mapping/local_sample_buffer",
                     level: localSampleBufferDiagnosticLevel(localBufferStats),
                     message: localSampleBufferDiagnosticMessage(localBufferStats),
                     values: [
@@ -1475,25 +1475,25 @@ class ROS2BridgeClient: ObservableObject {
                     ]
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/local_bag_storage",
+                    name: "mapping/local_bag_storage",
                     level: localBagRecorder.diagnosticLevel,
                     message: localBagRecorder.diagnosticMessage,
                     values: localBagRecorder.stats.diagnosticValues
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/stream_payload_metrics",
+                    name: "mapping/stream_payload_metrics",
                     level: 0,
                     message: payloadMetricSnapshots.isEmpty ? "No payload metrics published yet" : "Stream payload metrics nominal",
                     values: streamPayloadDiagnosticValues(payloadMetricSnapshots)
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/adaptive_mapping",
+                    name: "mapping/adaptive_mapping",
                     level: adaptiveMappingController.diagnosticLevel,
                     message: adaptiveMappingController.diagnosticMessage,
                     values: adaptiveMappingController.diagnosticValues
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/geotiles",
+                    name: "mapping/geotiles",
                     level: geoTilePublisher.lastError == nil ? 0 : 1,
                     message: geoTilePublisher.lastError ?? "Satellite imagery and DEM tile publisher nominal",
                     values: [
@@ -1503,19 +1503,19 @@ class ROS2BridgeClient: ObservableObject {
                     ]
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/geotile_optional_providers",
+                    name: "mapping/geotile_optional_providers",
                     level: 0,
                     message: "Optional geospatial provider configuration slots available",
                     values: optionalGeoProviderDiagnosticValues
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/gps_quality",
+                    name: "mapping/gps_quality",
                     level: gpsQualityDiagnosticLevel(indoorLocalizationManager),
                     message: gpsQualityDiagnosticMessage(indoorLocalizationManager),
                     values: gpsQualityDiagnosticValues(indoorLocalizationManager)
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/indoor_localization",
+                    name: "mapping/indoor_localization",
                     level: indoorLocalizationDiagnosticLevel(indoorLocalizationManager),
                     message: indoorLocalizationDiagnosticMessage(indoorLocalizationManager),
                     values: [
@@ -1536,25 +1536,25 @@ class ROS2BridgeClient: ObservableObject {
                     ]
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/current_wifi",
+                    name: "mapping/current_wifi",
                     level: currentWiFiTelemetryManager.diagnosticLevel,
                     message: currentWiFiTelemetryManager.diagnosticMessage,
                     values: currentWiFiTelemetryManager.diagnosticValues
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/ble_beacons",
+                    name: "mapping/ble_beacons",
                     level: bleBeaconTelemetryManager.diagnosticLevel,
                     message: bleBeaconTelemetryManager.diagnosticMessage,
                     values: bleBeaconTelemetryManager.diagnosticValues
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/network_path",
+                    name: "mapping/network_path",
                     level: networkPathDiagnosticsManager.diagnosticLevel,
                     message: networkPathDiagnosticsManager.diagnosticMessage,
                     values: networkPathDiagnosticsManager.diagnosticValues
                 ),
                 diagnosticStatus(
-                    name: "reconstructor/recorder_probe",
+                    name: "mapping/recorder_probe",
                     level: recorderEndpointProbeManager.diagnosticLevel,
                     message: recorderEndpointProbeManager.diagnosticMessage,
                     values: recorderEndpointProbeManager.diagnosticValues

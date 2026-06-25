@@ -199,7 +199,7 @@ struct MapEverythingTests {
         let catalogChannelIDs = RadioTelemetryChannelID.allCases.map(\.rawValue).sorted()
 
         #expect(schema.messageType == "reconstructor_msgs/msg/RadioObservation")
-        #expect(schema.topic == "/reconstructor/radio")
+        #expect(schema.topic == "/mapping/radio")
         #expect(schema.schemaVersion == 1)
         #expect(schema.unsetNumericValue == "0.0")
         #expect(schema.supportedChannelIDs == catalogChannelIDs)
@@ -267,7 +267,7 @@ struct MapEverythingTests {
         let advertisedIDs = Set(registry.advertisedTopics().map(\.id))
         let schema = MeshSnapshotMessageSchema.shared
 
-        #expect(markerTopic.topic == "/reconstructor/map")
+        #expect(markerTopic.topic == "/mapping/map")
         #expect(markerTopic.messageType == "visualization_msgs/msg/MarkerArray")
         #expect(snapshotTopic.topic == schema.topic)
         #expect(snapshotTopic.messageType == schema.messageType)
@@ -622,6 +622,7 @@ struct MapEverythingTests {
         #expect(allTopics.count == ROS2TopicID.allCases.count)
         #expect(Set(allTopics.map(\.id)) == Set(ROS2TopicID.allCases))
         #expect(advertisedIDs.isSuperset(of: [.pose, .cameraCompressed, .cameraInfo, .pointCloud, .gpsFix, .gpsMetadata, .satelliteImage, .satelliteTileInfo, .demTile]))
+        #expect(allTopics.allSatisfy { $0.topic == "/tf" || $0.topic.hasPrefix("/mapping/") })
         #expect(!advertisedIDs.contains(.odom))
         #expect(!advertisedIDs.contains(.surfels))
         #expect(!advertisedIDs.contains(.imu))
@@ -672,7 +673,7 @@ struct MapEverythingTests {
             imageResolution: CGSize(width: 640, height: 480)
         )
 
-        #expect(cameraInfoTopic.topic == "/reconstructor/camera/camera_info")
+        #expect(cameraInfoTopic.topic == "/mapping/camera/camera_info")
         #expect(cameraInfoTopic.messageType == "sensor_msgs/msg/CameraInfo")
         #expect(msg["width"] as? Int == 640)
         #expect(msg["height"] as? Int == 480)
@@ -720,7 +721,7 @@ struct MapEverythingTests {
         let encodedData = try #require(msg["data"] as? String)
         let decodedData = try #require(Data(base64Encoded: encodedData))
 
-        #expect(surfelTopic.topic == "/reconstructor/surfels")
+        #expect(surfelTopic.topic == "/mapping/surfels")
         #expect(surfelTopic.stream == .surfels)
         #expect(surfelTopic.messageType == "sensor_msgs/msg/PointCloud2")
         #expect(!surfelTopic.isImplemented)
@@ -975,12 +976,12 @@ struct MapEverythingTests {
         let firstMessage = makeLocalBagMessage(sequence: 1, payloadSize: 1_100)
         let secondMessage = makeLocalBagMessage(sequence: 2, payloadSize: 1_100)
         recorder.recordPublishedTopic(
-            topic: "/reconstructor/status",
+            topic: "/mapping/status",
             messageType: "diagnostic_msgs/msg/DiagnosticArray",
             msg: firstMessage
         )
         recorder.recordPublishedTopic(
-            topic: "/reconstructor/status",
+            topic: "/mapping/status",
             messageType: "diagnostic_msgs/msg/DiagnosticArray",
             msg: secondMessage
         )
@@ -1014,7 +1015,7 @@ struct MapEverythingTests {
             count + (try sqliteInteger(url: url, sql: "SELECT COUNT(*) FROM messages"))
         }
         let topicCount = try dbFiles.reduce(0) { count, url in
-            count + (try sqliteInteger(url: url, sql: "SELECT COUNT(*) FROM topics WHERE name = '/reconstructor/status' AND type = 'diagnostic_msgs/msg/DiagnosticArray' AND serialization_format = 'rosbridge_json'"))
+            count + (try sqliteInteger(url: url, sql: "SELECT COUNT(*) FROM topics WHERE name = '/mapping/status' AND type = 'diagnostic_msgs/msg/DiagnosticArray' AND serialization_format = 'rosbridge_json'"))
         }
 
         #expect(totalMessages == 2)
@@ -1123,7 +1124,7 @@ struct MapEverythingTests {
         #expect(sessions.first?.providerConfigJSON.hasPrefix("[") == true)
 
         #expect(streams.count == 1)
-        #expect(streams.first?.topic == "/reconstructor/radio")
+        #expect(streams.first?.topic == "/mapping/radio")
         #expect(streams.first?.sentMessages == 7)
         #expect(streams.first?.droppedMessages == 1)
         #expect(streams.first?.lastError == "last radio error")

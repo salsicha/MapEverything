@@ -29,7 +29,7 @@ final class MeshSnapshotMessageSchema {
     let messageType = "reconstructor_msgs/msg/MeshSnapshot"
     let packageName = "reconstructor_msgs"
     let messageName = "MeshSnapshot"
-    let topic = "/reconstructor/mesh_snapshot"
+    let topic = "/mapping/mesh_snapshot"
     let schemaVersion = 1
     let dependencies = [
         "std_msgs/msg/Header",

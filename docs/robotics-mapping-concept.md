@@ -75,11 +75,11 @@ Restricted or external-data targets:
 - Full Wi-Fi access-point scans are not available through normal App Store public APIs.
 - Cellular RSRP/RSRQ/RSSI is not reliably available through public iOS APIs.
 - For cellular or spectrum-grade radio mapping, use an external sensor, router API, SDR, or companion ROS2 node and fuse by timestamp.
-- The implementation publishes these constraints as `radio_platform_restrictions` in `/reconstructor/session`; see `docs/ios-radio-restrictions.md`.
+- The implementation publishes these constraints as `radio_platform_restrictions` in `/mapping/session`; see `docs/ios-radio-restrictions.md`.
 
 Recommended ROS output:
 
-- Standard diagnostics on `/reconstructor/status`.
+- Standard diagnostics on `/mapping/status`.
 - Custom `reconstructor_msgs/RadioObservation` for Wi-Fi, BLE, network probes, and external radio adapters.
 - Optional `sensor_msgs/PointCloud2` heatmap projection where each point stores signal fields.
 
@@ -133,19 +133,19 @@ Recommended output:
 | Topic | Message Type | Rate | Purpose |
 | --- | --- | --- | --- |
 | `/tf` | `tf2_msgs/msg/TFMessage` | opt-in | Frame tree from geospatial and AR local frames. |
-| `/reconstructor/pose` | `geometry_msgs/msg/PoseStamped` | 10-30 Hz | ARKit camera pose in local map frame. |
-| `/reconstructor/odom` | `nav_msgs/msg/Odometry` | opt-in | Odometry-style pose for robotics consumers. |
-| `/reconstructor/imu` | `sensor_msgs/msg/Imu` | opt-in | Device IMU. |
-| `/reconstructor/gps/fix` | `sensor_msgs/msg/NavSatFix` | 1-10 Hz | GPS position and accuracy. |
-| `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | Camera frames for context, replay, and loop closure without saturating the iPhone. |
-| `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~2 Hz | Downsampled Depth Anything + LiDAR fused point cloud. |
-| `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | 0.2-2 Hz | RViz-friendly mesh and semantic objects. |
-| `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | 0.5-5 Hz | Wi-Fi, BLE, link, or external radio measurements. |
-| `/reconstructor/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Satellite imagery tile payloads. |
-| `/reconstructor/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery georeference metadata and device pixel coordinates. |
-| `/reconstructor/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM/elevation raster payloads and device pixel coordinates. |
-| `/reconstructor/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, sensor, permission, bridge, and recorder health. |
-| `/reconstructor/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session metadata and configuration. |
+| `/mapping/pose` | `geometry_msgs/msg/PoseStamped` | 10-30 Hz | ARKit camera pose in local map frame. |
+| `/mapping/odom` | `nav_msgs/msg/Odometry` | opt-in | Odometry-style pose for robotics consumers. |
+| `/mapping/imu` | `sensor_msgs/msg/Imu` | opt-in | Device IMU. |
+| `/mapping/gps/fix` | `sensor_msgs/msg/NavSatFix` | 1-10 Hz | GPS position and accuracy. |
+| `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | Camera frames for context, replay, and loop closure without saturating the iPhone. |
+| `/mapping/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~2 Hz | Downsampled Depth Anything + LiDAR fused point cloud. |
+| `/mapping/map` | `visualization_msgs/msg/MarkerArray` | 0.2-2 Hz | RViz-friendly mesh and semantic objects. |
+| `/mapping/radio` | `reconstructor_msgs/msg/RadioObservation` | 0.5-5 Hz | Wi-Fi, BLE, link, or external radio measurements. |
+| `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Satellite imagery tile payloads. |
+| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery georeference metadata and device pixel coordinates. |
+| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM/elevation raster payloads and device pixel coordinates. |
+| `/mapping/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, sensor, permission, bridge, and recorder health. |
+| `/mapping/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session metadata and configuration. |
 
 ## Custom ROS Message Package
 
@@ -169,7 +169,7 @@ Initial messages:
 The recorder device must build this package before recording custom topics with `rosbag2`. The starter RViz configuration is `ros2/rviz/mapeverything.rviz`; it covers native pose, GPS, Depth Anything point-cloud, camera, and satellite image displays, with disabled placeholder layers for optional radio, DEM, mesh, and converter outputs.
 
 Colored surface reconstruction remains an on-device/export format. ROS output uses
-the standard `/reconstructor/pointcloud` `PointCloud2` topic with `x`, `y`, `z`,
+the standard `/mapping/pointcloud` `PointCloud2` topic with `x`, `y`, `z`,
 and packed `rgb` fields generated from the Depth Anything + LiDAR fused depth
 path.
 

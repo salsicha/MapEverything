@@ -1,4 +1,4 @@
-# Extended Core Location metadata paired with /reconstructor/gps/fix.
+# Extended Core Location metadata paired with /mapping/gps/fix.
 
 std_msgs/Header header
 string service

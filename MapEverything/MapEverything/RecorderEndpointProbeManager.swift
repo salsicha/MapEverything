@@ -45,7 +45,7 @@ final class RecorderEndpointProbeManager: ObservableObject {
             timeout: 5,
             throughputPayloadBytes: 16_384,
             throughputMessageCount: 3,
-            probeTopic: "/reconstructor/probe/throughput"
+            probeTopic: "/mapping/probe/throughput"
         )
     }
 

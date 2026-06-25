@@ -7,12 +7,12 @@
 - [x] Use maximum-likelihood LiDAR + Depth Anything fusion for mapping point clouds.
 - [x] Add `PublishQueue` with backpressure, retry, drop policy, queue-depth metrics, and last-error reporting.
 - [x] Add low-rate background satellite imagery and DEM tile fetch/publish during mapping sessions.
-- [x] Publish `diagnostic_msgs/DiagnosticArray` on `/reconstructor/status`.
-- [x] Publish session metadata on `/reconstructor/session`.
+- [x] Publish `diagnostic_msgs/DiagnosticArray` on `/mapping/status`.
+- [x] Publish session metadata on `/mapping/session`.
 - [x] Access CoreLocation indoor localization services for indoor registration quality and global registration.
-- [x] Publish `sensor_msgs/NavSatFix` on `/reconstructor/gps/fix`.
+- [x] Publish `sensor_msgs/NavSatFix` on `/mapping/gps/fix`.
 - [x] Add CoreLocation permission flow for precise location and heading.
-- [x] Publish `nav_msgs/Odometry` on `/reconstructor/odom`.
+- [x] Publish `nav_msgs/Odometry` on `/mapping/odom`.
 - [x] Include horizontal accuracy, vertical accuracy, altitude, speed, course, and timestamp metadata where available.
 - [x] Add ENU georeferencing from WGS84 GPS into the ARKit map frame.
 - [x] Publish a REP-105-compatible frame tree: `earth`, `map`, `odom`, `base_link`, and `iphone_camera`.
@@ -30,7 +30,7 @@
 - [x] Add endpoint latency and throughput probes against the ROS2 recorder.
 - [x] Add CoreBluetooth scanning for configured BLE beacon RSSI.
 - [x] Define `reconstructor_msgs/RadioObservation`.
-- [x] Publish radio observations on `/reconstructor/radio`.
+- [x] Publish radio observations on `/mapping/radio`.
 - [x] Document iOS restrictions: no broad Wi-Fi scans and no reliable public cellular RSSI/RSRP stream.
 
 ## P1 - Satellite Imagery and DEM Tiles
@@ -87,7 +87,7 @@
 
 - [x] Add an adaptive mapping-mode policy that scores RoomPlan suitability, outdoor GPS context, LiDAR depth confidence, Depth Anything availability, thermal pressure, and operator override state.
 - [x] Prefer parametric RoomPlan capture for enclosed interiors and switch to LiDAR + Depth Anything outdoor mapping with GPS, satellite imagery, and DEM context when room semantics are not reliable.
-- [x] Publish active mapping mode, confidence, reason codes, and override state in `/reconstructor/session` and `/reconstructor/status`.
+- [x] Publish active mapping mode, confidence, reason codes, and override state in `/mapping/session` and `/mapping/status`.
 
 ## P2 - Validation
 

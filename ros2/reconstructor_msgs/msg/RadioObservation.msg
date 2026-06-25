@@ -1,4 +1,4 @@
-# Schema version 1 radio observation emitted on /reconstructor/radio.
+# Schema version 1 radio observation emitted on /mapping/radio.
 
 std_msgs/Header header
 string session_id

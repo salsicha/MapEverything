@@ -21,27 +21,27 @@ from typing import Sequence
 
 
 DEFAULT_TOPICS = [
-    "/reconstructor/pose",
-    "/reconstructor/camera/image/compressed",
-    "/reconstructor/camera/camera_info",
-    "/reconstructor/pointcloud",
-    "/reconstructor/gps/fix",
-    "/reconstructor/gps/metadata",
-    "/reconstructor/satellite/image/compressed",
-    "/reconstructor/satellite/tile_info",
-    "/reconstructor/dem/tile",
+    "/mapping/pose",
+    "/mapping/camera/image/compressed",
+    "/mapping/camera/camera_info",
+    "/mapping/pointcloud",
+    "/mapping/gps/fix",
+    "/mapping/gps/metadata",
+    "/mapping/satellite/image/compressed",
+    "/mapping/satellite/tile_info",
+    "/mapping/dem/tile",
 ]
 
 OPTIONAL_TOPICS = [
     "/tf",
-    "/reconstructor/odom",
-    "/reconstructor/imu",
-    "/reconstructor/map",
-    "/reconstructor/mesh_snapshot",
-    "/reconstructor/radio",
-    "/reconstructor/indoor_localization",
-    "/reconstructor/session",
-    "/reconstructor/status",
+    "/mapping/odom",
+    "/mapping/imu",
+    "/mapping/map",
+    "/mapping/mesh_snapshot",
+    "/mapping/radio",
+    "/mapping/indoor_localization",
+    "/mapping/session",
+    "/mapping/status",
 ]
 
 

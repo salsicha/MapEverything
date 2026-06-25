@@ -141,7 +141,7 @@ Ensure scanning is paused or running in Point Cloud mode. Use the segmented mode
 
 MapEverything acts as a robust WebSocket-based edge sensor node. It connects directly to standard `rosbridge_suite` networks and, by default, streams pose, low-rate camera imagery with intrinsics, GPS, Depth Anything fused point clouds, satellite tile payloads, satellite tile georeferencing, and DEM raster tiles into your ROS2 workspace.
 
-The current ROS topic namespace remains `/reconstructor` for compatibility with existing recorder setups.
+The current ROS topic namespace is `/mapping`.
 
 Transport decision: MapEverything continues to use `rosbridge_suite` over WebSocket in this build. A native binary bridge is not enabled until there is a maintained iOS ROS2/DDS client or companion ROS2 binary receiver and a throughput benchmark showing rosbridge is insufficient.
 
@@ -166,44 +166,44 @@ The converter also accepts individual `.db3` chunks, supports `--dry-run` inspec
 
 See [docs/ios-radio-restrictions.md](docs/ios-radio-restrictions.md) for operator-facing iOS radio API constraints and external-adapter guidance.
 
-Current Wi-Fi signal quality uses Apple's public `NEHotspotNetwork.fetchCurrent` API. It only reports the network the device is already associated with, requires Location permission, and requires the app target's `com.apple.developer.networking.wifi-info` entitlement. MapEverything now includes that entitlement file and publishes the entitlement, permission, last fetch, and normalized signal-strength state through session metadata and `/reconstructor/status`; broad Wi-Fi scans are not available through normal iOS public APIs.
+Current Wi-Fi signal quality uses Apple's public `NEHotspotNetwork.fetchCurrent` API. It only reports the network the device is already associated with, requires Location permission, and requires the app target's `com.apple.developer.networking.wifi-info` entitlement. MapEverything now includes that entitlement file and publishes the entitlement, permission, last fetch, and normalized signal-strength state through session metadata and `/mapping/status`; broad Wi-Fi scans are not available through normal iOS public APIs.
 
-BLE beacon telemetry uses Apple's public `CoreBluetooth.CBCentralManager` API and only scans after service UUIDs, peripheral UUIDs, or local-name prefixes are configured in Settings. It reports Bluetooth permission state, scan state, configured filters, recent beacon RSSI values, and summarized advertisement metadata through session metadata and `/reconstructor/status`.
+BLE beacon telemetry uses Apple's public `CoreBluetooth.CBCentralManager` API and only scans after service UUIDs, peripheral UUIDs, or local-name prefixes are configured in Settings. It reports Bluetooth permission state, scan state, configured filters, recent beacon RSSI values, and summarized advertisement metadata through session metadata and `/mapping/status`.
 
-Network path diagnostics use `NWPathMonitor` to report reachability, active and available interface types, expensive/constrained state, IPv4/IPv6/DNS support, and unsatisfied reasons through session metadata and `/reconstructor/status`. This describes the active network path, not raw RF signal power.
+Network path diagnostics use `NWPathMonitor` to report reachability, active and available interface types, expensive/constrained state, IPv4/IPv6/DNS support, and unsatisfied reasons through session metadata and `/mapping/status`. This describes the active network path, not raw RF signal power.
 
-Recorder endpoint probes use a bounded disposable rosbridge WebSocket connection to measure ping/pong round-trip latency and a short upload write-rate probe on `/reconstructor/probe/throughput`. Results are published through session metadata and `/reconstructor/status`; the probe measures application-path recorder health rather than sustained bidirectional network bandwidth.
+Recorder endpoint probes use a bounded disposable rosbridge WebSocket connection to measure ping/pong round-trip latency and a short upload write-rate probe on `/mapping/probe/throughput`. Results are published through session metadata and `/mapping/status`; the probe measures application-path recorder health rather than sustained bidirectional network bandwidth.
 
-The app publishes `reconstructor_msgs/RadioObservation` messages on `/reconstructor/radio` for fresh radio samples and includes the schema in `/reconstructor/session` metadata. It covers current Wi-Fi, BLE advertisements, Network.framework path state, recorder endpoint probes, and optional external adapters; unset numeric fields use `0.0` for rosbridge JSON compatibility, unset strings are empty, unset arrays are empty, and channel-specific details go in `metadata_json`.
+The app publishes `reconstructor_msgs/RadioObservation` messages on `/mapping/radio` for fresh radio samples and includes the schema in `/mapping/session` metadata. It covers current Wi-Fi, BLE advertisements, Network.framework path state, recorder endpoint probes, and optional external adapters; unset numeric fields use `0.0` for rosbridge JSON compatibility, unset strings are empty, unset arrays are empty, and channel-specific details go in `metadata_json`.
 
-iOS does not expose broad Wi-Fi access-point scan results or a dependable public cellular RSSI/RSRP/RSRQ/SINR stream to normal apps. MapEverything publishes these platform restrictions in `/reconstructor/session` as `radio_platform_restrictions`; use external adapters, network equipment APIs, SDRs, or companion ROS2 nodes for those survey channels.
+iOS does not expose broad Wi-Fi access-point scan results or a dependable public cellular RSSI/RSRP/RSRQ/SINR stream to normal apps. MapEverything publishes these platform restrictions in `/mapping/session` as `radio_platform_restrictions`; use external adapters, network equipment APIs, SDRs, or companion ROS2 nodes for those survey channels.
 
 ### ROS2 WebSocket Topic Directory
 
 | Topic Name | ROS 2 Message Type | Update Rate | Description |
 | :--- | :--- | :--- | :--- |
 | `/tf` | `tf2_msgs/msg/TFMessage` | opt-in | Live spatial coordinate frames mapping the relative transform from the mobile `iphone_camera` frame to the world origin `map` frame. |
-| `/reconstructor/pose` | `geometry_msgs/msg/PoseStamped` | ~10 Hz | Standard 6-DOF SLAM position and orientation tracking. |
-| `/reconstructor/odom` | `nav_msgs/msg/Odometry` | opt-in | Odometry-style pose for robotics consumers. |
-| `/reconstructor/imu` | `sensor_msgs/msg/Imu` | opt-in | High-fidelity IMU data containing orientation quaternions, angular velocities, and linear accelerations (including gravity). |
-| `/reconstructor/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
-| `/reconstructor/gps/metadata` | `reconstructor_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
-| `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~2 Hz | Depth Anything + LiDAR fused point-cloud payloads downsampled to a sparse 10cm grid. |
-| `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | JPEG-compressed native ARKit camera image stream for visual loop closure and recorder context. |
-| `/reconstructor/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | 2 Hz | Same-timestamp camera intrinsics for the compressed image stream. |
-| `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |
-| `/reconstructor/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with truncation and payload-size metadata. |
-| `/reconstructor/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
-| `/reconstructor/indoor_localization` | `reconstructor_msgs/msg/IndoorLocalization` | ~1 Hz | Indoor-aware Core Location sample with floor, heading, and registration quality metadata. |
-| `/reconstructor/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Compressed satellite imagery tile payload. |
-| `/reconstructor/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery provider, bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the tile. |
-| `/reconstructor/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM raster payload with bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the raster tile. |
-| `/reconstructor/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, recorder configuration, and local bag status. |
-| `/reconstructor/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
+| `/mapping/pose` | `geometry_msgs/msg/PoseStamped` | ~10 Hz | Standard 6-DOF SLAM position and orientation tracking. |
+| `/mapping/odom` | `nav_msgs/msg/Odometry` | opt-in | Odometry-style pose for robotics consumers. |
+| `/mapping/imu` | `sensor_msgs/msg/Imu` | opt-in | High-fidelity IMU data containing orientation quaternions, angular velocities, and linear accelerations (including gravity). |
+| `/mapping/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
+| `/mapping/gps/metadata` | `reconstructor_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
+| `/mapping/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~2 Hz | Depth Anything + LiDAR fused point-cloud payloads downsampled to a sparse 10cm grid. |
+| `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | JPEG-compressed native ARKit camera image stream for visual loop closure and recorder context. |
+| `/mapping/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | 2 Hz | Same-timestamp camera intrinsics for the compressed image stream. |
+| `/mapping/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |
+| `/mapping/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with truncation and payload-size metadata. |
+| `/mapping/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
+| `/mapping/indoor_localization` | `reconstructor_msgs/msg/IndoorLocalization` | ~1 Hz | Indoor-aware Core Location sample with floor, heading, and registration quality metadata. |
+| `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Compressed satellite imagery tile payload. |
+| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery provider, bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the tile. |
+| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM raster payload with bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the raster tile. |
+| `/mapping/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, recorder configuration, and local bag status. |
+| `/mapping/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
 
-The default advertised topic set is `/reconstructor/pose`, `/reconstructor/camera/image/compressed`, `/reconstructor/camera/camera_info`, `/reconstructor/pointcloud`, `/reconstructor/gps/fix`, `/reconstructor/gps/metadata`, `/reconstructor/satellite/image/compressed`, `/reconstructor/satellite/tile_info`, and `/reconstructor/dem/tile`. Optional odometry, TF, mesh, IMU, radio, session, and diagnostics streams can still be re-enabled in custom profiles.
+The default advertised topic set is `/mapping/pose`, `/mapping/camera/image/compressed`, `/mapping/camera/camera_info`, `/mapping/pointcloud`, `/mapping/gps/fix`, `/mapping/gps/metadata`, `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info`, and `/mapping/dem/tile`. Optional odometry, TF, mesh, IMU, radio, session, and diagnostics streams can still be re-enabled in custom profiles.
 
-For loop-closure consumers such as ArrayDataEngine, MapEverything publishes intrinsic values on `/reconstructor/camera/camera_info`: image `width`/`height`, focal lengths `fx`/`fy`, principal point `cx`/`cy`, full `K` and `P` matrices, identity rectification `R`, `plumb_bob` distortion model, and zero distortion coefficients because ARKit frames are treated as rectified pinhole images. Camera JPEG encoding is capped at 2 Hz and skips overlapping encodes to protect AR tracking and Depth Anything inference.
+For loop-closure consumers such as ArrayDataEngine, MapEverything publishes intrinsic values on `/mapping/camera/camera_info`: image `width`/`height`, focal lengths `fx`/`fy`, principal point `cx`/`cy`, full `K` and `P` matrices, identity rectification `R`, `plumb_bob` distortion model, and zero distortion coefficients because ARKit frames are treated as rectified pinhole images. Camera JPEG encoding is capped at 2 Hz and skips overlapping encodes to protect AR tracking and Depth Anything inference.
 
 ### Validation and Throughput Checks
 
@@ -294,13 +294,13 @@ Configure your RViz2 workspace using the settings below:
 1. **Global Options:**
    - Set **Fixed Frame** to `map`.
 2. **Add the Pose Displays:**
-   - Add `/reconstructor/pose` to observe the live device trajectory in the `map` frame.
+   - Add `/mapping/pose` to observe the live device trajectory in the `map` frame.
 3. **Add the Depth Anything Point Cloud:**
-   - Click **Add**, select **By Topic**, and choose `/reconstructor/pointcloud` -> **PointCloud2**.
+   - Click **Add**, select **By Topic**, and choose `/mapping/pointcloud` -> **PointCloud2**.
    - Change the **Style** to `Points` and set the **Size** to `0.02m`.
    - Set **Color Transformer** to `RGB8` to render the fused point cloud in realistic, full color.
 4. **Add Geospatial Context:**
-   - Record `/reconstructor/gps/fix`, `/reconstructor/gps/metadata`, `/reconstructor/satellite/image/compressed`, `/reconstructor/satellite/tile_info`, and `/reconstructor/dem/tile`.
+   - Record `/mapping/gps/fix`, `/mapping/gps/metadata`, `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info`, and `/mapping/dem/tile`.
    - `GeoTileInfo` and `GeoRasterTile` expose `device_pixel_x`, `device_pixel_y`, `tile_width`, `tile_height`, `pixel_origin`, and `pixel_units` so the recorder can place the phone inside each downloaded tile.
 
 ---
@@ -315,7 +315,7 @@ The adaptive mapping router belongs above the capture engines. It observes RoomP
 * **Indoor parametric path:** RoomPlan can publish semantic walls, openings, and object bounding boxes through optional mesh topics while the default recorder profile keeps pose, camera, GPS, Depth Anything point clouds, satellite imagery, and DEM context active.
 * **Outdoor/open-area path:** ARKit LiDAR, Depth Anything fusion, GPS/ENU registration, satellite imagery, and DEM tiles publish dense point-cloud geometry and geospatial context without depending on RoomPlan's indoor assumptions.
 
-The selected mode, confidence, reason codes, and any operator override are reflected in `/reconstructor/session` and `/reconstructor/status` so the remote recorder can explain what it captured.
+The selected mode, confidence, reason codes, and any operator override are reflected in `/mapping/session` and `/mapping/status` so the remote recorder can explain what it captured.
 
 ### Outlier Filtration Pipeline
 The point cloud goes through three distinct stages of cleanup before saving:
