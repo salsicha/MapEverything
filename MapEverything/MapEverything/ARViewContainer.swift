@@ -374,8 +374,10 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             let longPressGesture = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
             av.addGestureRecognizer(longPressGesture)
             
-            av.session.run(configuration)
             arView = av
+            if isScanning {
+                av.session.run(configuration)
+            }
         }
     }
 
@@ -1548,6 +1550,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     func sessionInterruptionEnded(_ session: ARSession) {
         print("AR Session Interruption Ended")
         // Resume the session without resetting tracking so the user doesn't lose their scan
+        guard isScanning else { return }
         if let configuration = session.configuration {
             session.run(configuration)
         }
