@@ -100,6 +100,12 @@ struct ContentView: View {
     @State private var showClearConfirmation = false
     @State private var showLocalBagBrowser = false
     @State private var hasCameraPermission = false
+    private let checksCameraPermission: Bool
+
+    init(checksCameraPermission: Bool = true, previewHasCameraPermission: Bool? = nil) {
+        self.checksCameraPermission = checksCameraPermission
+        _hasCameraPermission = State(initialValue: previewHasCameraPermission ?? false)
+    }
     
     var body: some View {
         Group {
@@ -109,7 +115,10 @@ struct ContentView: View {
                 permissionDeniedView
             }
         }
-        .onAppear(perform: checkCameraPermission)
+        .onAppear {
+            guard checksCameraPermission else { return }
+            checkCameraPermission()
+        }
     }
     
     private var mainScannerView: some View {
@@ -1769,7 +1778,22 @@ struct TopDownSceneView: UIViewRepresentable {
     func updateUIView(_ uiView: SCNView, context: Context) {}
 }
 
-#Preview {
-    ContentView()
-        .modelContainer(for: EnvironmentModel.self, inMemory: true)
+#if DEBUG
+private enum MapEverythingPreviewSupport {
+    static let modelContainer: ModelContainer = {
+        let schema = MapEverythingModelSchema.schema
+        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+
+        do {
+            return try ModelContainer(for: schema, configurations: [configuration])
+        } catch {
+            fatalError("Could not create preview ModelContainer: \(error)")
+        }
+    }()
 }
+
+#Preview("MapEverything Canvas") {
+    ContentView(checksCameraPermission: false, previewHasCameraPermission: false)
+        .modelContainer(MapEverythingPreviewSupport.modelContainer)
+}
+#endif
