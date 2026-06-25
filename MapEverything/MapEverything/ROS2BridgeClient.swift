@@ -1205,10 +1205,7 @@ class ROS2BridgeClient: ObservableObject {
     func publishDEMTile(_ tile: GeoTilePayload, timestamp: TimeInterval) {
         guard isConnected, topicRegistry.isStreamEnabled(.dem) else { return }
 
-        var msg = createGeoTileInfoMessage(tile, timestamp: timestamp)
-        msg["encoding"] = tile.provider.encoding
-        msg["data"] = tile.data.base64EncodedString()
-
+        let msg = createGeoRasterTileMessage(tile, timestamp: timestamp)
         send(op: "publish", topic: topicRegistry.topic(.demTile), msg: msg)
     }
 
@@ -1399,8 +1396,22 @@ class ROS2BridgeClient: ObservableObject {
         return msg
     }
 
+    func makeGeoRasterTileMessage(tile: GeoTilePayload, header: [String: Any]) -> [String: Any] {
+        var msg = makeGeoTileInfoMessage(tile: tile, header: header)
+        msg["encoding"] = tile.provider.encoding
+        msg["data"] = tile.data.base64EncodedString()
+        return msg
+    }
+
     private func createGeoTileInfoMessage(_ tile: GeoTilePayload, timestamp: TimeInterval) -> [String: Any] {
         makeGeoTileInfoMessage(
+            tile: tile,
+            header: createHeader(frameId: "earth", timestamp: timestamp)
+        )
+    }
+
+    private func createGeoRasterTileMessage(_ tile: GeoTilePayload, timestamp: TimeInterval) -> [String: Any] {
+        makeGeoRasterTileMessage(
             tile: tile,
             header: createHeader(frameId: "earth", timestamp: timestamp)
         )

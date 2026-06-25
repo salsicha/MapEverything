@@ -1092,6 +1092,48 @@ struct MapEverythingTests {
         _ = try JSONSerialization.data(withJSONObject: tileInfoMessage, options: [])
     }
 
+    @Test("Satellite and DEM map messages include GPS pixel coordinates")
+    func testGeoTileMessagesIncludeGPSPixelCoordinatesForBothLayers() throws {
+        let location = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
+            altitude: 1609,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 8,
+            timestamp: Date(timeIntervalSince1970: 1_700_000_030)
+        )
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_040)
+        let bridge = ROS2BridgeClient()
+        let header: [String: Any] = ["stamp": ["sec": 10, "nanosec": 20], "frame_id": "earth"]
+        let satellitePayload = try makeTestGeoTilePayload(
+            provider: .defaultSatellite,
+            location: location,
+            date: timestamp,
+            data: Data([0xFF, 0xD8, 0xFF])
+        )
+        let demPayload = try makeTestGeoTilePayload(
+            provider: .usgs3DEPDEM,
+            location: location,
+            date: timestamp,
+            data: Data([1, 2, 3, 4])
+        )
+
+        let satelliteMessage = bridge.makeGeoTileInfoMessage(tile: satellitePayload, header: header)
+        let demMessage = bridge.makeGeoRasterTileMessage(tile: demPayload, header: header)
+
+        try assertGeoTileMessage(
+            satelliteMessage,
+            matches: satellitePayload,
+            expectedKind: GeoTileLayerKind.satelliteImagery,
+            includesRasterPayload: false
+        )
+        try assertGeoTileMessage(
+            demMessage,
+            matches: demPayload,
+            expectedKind: GeoTileLayerKind.dem,
+            includesRasterPayload: true
+        )
+    }
+
     @Test("Geo tile topics advertise one-minute publish cadence")
     func testGeoTileTopicsAdvertiseOneMinuteCadence() {
         let registry = ROS2TopicRegistry()
@@ -1638,6 +1680,88 @@ struct MapEverythingTests {
             lock.unlock()
             completion?(error)
         }
+    }
+
+    private func makeTestGeoTilePayload(
+        provider: GeoTileProvider,
+        location: CLLocation,
+        date: Date,
+        data: Data
+    ) throws -> GeoTilePayload {
+        let coordinate = GeoTileCoordinate.webMercator(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            zoom: provider.zoom
+        )
+        let time = provider.tileTime(for: date)
+        let sourceURL = try #require(provider.makeURL(coordinate, time))
+        let pixel = GeoTilePixelCoordinate.webMercator(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            coordinate: coordinate,
+            tileSizePixels: provider.tileSizePixels
+        )
+        let deviceLocation = GeoTileDeviceLocation(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            altitude: location.altitude,
+            horizontalAccuracy: location.horizontalAccuracy,
+            verticalAccuracy: location.verticalAccuracy,
+            timestamp: location.timestamp,
+            pixel: pixel
+        )
+
+        return GeoTilePayload(
+            provider: provider,
+            coordinate: coordinate,
+            bounds: GeoTileBounds.webMercatorBounds(for: coordinate),
+            deviceLocation: deviceLocation,
+            time: time,
+            data: data,
+            sourceURL: sourceURL,
+            fetchedAt: date,
+            isCached: false
+        )
+    }
+
+    private func assertGeoTileMessage(
+        _ message: [String: Any],
+        matches payload: GeoTilePayload,
+        expectedKind: GeoTileLayerKind,
+        includesRasterPayload: Bool
+    ) throws {
+        let pixel = payload.deviceLocation.pixel
+        let deviceLocationJSON = try #require(message["device_location"] as? String)
+        let deviceLocationData = try #require(deviceLocationJSON.data(using: .utf8))
+        let decodedDeviceLocation = try JSONSerialization.jsonObject(with: deviceLocationData) as? [String: Any]
+        let deviceLocation = try #require(decodedDeviceLocation)
+        let decodedPixel = try #require(deviceLocation["pixel"] as? [String: Any])
+
+        #expect(message["kind"] as? String == expectedKind.rawValue)
+        #expect(message["zoom"] as? Int == payload.coordinate.z)
+        #expect(message["tile_x"] as? Int == payload.coordinate.x)
+        #expect(message["tile_y"] as? Int == payload.coordinate.y)
+        #expect(message["device_pixel_x"] as? Double == pixel.x)
+        #expect(message["device_pixel_y"] as? Double == pixel.y)
+        #expect(message["tile_width"] as? Int == pixel.width)
+        #expect(message["tile_height"] as? Int == pixel.height)
+        #expect(message["pixel_origin"] as? String == "upper_left")
+        #expect(message["pixel_units"] as? String == "pixels")
+        #expect(decodedPixel["x"] as? Double == pixel.x)
+        #expect(decodedPixel["y"] as? Double == pixel.y)
+        #expect(decodedPixel["width"] as? Int == pixel.width)
+        #expect(decodedPixel["height"] as? Int == pixel.height)
+
+        if includesRasterPayload {
+            #expect(message["encoding"] as? String == payload.provider.encoding)
+            #expect(message["data"] as? String == payload.data.base64EncodedString())
+        } else {
+            #expect(message["encoding"] == nil)
+            #expect(message["data"] == nil)
+        }
+
+        #expect(JSONSerialization.isValidJSONObject(message))
+        _ = try JSONSerialization.data(withJSONObject: message, options: [])
     }
 
     private func sqliteInteger(url: URL, sql: String) throws -> Int {
