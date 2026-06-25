@@ -107,7 +107,7 @@ final class ROS2TopicRegistry {
 
     private static let defaultEnabledStreams: Set<MappingSensorStream> = [
         .pose,
-        .surfels,
+        .pointCloud,
         .gps,
         .satelliteImagery,
         .dem
@@ -184,7 +184,7 @@ final class ROS2TopicRegistry {
             topic: "/reconstructor/surfels",
             messageType: "sensor_msgs/msg/PointCloud2",
             defaultRateHz: 1,
-            isImplemented: true
+            isImplemented: false
         ),
         ROS2TopicDefinition(
             id: .gpsFix,

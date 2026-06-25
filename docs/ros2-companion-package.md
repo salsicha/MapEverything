@@ -47,7 +47,7 @@ ros2 bag record \
   /reconstructor/pose \
   /reconstructor/gps/fix \
   /reconstructor/gps/metadata \
-  /reconstructor/surfels \
+  /reconstructor/pointcloud \
   /reconstructor/satellite/image/compressed \
   /reconstructor/satellite/tile_info \
   /reconstructor/dem/tile
@@ -79,17 +79,16 @@ rviz2 -d <repo>/ros2/rviz/mapeverything.rviz
 ```
 
 It opens native RViz displays for pose, GPS fix,
-the `/reconstructor/surfels` colored surface map, and satellite image.
+the `/reconstructor/pointcloud` Depth Anything fused point cloud, and satellite image.
 The structured custom topics `/reconstructor/satellite/tile_info`,
 `/reconstructor/dem/tile`, and `/reconstructor/gps/metadata` are intended
 for rosbag2 recording and topic inspection. RViz does not render those custom
 message payloads directly unless a local converter node or RViz plugin maps
 them to standard `MarkerArray`, `Image`, `PointCloud2`, or `Map` topics.
 
-`/reconstructor/surfels` intentionally stays on standard `sensor_msgs/PointCloud2`.
-The extra fields are `normal_x`, `normal_y`, `normal_z`, `radius`,
-`confidence`, and `observation_count` alongside `x`, `y`, `z`, and packed `rgb`,
-so rosbag2 can record it without custom message generation.
+`/reconstructor/pointcloud` intentionally stays on standard `sensor_msgs/PointCloud2`.
+It carries `x`, `y`, `z`, and packed `rgb` fields from the Depth Anything + LiDAR
+fused depth path so rosbag2 can record it without custom message generation.
 
 The config includes disabled placeholder displays for common converter outputs:
 

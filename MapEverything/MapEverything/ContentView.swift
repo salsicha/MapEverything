@@ -101,6 +101,9 @@ struct ContentView: View {
     @State private var showLocalBagBrowser = false
     @State private var hasCameraPermission = false
     @State private var stoppedInspectionScene: SCNScene?
+    @State private var isPreparingMapper = true
+    @State private var isDepthAnythingReady = false
+    @State private var shouldMountARView = false
     private let checksCameraPermission: Bool
 
     init(checksCameraPermission: Bool = true, previewHasCameraPermission: Bool? = nil) {
@@ -125,35 +128,43 @@ struct ContentView: View {
     private var mainScannerView: some View {
         NavigationStack {
             ZStack(alignment: .bottom) {
-                ARViewContainer(
-                    visualizationMode: $visualizationMode,
-                    isScanning: $isScanning,
-                    stoppedInspectionScene: $stoppedInspectionScene,
-                    appMode: $appMode,
-                    measurementText: $measurementText,
-                    pointCount: $pointCount,
-                    trackingFeedback: $trackingFeedback,
-                    errorMessage: $errorMessage,
-                    isProcessing: $isProcessing,
-                    maxPointLimit: maxPointLimit,
-                    voxelSize: Float(voxelSize),
-                    boundingBoxSize: Float(boundingBoxSize),
-                    useRoomPlan: usesParametricRoomOverlay,
-                    useImperialUnits: useImperialUnits,
-                    onSave: { newModel in
-                        modelContext.insert(newModel)
-                    },
-                    onFloorplanExported: { url in
-                        floorplanURL = url
-                    },
-                    triggerSaveName: $triggerSaveName,
-                    triggerClear: $triggerClear,
-                    triggerExportFloorplan: $triggerExportFloorplan,
-                    triggerUndoMeasurement: $triggerUndoMeasurement,
-                    environmentToLoad: $environmentToLoad
-                )
-                .edgesIgnoringSafeArea(.all)
+                if shouldMountARView {
+                    ARViewContainer(
+                        visualizationMode: $visualizationMode,
+                        isScanning: $isScanning,
+                        stoppedInspectionScene: $stoppedInspectionScene,
+                        isPreparingMapper: $isPreparingMapper,
+                        isDepthAnythingReady: $isDepthAnythingReady,
+                        appMode: $appMode,
+                        measurementText: $measurementText,
+                        pointCount: $pointCount,
+                        trackingFeedback: $trackingFeedback,
+                        errorMessage: $errorMessage,
+                        isProcessing: $isProcessing,
+                        maxPointLimit: maxPointLimit,
+                        voxelSize: Float(voxelSize),
+                        boundingBoxSize: Float(boundingBoxSize),
+                        useRoomPlan: usesParametricRoomOverlay,
+                        useImperialUnits: useImperialUnits,
+                        onSave: { newModel in
+                            modelContext.insert(newModel)
+                        },
+                        onFloorplanExported: { url in
+                            floorplanURL = url
+                        },
+                        triggerSaveName: $triggerSaveName,
+                        triggerClear: $triggerClear,
+                        triggerExportFloorplan: $triggerExportFloorplan,
+                        triggerUndoMeasurement: $triggerUndoMeasurement,
+                        environmentToLoad: $environmentToLoad
+                    )
+                    .edgesIgnoringSafeArea(.all)
+                } else {
+                    Color.black
+                        .ignoresSafeArea()
+                }
 
+                mapperStartupOverlay
                 stoppedMapInspectionOverlay
 
                 VStack {
@@ -184,6 +195,7 @@ struct ContentView: View {
                     recorderURL: ros2WebSocketURL,
                     remoteStreamingEnabled: ros2Enabled
                 )
+                mountARViewAfterStartupPaint()
             }
             .onChange(of: isScanning) { scanning in
                 UIApplication.shared.isIdleTimerDisabled = scanning
@@ -212,6 +224,39 @@ struct ContentView: View {
             localBagButton
             shareLocalBagsButton
         }
+    }
+
+    @ViewBuilder
+    private var mapperStartupOverlay: some View {
+        if !isScanning, stoppedInspectionScene == nil {
+            ZStack {
+                Color.black.opacity(0.82)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 12) {
+                    Image(systemName: isPreparingMapper ? "cube.transparent" : "viewfinder")
+                        .font(.system(size: 44, weight: .semibold))
+                    if isPreparingMapper {
+                        ProgressView()
+                            .tint(.white)
+                    }
+                    Text(isPreparingMapper ? "Preparing Mapper" : readinessLabel)
+                        .font(.headline.weight(.semibold))
+                    if isPreparingMapper {
+                        Text("Warming Depth Anything")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.72))
+                    }
+                }
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.45), radius: 14, x: 0, y: 6)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    private var readinessLabel: String {
+        isDepthAnythingReady ? "Ready" : "Ready Without Depth Model"
     }
 
     @ViewBuilder
@@ -244,6 +289,8 @@ struct ContentView: View {
             )
         }
         .accessibilityLabel(isScanning ? "Stop Mapping" : "Start Mapping")
+        .disabled(!isScanning && isPreparingMapper)
+        .opacity(!isScanning && isPreparingMapper ? 0.55 : 1)
     }
 
     private var localBagButton: some View {
@@ -371,6 +418,7 @@ struct ContentView: View {
             isScanning = false
             mappingSession.stop()
         } else {
+            guard shouldMountARView, !isPreparingMapper else { return }
             stoppedInspectionScene = nil
             isScanning = true
             mappingSession.start(
@@ -388,6 +436,14 @@ struct ContentView: View {
 
     private var usesParametricRoomOverlay: Bool {
         adaptiveMapping.usesRoomPlanCapture && visualizationMode == .roomPlan
+    }
+
+    private func mountARViewAfterStartupPaint() {
+        guard !shouldMountARView else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            shouldMountARView = true
+        }
     }
     
     private var saveDialogView: some View {

@@ -817,27 +817,8 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
-        guard topicRegistry.isStreamEnabled(.surfels), !surfels.isEmpty else { return }
-
-        let msg = Self.makeSurfelPointCloudMessage(
-            surfels: surfels,
-            header: createHeader(frameId: FrameID.map, timestamp: timestamp)
-        )
-        let encodedBytes = encodedPublishPayloadByteCount(
-            topic: topicRegistry.topic(.surfels),
-            msg: msg
-        ) ?? 0
-        recordStreamPayloadMetric(
-            stream: .surfels,
-            originalBytes: surfels.count * 40,
-            encodedBytes: encodedBytes,
-            compression: "surfel_pointcloud2_binary_base64"
-        )
-        publishOrBufferLocalSample(
-            kind: .pointCloud,
-            topic: topicRegistry.topic(.surfels),
-            msg: msg
-        )
+        // Surfels remain an internal reconstruction/export format. ROS output
+        // uses /reconstructor/pointcloud from Depth Anything fused depth.
     }
     
     func publishMap(meshAnchors: [ARMeshAnchor], timestamp: TimeInterval) {

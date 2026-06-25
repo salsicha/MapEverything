@@ -29,7 +29,7 @@ final class DepthAnythingProcessor {
     /// which lets the rest of the app continue working without depth enhancement.
     init?(modelResourceName: String = "DepthAnythingV2SmallF16") {
         let config = MLModelConfiguration()
-        config.computeUnits = .all
+        config.computeUnits = .cpuAndNeuralEngine
 
         var modelURL: URL?
         if let url = Bundle.main.url(forResource: modelResourceName, withExtension: "mlmodelc") {
@@ -96,6 +96,31 @@ final class DepthAnythingProcessor {
 
         print("DepthAnythingProcessor: no usable result from model. Result type: \(String(describing: request.results))")
         return nil
+    }
+
+    func warmUp() {
+        var pixelBuffer: CVPixelBuffer?
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            inputSize,
+            inputSize,
+            kCVPixelFormatType_32BGRA,
+            attributes as CFDictionary,
+            &pixelBuffer
+        )
+
+        guard status == kCVReturnSuccess, let pixelBuffer else { return }
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        if let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) {
+            memset(baseAddress, 0, CVPixelBufferGetBytesPerRow(pixelBuffer) * inputSize)
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+
+        _ = inferRelativeDepth(from: pixelBuffer)
     }
 
     /// Fuses a Depth Anything relative depth map with LiDAR using a maximum-likelihood

@@ -15,6 +15,8 @@ struct ARViewContainer: UIViewControllerRepresentable {
     @Binding var visualizationMode: VisualizationMode
     @Binding var isScanning: Bool
     @Binding var stoppedInspectionScene: SCNScene?
+    @Binding var isPreparingMapper: Bool
+    @Binding var isDepthAnythingReady: Bool
     @Binding var appMode: AppMode
     @Binding var measurementText: String
     @Binding var pointCount: Int
@@ -160,6 +162,13 @@ struct ARViewContainer: UIViewControllerRepresentable {
                 self.parent.stoppedInspectionScene = scene
             }
         }
+
+        func didUpdateMapperPreparation(isPreparing: Bool, depthAnythingReady: Bool) {
+            DispatchQueue.main.async {
+                self.parent.isPreparingMapper = isPreparing
+                self.parent.isDepthAnythingReady = depthAnythingReady
+            }
+        }
     }
 }
 
@@ -170,6 +179,7 @@ protocol ARViewControllerDelegate: AnyObject {
     func didFailWithError(_ error: Error)
     func didReachScanLimit(limit: Int)
     func didUpdateStoppedInspectionScene(_ scene: SCNScene?)
+    func didUpdateMapperPreparation(isPreparing: Bool, depthAnythingReady: Bool)
 }
 
 class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDelegate, RoomCaptureSessionDelegate {
@@ -199,6 +209,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                     freezeCurrentMeshForInspection()
                     cancelMeshUpdateTasks()
                     arView?.session.pause()
+                    updateVisualizationMode(currentMode)
                 }
             }
         }
@@ -209,7 +220,8 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private let surfelMap = ColoredSurfelMap()
     private let pointCloudProcessor = PointCloudProcessor()
     private let adaptiveMappingController = AdaptiveMappingModeController.shared
-    private lazy var depthAnythingProcessor: DepthAnythingProcessor? = DepthAnythingProcessor()
+    private var depthAnythingProcessor: DepthAnythingProcessor?
+    private var depthAnythingPreloadTask: Task<Void, Never>?
     private var lastEnhancedFrameTime: TimeInterval = 0
     private let enhancedFrameInterval: TimeInterval = 0.5 // Run Depth Anything at ~2 fps
     private var isRunningEnhancedInference = false
@@ -221,9 +233,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private let cameraImagePublishInterval: TimeInterval = 1.0
     private var lastPointCloudPublishTime: TimeInterval = 0
     private let pointCloudPublishInterval: TimeInterval = 0.2 // Publish ROS point clouds at up to 5Hz
-    private var lastSurfelPublishTime: TimeInterval = 0
-    private let surfelPublishInterval: TimeInterval = 1.0
-    private let maxPublishedSurfels = 25_000
     private let maxDisplayedSurfels = 12_000
     private let surfelVisualizationInterval: TimeInterval = 0.5
     private var lastSurfelVisualizationTime: TimeInterval = 0
@@ -265,6 +274,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     override func viewDidLoad() {
         super.viewDidLoad()
         setupViews()
+        preloadDepthAnythingIfNeeded()
         
         NotificationCenter.default.addObserver(self, selector: #selector(thermalStateChanged), name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
     }
@@ -288,6 +298,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     }
     
     deinit {
+        depthAnythingPreloadTask?.cancel()
         arView?.session.pause()
         roomCaptureView?.captureSession.stop()
         NotificationCenter.default.removeObserver(self)
@@ -322,7 +333,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             ])
             roomCaptureView = rcv
         } else {
-            let av = ARView(frame: .zero)
+            let av = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
             self.view.addSubview(av)
             
             av.translatesAutoresizingMaskIntoConstraints = false
@@ -335,30 +346,9 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             
             av.session.delegate = self
 
-            guard ARWorldTrackingConfiguration.isSupported else {
-                DispatchQueue.main.async {
-                    self.delegate?.didFailWithError(NSError(domain: "MapEverything", code: 0, userInfo: [NSLocalizedDescriptionKey: "AR World Tracking is not supported on this device."]))
-                }
+            guard let configuration = makeWorldTrackingConfiguration() else {
                 arView = av
                 return
-            }
-
-            let configuration = ARWorldTrackingConfiguration()
-            configuration.worldAlignment = .gravityAndHeading
-            configuration.planeDetection = [.horizontal, .vertical]
-            configuration.environmentTexturing = .automatic
-            if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-                configuration.sceneReconstruction = .mesh
-            }
-
-            if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-                configuration.frameSemantics.insert(.smoothedSceneDepth)
-            } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-                configuration.frameSemantics.insert(.sceneDepth)
-            } else {
-                DispatchQueue.main.async {
-                    self.delegate?.didFailWithError(NSError(domain: "MapEverything", code: 1, userInfo: [NSLocalizedDescriptionKey: "LiDAR sensor not detected. Point cloud scanning requires a LiDAR-equipped device (iPhone/iPad Pro)."]))
-                }
             }
             
             let overlay = ARCoachingOverlayView()
@@ -383,13 +373,20 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
 
     private func resumeWorldTrackingSession() {
         guard let arView else { return }
+        guard let configuration = makeWorldTrackingConfiguration() else { return }
+        clearLiveMeshEntities()
+        arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        updateVisualizationMode(currentMode)
+    }
 
-        if let configuration = arView.session.configuration as? ARWorldTrackingConfiguration {
-            arView.session.run(configuration)
-            return
+    private func makeWorldTrackingConfiguration() -> ARWorldTrackingConfiguration? {
+        guard ARWorldTrackingConfiguration.isSupported else {
+            DispatchQueue.main.async {
+                self.delegate?.didFailWithError(NSError(domain: "MapEverything", code: 0, userInfo: [NSLocalizedDescriptionKey: "AR World Tracking is not supported on this device."]))
+            }
+            return nil
         }
 
-        guard ARWorldTrackingConfiguration.isSupported else { return }
         let configuration = ARWorldTrackingConfiguration()
         configuration.worldAlignment = .gravityAndHeading
         configuration.planeDetection = [.horizontal, .vertical]
@@ -401,8 +398,49 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             configuration.frameSemantics.insert(.smoothedSceneDepth)
         } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics.insert(.sceneDepth)
+        } else {
+            DispatchQueue.main.async {
+                self.delegate?.didFailWithError(NSError(domain: "MapEverything", code: 1, userInfo: [NSLocalizedDescriptionKey: "LiDAR sensor not detected. Point cloud scanning requires a LiDAR-equipped device (iPhone/iPad Pro)."]))
+            }
         }
-        arView.session.run(configuration)
+
+        return configuration
+    }
+
+    private func preloadDepthAnythingIfNeeded() {
+        guard depthAnythingProcessor == nil, depthAnythingPreloadTask == nil else {
+            delegate?.didUpdateMapperPreparation(
+                isPreparing: depthAnythingPreloadTask != nil,
+                depthAnythingReady: depthAnythingProcessor != nil
+            )
+            return
+        }
+
+        delegate?.didUpdateMapperPreparation(isPreparing: true, depthAnythingReady: false)
+        depthAnythingPreloadTask = Task.detached(priority: .utility) { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+
+            let processor = DepthAnythingProcessor()
+            processor?.warmUp()
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.depthAnythingProcessor = processor
+                self.depthAnythingPreloadTask = nil
+                self.delegate?.didUpdateMapperPreparation(
+                    isPreparing: false,
+                    depthAnythingReady: processor != nil
+                )
+            }
+        }
+    }
+
+    private func clearLiveMeshEntities() {
+        cancelMeshUpdateTasks()
+        anchorEntities.values.forEach { arView?.scene.removeAnchor($0) }
+        meshEntities.removeAll()
+        anchorEntities.removeAll()
     }
 
     private func freezeCurrentMeshForInspection() {
@@ -639,7 +677,8 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             meshUpdateTasks.values.forEach { $0.cancel() }
             meshUpdateTasks.removeAll()
             
-            if let configuration = arView?.session.configuration as? ARWorldTrackingConfiguration {
+            if isScanning,
+               let configuration = arView?.session.configuration as? ARWorldTrackingConfiguration {
                 configuration.initialWorldMap = nil // ensure it doesn't re-load the map on clear
                 arView?.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
             }
@@ -657,7 +696,8 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             let fileURL = docDir.appendingPathComponent(mapPath)
             if let data = try? Data(contentsOf: fileURL),
                let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-                if let configuration = arView?.session.configuration as? ARWorldTrackingConfiguration {
+                if isScanning,
+                   let configuration = arView?.session.configuration as? ARWorldTrackingConfiguration {
                     configuration.initialWorldMap = worldMap
                     arView?.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
                     
@@ -1042,6 +1082,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         arView?.debugOptions.remove([.showFeaturePoints, .showSceneUnderstanding])
         meshEntities.values.forEach { $0.isEnabled = false }
         liveSurfelAnchor?.isEnabled = false
+        guard isScanning else { return }
         
         switch mode {
         case .solidMesh:
@@ -1287,10 +1328,10 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             transform.columns.3.z
         )
         let topicRegistry = ROS2TopicRegistry.shared
+        let shouldUseFusedDepth = shouldUseFusedMappingDepth()
         let shouldPublishPointCloud = topicRegistry.isStreamEnabled(.pointCloud)
+            && shouldUseFusedDepth
             && timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
-        let shouldPublishSurfels = topicRegistry.isStreamEnabled(.surfels)
-            && timestamp - lastSurfelPublishTime >= surfelPublishInterval
         let shouldPublishCameraImage = topicRegistry.isStreamEnabled(.camera)
             && timestamp - lastCameraImagePublishTime >= cameraImagePublishInterval
         let shouldRefreshSurfelVisualization = currentMode == .surfels
@@ -1306,11 +1347,11 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             )
         }
 
-        let shouldUseFusedDepth = shouldUseFusedMappingDepth()
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
 
             let newPoints: [ColoredPoint]
+            let depthAnythingPointCloud: [ColoredPoint]
             if shouldUseFusedDepth {
                 if let fusedPoints = await self.processFusedMappingFrame(
                     timestamp: timestamp,
@@ -1321,6 +1362,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                     transform: transform
                 ) {
                     newPoints = fusedPoints
+                    depthAnythingPointCloud = fusedPoints
                 } else {
                     newPoints = autoreleasepool {
                         self.pointCloudProcessor.processPointCloud(
@@ -1331,6 +1373,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                             transform: transform
                         )
                     }
+                    depthAnythingPointCloud = []
                 }
             } else {
                 newPoints = autoreleasepool {
@@ -1342,6 +1385,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                         transform: transform
                     )
                 }
+                depthAnythingPointCloud = []
             }
 
             if !newPoints.isEmpty {
@@ -1350,32 +1394,20 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                     observerPosition: cameraPosition,
                     timestamp: timestamp
                 )
-                if shouldPublishPointCloud {
+                if shouldPublishPointCloud, !depthAnythingPointCloud.isEmpty {
                     // Downsample the network payload to a sparse 10cm grid to prevent saturating the Wi-Fi bandwidth
-                    let sparsePoints = self.pointCloudProcessor.voxelGridFilter(points: newPoints, voxelSize: 0.1)
+                    let sparsePoints = self.pointCloudProcessor.voxelGridFilter(points: depthAnythingPointCloud, voxelSize: 0.1)
                     ROS2BridgeClient.shared.publishPointCloud(sparsePoints, timestamp: timestamp)
                     await MainActor.run {
                         self.lastPointCloudPublishTime = timestamp
                     }
                 }
-                if shouldPublishSurfels || shouldRefreshSurfelVisualization {
-                    let snapshotLimit = max(
-                        shouldPublishSurfels ? self.maxPublishedSurfels : 0,
-                        shouldRefreshSurfelVisualization ? self.maxDisplayedSurfels : 0
-                    )
-                    let surfelSnapshot = await self.surfelMap.snapshot(maxCount: snapshotLimit)
-                    if shouldRefreshSurfelVisualization {
-                        let previewSurfels = Array(surfelSnapshot.prefix(self.maxDisplayedSurfels))
-                        await MainActor.run {
-                            self.lastSurfelVisualizationTime = timestamp
-                            self.updateLiveSurfelVisualization(with: previewSurfels)
-                        }
-                    }
-                    if shouldPublishSurfels {
-                        ROS2BridgeClient.shared.publishSurfels(surfelSnapshot, timestamp: timestamp)
-                        await MainActor.run {
-                            self.lastSurfelPublishTime = timestamp
-                        }
+                if shouldRefreshSurfelVisualization {
+                    let surfelSnapshot = await self.surfelMap.snapshot(maxCount: self.maxDisplayedSurfels)
+                    let previewSurfels = Array(surfelSnapshot.prefix(self.maxDisplayedSurfels))
+                    await MainActor.run {
+                        self.lastSurfelVisualizationTime = timestamp
+                        self.updateLiveSurfelVisualization(with: previewSurfels)
                     }
                 }
                 let count = await self.pointManager.addAndFilter(newPoints: newPoints)

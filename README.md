@@ -5,9 +5,9 @@
 ![ARKit](https://img.shields.io/badge/ARKit-LiDAR-black.svg?style=for-the-badge&logo=arkit)
 ![ROS2](https://img.shields.io/badge/ROS2-Humble%2FIron-green.svg?style=for-the-badge&logo=ros)
 
-**MapEverything** is a robotics-first mapping payload for iOS. It turns a LiDAR-equipped iPhone or iPad Pro into a lightweight ROS2 sensor node that publishes device pose, GPS, colored surfels, satellite imagery, and DEM/elevation tiles for recording on another ROS2 device.
+**MapEverything** is a robotics-first mapping payload for iOS. It turns a LiDAR-equipped iPhone or iPad Pro into a lightweight ROS2 sensor node that publishes device pose, GPS, Depth Anything fused point clouds, satellite imagery, and DEM/elevation tiles for recording on another ROS2 device.
 
-The default record profile avoids high-bandwidth raw camera and raw point-cloud topics so the iPhone can spend its budget on AR tracking, surfel fusion, GPS/geotile context, and reliable WebSocket publishing. Camera, raw point-cloud, mesh, IMU, radio, and diagnostic topics remain implemented for opt-in debug or field profiles.
+The default record profile avoids high-bandwidth raw camera topics and publishes a downsampled Depth Anything fused point cloud instead of surfel maps so the iPhone can spend its budget on AR tracking, dense depth inference, GPS/geotile context, and reliable WebSocket publishing. Camera, mesh, IMU, radio, and diagnostic topics remain implemented for opt-in debug or field profiles.
 
 MapEverything is intentionally a single record-mode publisher by default. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. An off-by-default local SQLite bag option can mirror published topics into chunked rosbag2-style files on device for field fallback or later conversion.
 
@@ -139,7 +139,7 @@ Ensure scanning is paused or running in Point Cloud mode. Use the segmented mode
 
 ## 🛰️ ROS 2 Bridge Integration Guide
 
-MapEverything acts as a robust WebSocket-based edge sensor node. It connects directly to standard `rosbridge_suite` networks and, by default, streams pose, GPS, colored surfels, satellite tile payloads, satellite tile georeferencing, and DEM raster tiles into your ROS2 workspace.
+MapEverything acts as a robust WebSocket-based edge sensor node. It connects directly to standard `rosbridge_suite` networks and, by default, streams pose, GPS, Depth Anything fused point clouds, satellite tile payloads, satellite tile georeferencing, and DEM raster tiles into your ROS2 workspace.
 
 The current ROS topic namespace remains `/reconstructor` for compatibility with existing recorder setups.
 
@@ -188,8 +188,7 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/imu` | `sensor_msgs/msg/Imu` | opt-in | High-fidelity IMU data containing orientation quaternions, angular velocities, and linear accelerations (including gravity). |
 | `/reconstructor/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
 | `/reconstructor/gps/metadata` | `reconstructor_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
-| `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | opt-in | Raw point-cloud payloads downsampled to a sparse 10cm grid. Disabled by default because it is expensive on device and over Wi-Fi. |
-| `/reconstructor/surfels` | `sensor_msgs/msg/PointCloud2` | ~1 Hz | Bounded colored surfel surface map with `x/y/z`, normals, radius, confidence, packed `rgb`, and observation count fields. |
+| `/reconstructor/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~2 Hz | Depth Anything + LiDAR fused point-cloud payloads downsampled to a sparse 10cm grid. |
 | `/reconstructor/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | opt-in | JPEG-compressed native ARKit camera image stream for visual loop closure and recorder context. Disabled by default. |
 | `/reconstructor/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | opt-in | Same-timestamp camera intrinsics for the compressed image stream. Disabled by default with the camera image stream. |
 | `/reconstructor/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |
@@ -202,9 +201,9 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/reconstructor/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, recorder configuration, and local bag status. |
 | `/reconstructor/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
 
-The default advertised topic set is `/reconstructor/pose`, `/reconstructor/gps/fix`, `/reconstructor/gps/metadata`, `/reconstructor/surfels`, `/reconstructor/satellite/image/compressed`, `/reconstructor/satellite/tile_info`, and `/reconstructor/dem/tile`. Optional odometry, TF, camera, raw point-cloud, mesh, IMU, radio, session, and diagnostics streams can still be re-enabled in custom profiles.
+The default advertised topic set is `/reconstructor/pose`, `/reconstructor/pointcloud`, `/reconstructor/gps/fix`, `/reconstructor/gps/metadata`, `/reconstructor/satellite/image/compressed`, `/reconstructor/satellite/tile_info`, and `/reconstructor/dem/tile`. Optional odometry, TF, camera, mesh, IMU, radio, session, and diagnostics streams can still be re-enabled in custom profiles.
 
-If the optional camera stream is enabled for loop-closure consumers such as ArrayDataEngine, MapEverything publishes intrinsic values on `/reconstructor/camera/camera_info`: image `width`/`height`, focal lengths `fx`/`fy`, principal point `cx`/`cy`, full `K` and `P` matrices, identity rectification `R`, `plumb_bob` distortion model, and zero distortion coefficients because ARKit frames are treated as rectified pinhole images. The lightweight default profile relies on pose, GPS, surfels, and geotile context instead of raw camera frames.
+If the optional camera stream is enabled for loop-closure consumers such as ArrayDataEngine, MapEverything publishes intrinsic values on `/reconstructor/camera/camera_info`: image `width`/`height`, focal lengths `fx`/`fy`, principal point `cx`/`cy`, full `K` and `P` matrices, identity rectification `R`, `plumb_bob` distortion model, and zero distortion coefficients because ARKit frames are treated as rectified pinhole images. The lightweight default profile relies on pose, GPS, Depth Anything point clouds, and geotile context instead of raw camera frames.
 
 ### Validation and Throughput Checks
 
@@ -283,10 +282,10 @@ Configure your RViz2 workspace using the settings below:
    - Set **Fixed Frame** to `map`.
 2. **Add the Pose Displays:**
    - Add `/reconstructor/pose` to observe the live device trajectory in the `map` frame.
-3. **Add the Surfel Cloud:**
-   - Click **Add**, select **By Topic**, and choose `/reconstructor/surfels` -> **PointCloud2**.
+3. **Add the Depth Anything Point Cloud:**
+   - Click **Add**, select **By Topic**, and choose `/reconstructor/pointcloud` -> **PointCloud2**.
    - Change the **Style** to `Points` and set the **Size** to `0.02m`.
-   - Set **Color Transformer** to `RGB8` to render the surfels in realistic, full color.
+   - Set **Color Transformer** to `RGB8` to render the fused point cloud in realistic, full color.
 4. **Add Geospatial Context:**
    - Record `/reconstructor/gps/fix`, `/reconstructor/gps/metadata`, `/reconstructor/satellite/image/compressed`, `/reconstructor/satellite/tile_info`, and `/reconstructor/dem/tile`.
    - `GeoTileInfo` and `GeoRasterTile` expose `device_pixel_x`, `device_pixel_y`, `tile_width`, `tile_height`, `pixel_origin`, and `pixel_units` so the recorder can place the phone inside each downloaded tile.
@@ -300,8 +299,8 @@ Configure your RViz2 workspace using the settings below:
 
 The adaptive mapping router belongs above the capture engines. It observes RoomPlan availability, AR tracking state, LiDAR depth confidence, Depth Anything health, GPS quality, Core Location indoor metadata, terrain tile coverage, thermal pressure, and operator override state. The router then selects one of two primary capture paths:
 
-* **Indoor parametric path:** RoomPlan can publish semantic walls, openings, and object bounding boxes through optional mesh topics while the default recorder profile keeps pose, GPS, surfels, satellite imagery, and DEM context active.
-* **Outdoor/open-area path:** ARKit LiDAR, Depth Anything fusion, GPS/ENU registration, satellite imagery, and DEM tiles publish dense geometry and geospatial context without depending on RoomPlan's indoor assumptions.
+* **Indoor parametric path:** RoomPlan can publish semantic walls, openings, and object bounding boxes through optional mesh topics while the default recorder profile keeps pose, GPS, Depth Anything point clouds, satellite imagery, and DEM context active.
+* **Outdoor/open-area path:** ARKit LiDAR, Depth Anything fusion, GPS/ENU registration, satellite imagery, and DEM tiles publish dense point-cloud geometry and geospatial context without depending on RoomPlan's indoor assumptions.
 
 The selected mode, confidence, reason codes, and any operator override are reflected in `/reconstructor/session` and `/reconstructor/status` so the remote recorder can explain what it captured.
 
