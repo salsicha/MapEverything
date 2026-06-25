@@ -104,6 +104,7 @@ struct ContentView: View {
     @State private var isPreparingMapper = true
     @State private var isDepthAnythingReady = false
     @State private var shouldMountARView = false
+    @State private var rosBridgeHostInput = ""
     private let checksCameraPermission: Bool
 
     init(checksCameraPermission: Bool = true, previewHasCameraPermission: Bool? = nil) {
@@ -166,6 +167,7 @@ struct ContentView: View {
 
                 mapperStartupOverlay
                 stoppedMapInspectionOverlay
+                rosPublishingPanel
 
                 VStack {
                     HStack(alignment: .top, spacing: 12) {
@@ -195,12 +197,17 @@ struct ContentView: View {
                     recorderURL: ros2WebSocketURL,
                     remoteStreamingEnabled: ros2Enabled
                 )
+                syncROSBridgeHostInput()
                 mountARViewAfterStartupPaint()
+            }
+            .onChange(of: ros2WebSocketURL) { _ in
+                syncROSBridgeHostInput()
             }
             .onChange(of: isScanning) { scanning in
                 UIApplication.shared.isIdleTimerDisabled = scanning
             }
             .onChange(of: ros2Enabled) { enabled in
+                commitROSBridgeHostInput(reconnectIfActive: false)
                 mappingSession.configure(
                     recorderURL: ros2WebSocketURL,
                     remoteStreamingEnabled: enabled
@@ -336,6 +343,103 @@ struct ContentView: View {
             .shadow(color: Color.black.opacity(0.35), radius: 10, x: 0, y: 5)
     }
 
+    private var rosPublishingPanel: some View {
+        let topics = publishedTopicDefinitions
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Toggle(isOn: $ros2Enabled) {
+                    Text("ROS")
+                        .font(.caption.weight(.semibold))
+                }
+                .toggleStyle(.switch)
+                .fixedSize()
+
+                HStack(spacing: 6) {
+                    Image(systemName: "network")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    TextField("ROS bridge IP", text: $rosBridgeHostInput)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.numbersAndPunctuation)
+                        .submitLabel(.done)
+                        .font(.caption.monospacedDigit())
+                        .onSubmit {
+                            commitROSBridgeHostInput(reconnectIfActive: true)
+                        }
+                    Button {
+                        commitROSBridgeHostInput(reconnectIfActive: true)
+                    } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Apply ROS bridge address")
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .frame(minWidth: 170, maxWidth: 260)
+                .background(Color.black.opacity(0.18))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                )
+
+                Spacer(minLength: 6)
+
+                Label(ros2Client.isConnected ? "Connected" : mappingSession.state.label, systemImage: ros2Client.isConnected ? "dot.radiowaves.left.and.right" : "link")
+                    .font(.caption2.weight(.medium))
+                    .foregroundColor(ros2Client.isConnected ? .green : .secondary)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 8) {
+                Text(isScanning ? "Publishing" : "Topics")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(topics) { definition in
+                            topicChip(definition)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 720, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 5)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
+    }
+
+    private var publishedTopicDefinitions: [ROS2TopicDefinition] {
+        ROS2TopicRegistry.shared.advertisedTopics()
+    }
+
+    private func topicChip(_ definition: ROS2TopicDefinition) -> some View {
+        Text(definition.topic)
+            .font(.caption2.monospaced())
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(0.18))
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
+            )
+    }
+
     private var recorderDiagnosticsPanel: some View {
         let queueStats = ros2Client.publishQueueStats
         let localBufferStats = ros2Client.localSampleBufferStats
@@ -419,6 +523,7 @@ struct ContentView: View {
             mappingSession.stop()
         } else {
             guard shouldMountARView, !isPreparingMapper else { return }
+            commitROSBridgeHostInput(reconnectIfActive: false)
             stoppedInspectionScene = nil
             isScanning = true
             mappingSession.start(
@@ -436,6 +541,84 @@ struct ContentView: View {
 
     private var usesParametricRoomOverlay: Bool {
         adaptiveMapping.usesRoomPlanCapture && visualizationMode == .roomPlan
+    }
+
+    private func syncROSBridgeHostInput() {
+        let host = rosBridgeHost(from: ros2WebSocketURL)
+        guard !host.isEmpty, rosBridgeHostInput != host else { return }
+        rosBridgeHostInput = host
+    }
+
+    private func commitROSBridgeHostInput(reconnectIfActive: Bool) {
+        let updatedURL = rosBridgeURL(fromHostInput: rosBridgeHostInput)
+        guard !updatedURL.isEmpty else { return }
+
+        ros2WebSocketURL = updatedURL
+        syncROSBridgeHostInput()
+        mappingSession.configure(
+            recorderURL: updatedURL,
+            remoteStreamingEnabled: ros2Enabled
+        )
+
+        if reconnectIfActive, isScanning, ros2Enabled {
+            mappingSession.restart(
+                recorderURL: updatedURL,
+                remoteStreamingEnabled: true
+            )
+        }
+    }
+
+    private func rosBridgeURL(fromHostInput input: String) -> String {
+        let current = rosBridgeEndpoint(from: ros2WebSocketURL)
+        guard let typed = rosBridgeEndpoint(from: input) else {
+            return ros2WebSocketURL
+        }
+
+        let scheme = typed.scheme ?? current?.scheme ?? "ws"
+        let host = typed.host ?? current?.host ?? "192.168.1.100"
+        let port = typed.port ?? current?.port ?? 9090
+        let path = typed.path ?? current?.path ?? ""
+
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.port = port
+        components.path = path == "/" ? "" : path
+        return components.string ?? "\(scheme)://\(host):\(port)"
+    }
+
+    private func rosBridgeHost(from urlString: String) -> String {
+        rosBridgeEndpoint(from: urlString)?.host ?? ""
+    }
+
+    private func rosBridgeEndpoint(from rawValue: String) -> (scheme: String?, host: String?, port: Int?, path: String?)? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.contains("://"),
+           let components = URLComponents(string: trimmed),
+           let host = components.host {
+            return (
+                scheme: components.scheme,
+                host: host,
+                port: components.port,
+                path: components.path.isEmpty ? nil : components.path
+            )
+        }
+
+        let parts = trimmed.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        let hostPort = String(parts[0])
+        let path = parts.count > 1 ? "/" + String(parts[1]) : nil
+        let colonCount = hostPort.filter { $0 == ":" }.count
+
+        if colonCount == 1 {
+            let endpointParts = hostPort.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            let host = String(endpointParts[0])
+            let port = endpointParts.count > 1 ? Int(endpointParts[1]) : nil
+            return (scheme: nil, host: host, port: port, path: path)
+        }
+
+        return (scheme: nil, host: hostPort, port: nil, path: path)
     }
 
     private func mountARViewAfterStartupPaint() {
