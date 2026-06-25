@@ -29,6 +29,12 @@ enum VisualizationMode: String, CaseIterable, Identifiable {
 }
 
 struct ContentView: View {
+    private static let topControlsHorizontalPadding: CGFloat = 14
+    private static let topControlsTopPadding: CGFloat = 54
+    private static let topControlsGap: CGFloat = 8
+    private static let actionRailButtonSize: CGFloat = 56
+    private static let recorderPanelPreferredWidth: CGFloat = 280
+
     @ObservedObject private var ros2Client = ROS2BridgeClient.shared
     @ObservedObject private var mappingSession = MappingSessionManager.shared
     @ObservedObject private var localBagRecorder = LocalROS2BagRecorder.shared
@@ -102,18 +108,7 @@ struct ContentView: View {
                 mapperStartupOverlay
                 stoppedMapInspectionOverlay
                 rosPublishingPanel
-
-                VStack {
-                    HStack(alignment: .top, spacing: 12) {
-                        recorderDiagnosticsPanel
-                            .allowsHitTesting(false)
-                        Spacer(minLength: 8)
-                        scannerActionRail
-                    }
-                    Spacer()
-                }
-                .padding(.top, 54)
-                .padding(.horizontal, 14)
+                topControlsOverlay
             }
             .navigationBarHidden(true)
             .alert("AR Session Error", isPresented: Binding<Bool>(
@@ -163,6 +158,36 @@ struct ContentView: View {
             startButton
             localBagButton
             shareLocalBagsButton
+        }
+    }
+
+    private var topControlsOverlay: some View {
+        GeometryReader { proxy in
+            let availableWidth = max(
+                0,
+                proxy.size.width - (Self.topControlsHorizontalPadding * 2)
+            )
+            let recorderWidth = min(
+                Self.recorderPanelPreferredWidth,
+                max(
+                    0,
+                    availableWidth - Self.actionRailButtonSize - Self.topControlsGap
+                )
+            )
+
+            VStack {
+                HStack(alignment: .top, spacing: 0) {
+                    recorderDiagnosticsPanel(width: recorderWidth)
+                        .allowsHitTesting(false)
+                    Spacer(minLength: Self.topControlsGap)
+                    scannerActionRail
+                        .frame(width: Self.actionRailButtonSize, alignment: .topTrailing)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.top, Self.topControlsTopPadding)
+            .padding(.horizontal, Self.topControlsHorizontalPadding)
         }
     }
 
@@ -229,6 +254,7 @@ struct ContentView: View {
             )
         }
         .accessibilityLabel(isScanning ? "Stop Mapping" : "Start Mapping")
+        .buttonStyle(.plain)
         .disabled(!isScanning && isPreparingMapper)
         .opacity(!isScanning && isPreparingMapper ? 0.55 : 1)
     }
@@ -242,6 +268,7 @@ struct ContentView: View {
             )
         }
         .accessibilityLabel(localROS2BagStorageEnabled ? "Disable Save Local" : "Enable Save Local")
+        .buttonStyle(.plain)
     }
 
     private var shareLocalBagsButton: some View {
@@ -255,6 +282,7 @@ struct ContentView: View {
             )
         }
         .accessibilityLabel("Share Local Bags")
+        .buttonStyle(.plain)
     }
 
     private func actionRailIcon(
@@ -373,7 +401,7 @@ struct ContentView: View {
             )
     }
 
-    private var recorderDiagnosticsPanel: some View {
+    private func recorderDiagnosticsPanel(width: CGFloat) -> some View {
         let queueStats = ros2Client.publishQueueStats
         let localBufferStats = ros2Client.localSampleBufferStats
         let localBagStats = localBagRecorder.stats
@@ -421,7 +449,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(maxWidth: 280, alignment: .leading)
+        .frame(width: width, alignment: .leading)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(

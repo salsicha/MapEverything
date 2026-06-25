@@ -81,26 +81,6 @@ enum MeshGenerator {
         return desc
     }
 
-    static func createWorldDescriptor(from meshAnchor: ARMeshAnchor) -> MeshDescriptor {
-        var descriptor = createDescriptor(from: meshAnchor.geometry)
-        let geometry = meshAnchor.geometry
-        let verticesPointer = geometry.vertices.buffer.contents()
-        let verticesByteOffset = geometry.vertices.offset
-        let verticesByteStride = geometry.vertices.stride
-        var positions: [SIMD3<Float>] = []
-        positions.reserveCapacity(geometry.vertices.count)
-
-        for index in 0..<geometry.vertices.count {
-            let pointer = verticesPointer.advanced(by: verticesByteOffset + (index * verticesByteStride))
-            let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-            let world = simd_mul(meshAnchor.transform, SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1))
-            positions.append(SIMD3<Float>(world.x, world.y, world.z))
-        }
-
-        descriptor.positions = MeshBuffers.Positions(positions)
-        return descriptor
-    }
-
     static func createDepthAnythingDescriptor(
         from relativeDepthMap: RelativeDepthMap,
         calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
@@ -279,7 +259,7 @@ enum MeshGenerator {
         indices.append(UInt32(b))
         indices.append(UInt32(c))
     }
-    
+
     /// Generates a RealityKit MeshResource from an ARKit ARMeshGeometry
     static func generateMeshResource(from geometry: ARMeshGeometry) throws -> MeshResource {
         let desc = createDescriptor(from: geometry)
