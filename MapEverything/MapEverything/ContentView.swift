@@ -242,18 +242,40 @@ struct ContentView: View {
     private var stoppedMapInspectionOverlay: some View {
         if !isScanning, let scene = stoppedInspectionScene {
             GeometryReader { proxy in
-                TopDownSceneView(scene: scene)
-                    .frame(
-                        width: min(proxy.size.width - 32, 560),
-                        height: min(proxy.size.height * 0.58, 520)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
-                    )
-                    .shadow(color: Color.black.opacity(0.35), radius: 18, x: 0, y: 8)
-                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                let inspectionWidth = min(proxy.size.width - 32, 560)
+                let inspectionHeight = min(proxy.size.height * 0.58, 520)
+
+                ZStack(alignment: .topLeading) {
+                    TopDownSceneView(scene: scene)
+                        .frame(width: inspectionWidth, height: inspectionHeight)
+
+                    Button {
+                        stoppedInspectionScene = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                            )
+                            .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 3)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss Mesh View")
+                    .padding(10)
+                }
+                .frame(width: inspectionWidth, height: inspectionHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.35), radius: 18, x: 0, y: 8)
+                .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
             }
             .transition(.opacity.combined(with: .scale(scale: 0.98)))
         }
