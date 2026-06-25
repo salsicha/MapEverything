@@ -109,10 +109,7 @@ final class MappingSessionManager: ObservableObject {
             "local_bag_storage_enabled": String(LocalROS2BagRecorderConfiguration.load().isEnabled),
             "local_bag_storage_path": LocalROS2BagRecorder.shared.stats.bagDirectoryURL?.path ?? "",
             "state": state.label,
-            "active_mapping_mode": AdaptiveMappingModeController.shared.activeMode.rawValue,
-            "adaptive_mapping_confidence": String(format: "%.3f", AdaptiveMappingModeController.shared.recommendation.confidence),
-            "adaptive_mapping_operator_override": AdaptiveMappingModeController.shared.operatorOverride.rawValue,
-            "adaptive_mapping_reasons": AdaptiveMappingModeController.shared.recommendation.reasons.map(\.rawValue).joined(separator: ","),
+            "mapping_engine": "depth_anything_surface",
             "enabled_streams": enabledStreams
                 .map(\.rawValue)
                 .sorted()

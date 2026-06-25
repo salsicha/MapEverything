@@ -9,12 +9,12 @@ import SwiftUI
 import SwiftData
 import AVFoundation
 import SceneKit
+import UIKit
 
 enum VisualizationMode: String, CaseIterable, Identifiable {
     case solidMesh = "Solid Mesh"
     case surfels = "Surfels"
     case wireframe = "Wireframe"
-    case roomPlan = "RoomPlan"
     case none = "None"
     var id: Self { self }
 
@@ -23,7 +23,6 @@ enum VisualizationMode: String, CaseIterable, Identifiable {
         case .solidMesh: return "cube.fill"
         case .surfels: return "circle.dotted"
         case .wireframe: return "square.grid.3x3"
-        case .roomPlan: return "square.3.layers.3d"
         case .none: return "eye.slash"
         }
     }
@@ -32,7 +31,6 @@ enum VisualizationMode: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @ObservedObject private var ros2Client = ROS2BridgeClient.shared
     @ObservedObject private var mappingSession = MappingSessionManager.shared
-    @ObservedObject private var adaptiveMapping = AdaptiveMappingModeController.shared
     @ObservedObject private var localBagRecorder = LocalROS2BagRecorder.shared
     
     // App Settings
@@ -93,8 +91,7 @@ struct ContentView: View {
                         errorMessage: $errorMessage,
                         maxPointLimit: maxPointLimit,
                         voxelSize: Float(voxelSize),
-                        boundingBoxSize: Float(boundingBoxSize),
-                        useRoomPlan: usesParametricRoomOverlay
+                        boundingBoxSize: Float(boundingBoxSize)
                     )
                     .edgesIgnoringSafeArea(.all)
                 } else {
@@ -475,10 +472,6 @@ struct ContentView: View {
         mappingSession.refreshLocalBagRecording()
     }
 
-    private var usesParametricRoomOverlay: Bool {
-        adaptiveMapping.usesRoomPlanCapture && visualizationMode == .roomPlan
-    }
-
     private func syncROSBridgeHostInput() {
         let host = rosBridgeHost(from: ros2WebSocketURL)
         guard !host.isEmpty, rosBridgeHostInput != host else { return }
@@ -614,6 +607,7 @@ struct LocalROS2BagBrowserView: View {
     @State private var sessions: [LocalROS2BagSession] = []
     @State private var pendingDeletion: LocalROS2BagSession?
     @State private var errorMessage: String?
+    @State private var previewScanTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -655,16 +649,22 @@ struct LocalROS2BagBrowserView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        reload()
+                        Task { await reload() }
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
                     .accessibilityLabel("Refresh")
                 }
             }
-            .onAppear(perform: reload)
+            .task {
+                await reload()
+            }
             .refreshable {
-                reload()
+                await reload()
+            }
+            .onDisappear {
+                previewScanTask?.cancel()
+                previewScanTask = nil
             }
             .alert("Delete Local Bag?", isPresented: Binding<Bool>(
                 get: { pendingDeletion != nil },
@@ -689,33 +689,78 @@ struct LocalROS2BagBrowserView: View {
     }
 
     private func localBagRow(_ session: LocalROS2BagSession) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(session.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                if isActive(session) {
-                    Image(systemName: "record.circle.fill")
-                        .foregroundColor(.red)
+        HStack(spacing: 12) {
+            LocalROS2BagSessionThumbnail(session: session)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(session.name)
+                        .font(.headline)
+                        .lineLimit(1)
+                    if isActive(session) {
+                        Image(systemName: "record.circle.fill")
+                            .foregroundColor(.red)
+                    }
+                }
+                HStack(spacing: 10) {
+                    Label("\(session.chunkCount)", systemImage: "cylinder.split.1x2")
+                    Label(session.byteCountLabel, systemImage: "doc")
+                    if let modifiedAt = session.modifiedAt {
+                        Text(modifiedAt, style: .date)
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+                if let preview = session.preview {
+                    Text("\(preview.messageCountLabel) • \(preview.durationLabel) • \(preview.topicSummary)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
             }
-            HStack(spacing: 10) {
-                Label("\(session.chunkCount)", systemImage: "cylinder.split.1x2")
-                Label(session.byteCountLabel, systemImage: "doc")
-                if let modifiedAt = session.modifiedAt {
-                    Text(modifiedAt, style: .date)
-                }
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
         }
     }
 
-    private func reload() {
+    @MainActor
+    private func reload() async {
+        previewScanTask?.cancel()
+        previewScanTask = nil
+
         do {
-            sessions = try recorder.listBagSessions()
+            let loadedSessions = try await recorder.listBagSessionsAsync(previewLoadingMode: .cachedOnly)
+            guard !Task.isCancelled else { return }
+            sessions = loadedSessions
+            scanMissingPreviews(for: loadedSessions)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func scanMissingPreviews(for loadedSessions: [LocalROS2BagSession]) {
+        let missingPreviews = loadedSessions.filter { $0.preview == nil }
+        guard !missingPreviews.isEmpty else { return }
+
+        previewScanTask = Task {
+            for session in missingPreviews {
+                guard !Task.isCancelled else { return }
+
+                do {
+                    let scannedSession = try await recorder.bagSessionWithPreviewScan(session)
+                    guard !Task.isCancelled else { return }
+
+                    await MainActor.run {
+                        if let index = sessions.firstIndex(where: { $0.id == scannedSession.id }) {
+                            sessions[index] = scannedSession
+                        }
+                    }
+                } catch {
+                    await MainActor.run {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            }
         }
     }
 
@@ -724,7 +769,7 @@ struct LocalROS2BagBrowserView: View {
         do {
             try recorder.deleteBagSession(pendingDeletion)
             self.pendingDeletion = nil
-            reload()
+            Task { await reload() }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -746,6 +791,23 @@ struct LocalROS2BagSessionDetailView: View {
 
     var body: some View {
         List {
+            if let preview = session.preview {
+                Section("Preview") {
+                    HStack(spacing: 14) {
+                        LocalROS2BagSessionThumbnail(session: session, size: 88)
+                        VStack(alignment: .leading, spacing: 6) {
+                            LabeledContent("Messages", value: preview.messageCount.formatted())
+                            LabeledContent("Duration", value: preview.durationLabel)
+                            LabeledContent("Topics", value: "\(preview.topicNames.count)")
+                        }
+                    }
+                    Text(preview.topicSummary)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
             Section("Bag") {
                 LabeledContent("Files", value: "\(session.files.count)")
                 LabeledContent("Chunks", value: "\(session.chunkCount)")
@@ -795,6 +857,44 @@ struct LocalROS2BagSessionDetailView: View {
     }
 }
 
+struct LocalROS2BagSessionThumbnail: View {
+    let session: LocalROS2BagSession
+    var size: CGFloat = 56
+
+    var body: some View {
+        Group {
+            if let image = thumbnailImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ZStack {
+                    LinearGradient(
+                        colors: [Color(.systemBlue), Color(.systemTeal), Color(.systemGray3)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    Image(systemName: "map")
+                        .font(.system(size: size * 0.36, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .accessibilityHidden(true)
+    }
+
+    private var thumbnailImage: UIImage? {
+        guard let url = session.preview?.thumbnailURL(relativeTo: session.directoryURL) else { return nil }
+        return UIImage(contentsOfFile: url.path)
+    }
+}
+
 struct TopDownSceneView: UIViewRepresentable {
     let scene: SCNScene
 
@@ -802,8 +902,10 @@ struct TopDownSceneView: UIViewRepresentable {
         let scnView = SCNView()
         scnView.scene = scene
         scnView.allowsCameraControl = true
-        scnView.autoenablesDefaultLighting = true
+        scnView.autoenablesDefaultLighting = false
         scnView.backgroundColor = .secondarySystemBackground
+
+        removeExistingInspectionViewerNodes(from: scene)
 
         let (minBound, maxBound) = scene.rootNode.boundingBox
         let center = SCNVector3(
@@ -815,19 +917,22 @@ struct TopDownSceneView: UIViewRepresentable {
         let sizeY = maxBound.y - minBound.y
         let sizeZ = maxBound.z - minBound.z
         let maxDim = max(sizeX, max(sizeY, sizeZ))
+        let sceneRadius = max(maxDim, 1.0)
 
         let cameraNode = SCNNode()
+        cameraNode.name = "inspection_camera"
         let camera = SCNCamera()
         camera.usesOrthographicProjection = true
-        camera.orthographicScale = Double(max(sizeX, sizeZ) * 0.7)
+        camera.orthographicScale = Double(max(max(sizeX, sizeZ) * 0.7, sceneRadius * 0.45))
         camera.zNear = 0.01
-        camera.zFar = Double(maxDim * 10)
+        camera.zFar = Double(sceneRadius * 10)
         cameraNode.camera = camera
-        cameraNode.position = SCNVector3(center.x, center.y + maxDim * 2, center.z)
+        cameraNode.position = SCNVector3(center.x, center.y + sceneRadius * 2, center.z)
         cameraNode.look(at: center)
 
         scene.rootNode.addChildNode(cameraNode)
         scnView.pointOfView = cameraNode
+        addInspectionLighting(to: scene, center: center, radius: sceneRadius)
 
         let floor = SCNFloor()
         floor.reflectivity = 0
@@ -835,6 +940,7 @@ struct TopDownSceneView: UIViewRepresentable {
         floorMaterial.diffuse.contents = UIColor.systemGray5
         floor.materials = [floorMaterial]
         let floorNode = SCNNode(geometry: floor)
+        floorNode.name = "inspection_floor"
         floorNode.position = SCNVector3(0, minBound.y - 0.001, 0)
         scene.rootNode.addChildNode(floorNode)
 
@@ -842,6 +948,62 @@ struct TopDownSceneView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {}
+
+    private func removeExistingInspectionViewerNodes(from scene: SCNScene) {
+        [
+            "inspection_camera",
+            "inspection_floor",
+            "inspection_ambient_light",
+            "inspection_key_light",
+            "inspection_fill_light"
+        ].forEach { name in
+            scene.rootNode.childNode(withName: name, recursively: false)?.removeFromParentNode()
+        }
+    }
+
+    private func addInspectionLighting(to scene: SCNScene, center: SCNVector3, radius: Float) {
+        let ambient = SCNLight()
+        ambient.type = .ambient
+        ambient.intensity = 260
+        ambient.color = UIColor(white: 0.86, alpha: 1.0)
+        let ambientNode = SCNNode()
+        ambientNode.name = "inspection_ambient_light"
+        ambientNode.light = ambient
+        scene.rootNode.addChildNode(ambientNode)
+
+        let key = SCNLight()
+        key.type = .directional
+        key.intensity = 820
+        key.castsShadow = true
+        key.shadowRadius = 8
+        key.shadowSampleCount = 8
+        key.color = UIColor(white: 1.0, alpha: 1.0)
+        let keyNode = SCNNode()
+        keyNode.name = "inspection_key_light"
+        keyNode.light = key
+        keyNode.position = SCNVector3(
+            center.x - radius * 0.6,
+            center.y + radius * 1.4,
+            center.z + radius * 0.8
+        )
+        keyNode.look(at: center)
+        scene.rootNode.addChildNode(keyNode)
+
+        let fill = SCNLight()
+        fill.type = .directional
+        fill.intensity = 260
+        fill.color = UIColor(white: 0.78, alpha: 1.0)
+        let fillNode = SCNNode()
+        fillNode.name = "inspection_fill_light"
+        fillNode.light = fill
+        fillNode.position = SCNVector3(
+            center.x + radius * 0.9,
+            center.y + radius * 0.9,
+            center.z - radius * 0.7
+        )
+        fillNode.look(at: center)
+        scene.rootNode.addChildNode(fillNode)
+    }
 }
 
 #if DEBUG

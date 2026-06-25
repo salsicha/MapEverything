@@ -49,7 +49,9 @@ ros2 bag record \
   /mapping/pose \
   /mapping/gps/fix \
   /mapping/gps/metadata \
-  /mapping/pointcloud \
+  /mapping/pointcloud/lidar \
+  /mapping/pointcloud/depth_anything \
+  /mapping/depth_anything/calibration \
   /mapping/satellite/image/compressed \
   /mapping/satellite/tile_info \
   /mapping/dem/tile
@@ -67,8 +69,10 @@ Useful inspection commands:
 ```bash
 ros2 topic echo /mapping/satellite/tile_info
 ros2 topic echo /mapping/dem/tile
+ros2 topic echo /mapping/depth_anything/calibration
 ros2 interface show reconstructor_msgs/msg/GeoTileInfo
 ros2 interface show reconstructor_msgs/msg/GeoRasterTile
+ros2 interface show reconstructor_msgs/msg/DepthAnythingCalibration
 ```
 
 ## RViz Sample
@@ -81,16 +85,20 @@ rviz2 -d <repo>/ros2/rviz/mapeverything.rviz
 ```
 
 It opens native RViz displays for pose, GPS fix,
-the `/mapping/pointcloud` Depth Anything fused point cloud, and satellite image.
+the `/mapping/pointcloud/lidar` LiDAR point cloud,
+the `/mapping/pointcloud/depth_anything` relative Depth Anything point cloud, and satellite image.
 The structured custom topics `/mapping/satellite/tile_info`,
-`/mapping/dem/tile`, and `/mapping/gps/metadata` are intended
+`/mapping/dem/tile`, `/mapping/depth_anything/calibration`, and `/mapping/gps/metadata` are intended
 for rosbag2 recording and topic inspection. RViz does not render those custom
 message payloads directly unless a local converter node or RViz plugin maps
 them to standard `MarkerArray`, `Image`, `PointCloud2`, or `Map` topics.
 
-`/mapping/pointcloud` intentionally stays on standard `sensor_msgs/PointCloud2`.
-It carries `x`, `y`, `z`, and packed `rgb` fields from the Depth Anything + LiDAR
-fused depth path so rosbag2 can record it without custom message generation.
+Both point-cloud topics intentionally stay on standard `sensor_msgs/PointCloud2`.
+They carry `x`, `y`, `z`, and packed `rgb` fields so rosbag2 can record them
+without custom message generation. `/mapping/pointcloud/depth_anything` is a
+relative-depth camera-frame cloud; pair it with
+`/mapping/depth_anything/calibration` to rebuild the metric depth used by the
+on-device overlay mesh.
 
 The config includes disabled placeholder displays for common converter outputs:
 
@@ -102,13 +110,18 @@ Enable those displays only after starting compatible converter nodes.
 
 ## Custom Message Notes
 
-`RadioObservation.msg` and `MeshSnapshot.msg` mirror the schemas advertised by
+`RadioObservation.msg`, `DepthAnythingCalibration.msg`, and `MeshSnapshot.msg` mirror the schemas advertised by
 the app in session metadata. Session, GPS, indoor localization, satellite tile,
 and DEM messages keep high-value scalar fields typed and store nested metadata
 objects as JSON strings. This keeps the recorder package compact while preserving
 provider policies, georeference details, radio catalog metadata, bridge
-transport details, local bag storage status, adaptive mapping mode decisions,
+transport details, local bag storage status, mapping-engine metadata,
 and diagnostics in rosbag2.
+`MeshSnapshot` schema version 2 stores triangle-list geometry as rosbridge
+base64 `uint8[]` blobs: `vertex_data` is packed little-endian `float32 x,y,z`
+with a 12-byte stride, and `index_data` is packed little-endian `uint32` with a
+4-byte stride. This avoids the large JSON-object overhead of per-vertex
+`geometry_msgs/Point` arrays while staying compatible with rosbridge JSON bags.
 `GeoTileInfo` and `GeoRasterTile` also expose `device_pixel_x`,
 `device_pixel_y`, `tile_width`, `tile_height`, `pixel_origin`, and `pixel_units`
 as typed scalar fields so recorder-side code can place the phone inside each

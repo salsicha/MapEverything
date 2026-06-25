@@ -36,11 +36,25 @@ PROFILES = [
         raw_payload_bytes=92_000,
     ),
     TopicProfile(
-        name="point-cloud",
-        topic="/mapping/pointcloud",
+        name="lidar-point-cloud",
+        topic="/mapping/pointcloud/lidar",
+        message_type="sensor_msgs/msg/PointCloud2",
+        rate_hz=5,
+        raw_payload_bytes=110_000,
+    ),
+    TopicProfile(
+        name="depth-anything-point-cloud",
+        topic="/mapping/pointcloud/depth_anything",
         message_type="sensor_msgs/msg/PointCloud2",
         rate_hz=5,
         raw_payload_bytes=220_000,
+    ),
+    TopicProfile(
+        name="depth-anything-calibration",
+        topic="/mapping/depth_anything/calibration",
+        message_type="reconstructor_msgs/msg/DepthAnythingCalibration",
+        rate_hz=5,
+        raw_payload_bytes=1_024,
     ),
     TopicProfile(
         name="mesh",
@@ -53,14 +67,14 @@ PROFILES = [
         name="satellite",
         topic="/mapping/satellite/image/compressed",
         message_type="sensor_msgs/msg/CompressedImage",
-        rate_hz=0.2,
+        rate_hz=1 / 60,
         raw_payload_bytes=160_000,
     ),
     TopicProfile(
         name="dem",
         topic="/mapping/dem/tile",
         message_type="reconstructor_msgs/msg/GeoRasterTile",
-        rate_hz=0.2,
+        rate_hz=1 / 60,
         raw_payload_bytes=262_144,
     ),
 ]
@@ -79,7 +93,8 @@ def encoded_blob(size_bytes: int) -> str:
 
 
 def message_for(profile: TopicProfile, sequence: int) -> dict[str, Any]:
-    header = {"stamp": ros_stamp(sequence), "frame_id": "map"}
+    frame_id = "iphone_camera" if profile.name.startswith("depth-anything") else "map"
+    header = {"stamp": ros_stamp(sequence), "frame_id": frame_id}
     blob = encoded_blob(profile.raw_payload_bytes)
 
     if profile.name in {"camera", "satellite"}:
@@ -89,7 +104,7 @@ def message_for(profile: TopicProfile, sequence: int) -> dict[str, Any]:
             "data": blob,
         }
 
-    if profile.name == "point-cloud":
+    if profile.message_type == "sensor_msgs/msg/PointCloud2":
         return {
             "header": header,
             "height": 1,
@@ -98,7 +113,7 @@ def message_for(profile: TopicProfile, sequence: int) -> dict[str, Any]:
                 {"name": "x", "offset": 0, "datatype": 7, "count": 1},
                 {"name": "y", "offset": 4, "datatype": 7, "count": 1},
                 {"name": "z", "offset": 8, "datatype": 7, "count": 1},
-                {"name": "rgb", "offset": 12, "datatype": 7, "count": 1},
+                {"name": "rgb", "offset": 12, "datatype": 6, "count": 1},
             ],
             "is_bigendian": False,
             "point_step": 16,
@@ -107,20 +122,52 @@ def message_for(profile: TopicProfile, sequence: int) -> dict[str, Any]:
             "is_dense": True,
         }
 
-    if profile.name == "mesh":
-        vertex_count = max(profile.raw_payload_bytes // 48, 3)
+    if profile.name == "depth-anything-calibration":
         return {
             "header": header,
+            "schema_version": 1,
+            "source": "depth_anything_v2_lidar_calibrated",
+            "relative_pointcloud_topic": "/mapping/pointcloud/depth_anything",
+            "overlay_mesh_source": "calibrated_depthanything_grid",
+            "frame_id": "iphone_camera",
+            "relative_depth_width": 518,
+            "relative_depth_height": 518,
+            "image_width": 1920,
+            "image_height": 1440,
+            "scale": 2.0,
+            "offset": 0.1,
+            "equation": "metric_depth_m = scale * relative_depth + offset",
+            "relative_depth_units": "depthanything_relative",
+            "metric_depth_units": "m",
+            "calibration_source": "arkit_lidar_maximum_likelihood",
+            "metadata_json": "{}",
+        }
+
+    if profile.name == "mesh":
+        vertex_count = max(profile.raw_payload_bytes // 16, 3)
+        vertex_data = encoded_blob(vertex_count * 12)
+        index_data = encoded_blob(vertex_count * 4)
+        return {
+            "header": header,
+            "schema_version": 2,
             "snapshot_id": f"benchmark-{sequence}",
             "source": "throughput_benchmark",
             "frame_id": "map",
             "anchor_count": 1,
-            "vertices": [{"x": 0.0, "y": 0.0, "z": 0.0}] * vertex_count,
-            "triangle_indices": list(range(vertex_count)),
+            "vertex_count": vertex_count,
+            "triangle_count": vertex_count // 3,
             "original_vertex_count": vertex_count,
             "original_triangle_count": vertex_count // 3,
             "is_truncated": False,
+            "original_payload_bytes": profile.raw_payload_bytes,
             "published_payload_bytes": profile.raw_payload_bytes,
+            "compression": "mesh_snapshot_binary_base64",
+            "vertex_encoding": "float32_xyz_le_base64",
+            "vertex_stride_bytes": 12,
+            "vertex_data": vertex_data,
+            "index_encoding": "uint32_le_base64",
+            "index_stride_bytes": 4,
+            "index_data": index_data,
             "metadata_json": "{}",
         }
 

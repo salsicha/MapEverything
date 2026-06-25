@@ -48,7 +48,283 @@ public struct ColoredSurfel: Equatable, Sendable {
     }
 }
 
+private struct PointProjectionSample: Sendable {
+    let depthX: Int
+    let depthY: Int
+    let depthIndex: Int
+    let lidarIndex: Int
+    let cameraXFactor: Float
+    let cameraYFactor: Float
+    let yIndex: Int
+    let uvIndex: Int
+}
+
+private struct PointProjectionTable: Sendable {
+    let samples: [PointProjectionSample]
+
+    static let empty = PointProjectionTable(samples: [])
+}
+
+private struct PointProjectionTableKey: Hashable, Sendable {
+    let depthWidth: Int
+    let depthHeight: Int
+    let depthFloatsPerRow: Int
+    let imageWidth: Int
+    let imageHeight: Int
+    let yBytesPerRow: Int
+    let cbcrBytesPerRow: Int
+    let lidarWidth: Int
+    let lidarHeight: Int
+    let lidarFloatsPerRow: Int
+    let step: Int
+    let fx: Int
+    let fy: Int
+    let cx: Int
+    let cy: Int
+
+    init(
+        depthWidth: Int,
+        depthHeight: Int,
+        depthFloatsPerRow: Int,
+        imageWidth: Int,
+        imageHeight: Int,
+        yBytesPerRow: Int,
+        cbcrBytesPerRow: Int,
+        lidarWidth: Int,
+        lidarHeight: Int,
+        lidarFloatsPerRow: Int,
+        step: Int,
+        fx: Float,
+        fy: Float,
+        cx: Float,
+        cy: Float
+    ) {
+        self.depthWidth = depthWidth
+        self.depthHeight = depthHeight
+        self.depthFloatsPerRow = depthFloatsPerRow
+        self.imageWidth = imageWidth
+        self.imageHeight = imageHeight
+        self.yBytesPerRow = yBytesPerRow
+        self.cbcrBytesPerRow = cbcrBytesPerRow
+        self.lidarWidth = lidarWidth
+        self.lidarHeight = lidarHeight
+        self.lidarFloatsPerRow = lidarFloatsPerRow
+        self.step = step
+        self.fx = Self.quantized(fx)
+        self.fy = Self.quantized(fy)
+        self.cx = Self.quantized(cx)
+        self.cy = Self.quantized(cy)
+    }
+
+    private static func quantized(_ value: Float) -> Int {
+        guard value.isFinite else { return Int.min }
+        return Int((value * 100).rounded())
+    }
+}
+
+private final class PointProjectionTableCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private let capacity: Int
+    private var entries: [PointProjectionTableKey: PointProjectionTable] = [:]
+    private var keysByUse: [PointProjectionTableKey] = []
+
+    init(capacity: Int = 8) {
+        self.capacity = capacity
+    }
+
+    func table(for key: PointProjectionTableKey, build: () -> PointProjectionTable) -> PointProjectionTable {
+        lock.lock()
+        if let table = entries[key] {
+            markRecentlyUsed(key)
+            lock.unlock()
+            return table
+        }
+        lock.unlock()
+
+        let table = build()
+
+        lock.lock()
+        if let existing = entries[key] {
+            markRecentlyUsed(key)
+            lock.unlock()
+            return existing
+        }
+
+        entries[key] = table
+        keysByUse.append(key)
+        while keysByUse.count > capacity {
+            let expired = keysByUse.removeFirst()
+            entries[expired] = nil
+        }
+        lock.unlock()
+
+        return table
+    }
+
+    private func markRecentlyUsed(_ key: PointProjectionTableKey) {
+        keysByUse.removeAll { $0 == key }
+        keysByUse.append(key)
+    }
+}
+
 struct PointCloudProcessor {
+    private static let projectionTableCache = PointProjectionTableCache()
+
+    private static func projectionTable(
+        depthWidth: Int,
+        depthHeight: Int,
+        depthFloatsPerRow: Int = 0,
+        imageWidth: Int,
+        imageHeight: Int,
+        yBytesPerRow: Int,
+        cbcrBytesPerRow: Int,
+        lidarWidth: Int = 0,
+        lidarHeight: Int = 0,
+        lidarFloatsPerRow: Int = 0,
+        intrinsics: simd_float3x3,
+        imageResolution resolution: CGSize,
+        step: Int
+    ) -> PointProjectionTable {
+        guard depthWidth > 0,
+              depthHeight > 0,
+              imageWidth > 0,
+              imageHeight > 0,
+              step > 0,
+              resolution.width > 0,
+              resolution.height > 0 else {
+            return .empty
+        }
+
+        let scaleX = Float(depthWidth) / Float(resolution.width)
+        let scaleY = Float(depthHeight) / Float(resolution.height)
+        let fx = intrinsics[0][0] * scaleX
+        let fy = intrinsics[1][1] * scaleY
+        let cx = intrinsics[2][0] * scaleX
+        let cy = intrinsics[2][1] * scaleY
+        guard fx.isFinite, fy.isFinite, cx.isFinite, cy.isFinite, abs(fx) > 1e-5, abs(fy) > 1e-5 else {
+            return .empty
+        }
+
+        let normalizedDepthFloatsPerRow = depthFloatsPerRow > 0 ? depthFloatsPerRow : depthWidth
+        let key = PointProjectionTableKey(
+            depthWidth: depthWidth,
+            depthHeight: depthHeight,
+            depthFloatsPerRow: normalizedDepthFloatsPerRow,
+            imageWidth: imageWidth,
+            imageHeight: imageHeight,
+            yBytesPerRow: yBytesPerRow,
+            cbcrBytesPerRow: cbcrBytesPerRow,
+            lidarWidth: lidarWidth,
+            lidarHeight: lidarHeight,
+            lidarFloatsPerRow: lidarFloatsPerRow,
+            step: step,
+            fx: fx,
+            fy: fy,
+            cx: cx,
+            cy: cy
+        )
+
+        return projectionTableCache.table(for: key) {
+            buildProjectionTable(
+                depthWidth: depthWidth,
+                depthHeight: depthHeight,
+                depthFloatsPerRow: normalizedDepthFloatsPerRow,
+                imageWidth: imageWidth,
+                imageHeight: imageHeight,
+                yBytesPerRow: yBytesPerRow,
+                cbcrBytesPerRow: cbcrBytesPerRow,
+                lidarWidth: lidarWidth,
+                lidarHeight: lidarHeight,
+                lidarFloatsPerRow: lidarFloatsPerRow,
+                step: step,
+                fx: fx,
+                fy: fy,
+                cx: cx,
+                cy: cy
+            )
+        }
+    }
+
+    private static func buildProjectionTable(
+        depthWidth: Int,
+        depthHeight: Int,
+        depthFloatsPerRow: Int,
+        imageWidth: Int,
+        imageHeight: Int,
+        yBytesPerRow: Int,
+        cbcrBytesPerRow: Int,
+        lidarWidth: Int,
+        lidarHeight: Int,
+        lidarFloatsPerRow: Int,
+        step: Int,
+        fx: Float,
+        fy: Float,
+        cx: Float,
+        cy: Float
+    ) -> PointProjectionTable {
+        let sampleColumns = (depthWidth + step - 1) / step
+        let sampleRows = (depthHeight + step - 1) / step
+        var samples: [PointProjectionSample] = []
+        samples.reserveCapacity(sampleColumns * sampleRows)
+
+        let maxDepthX = max(depthWidth - 1, 1)
+        let maxDepthY = max(depthHeight - 1, 1)
+        let maxLiDARX = max(lidarWidth - 1, 1)
+        let maxLiDARY = max(lidarHeight - 1, 1)
+        let hasLiDARLookup = lidarWidth > 0 && lidarHeight > 0 && lidarFloatsPerRow > 0
+
+        for y in stride(from: 0, to: depthHeight, by: step) {
+            let normalizedY = Float(y) / Float(maxDepthY)
+            let imageY = min(imageHeight - 1, max(0, Int((Float(y) / Float(depthHeight)) * Float(imageHeight))))
+            let lidarY = hasLiDARLookup ? min(lidarHeight - 1, max(0, Int(normalizedY * Float(maxLiDARY)))) : 0
+
+            for x in stride(from: 0, to: depthWidth, by: step) {
+                let normalizedX = Float(x) / Float(maxDepthX)
+                let imageX = min(imageWidth - 1, max(0, Int((Float(x) / Float(depthWidth)) * Float(imageWidth))))
+                let lidarX = hasLiDARLookup ? min(lidarWidth - 1, max(0, Int(normalizedX * Float(maxLiDARX)))) : 0
+
+                samples.append(
+                    PointProjectionSample(
+                        depthX: x,
+                        depthY: y,
+                        depthIndex: y * depthFloatsPerRow + x,
+                        lidarIndex: hasLiDARLookup ? lidarY * lidarFloatsPerRow + lidarX : -1,
+                        cameraXFactor: (Float(x) - cx) / fx,
+                        cameraYFactor: (cy - Float(y)) / fy,
+                        yIndex: imageY * yBytesPerRow + imageX,
+                        uvIndex: (imageY / 2) * cbcrBytesPerRow + (imageX / 2) * 2
+                    )
+                )
+            }
+        }
+
+        return PointProjectionTable(samples: samples)
+    }
+
+    @inline(__always)
+    private static func sampleColor(
+        for sample: PointProjectionSample,
+        yPlane: UnsafePointer<UInt8>?,
+        cbcrPlane: UnsafePointer<UInt8>?
+    ) -> SIMD3<UInt8> {
+        guard let yPlane, let cbcrPlane else {
+            return SIMD3<UInt8>(255, 255, 255)
+        }
+
+        let yVal = Float(yPlane[sample.yIndex])
+        let cbVal = Float(cbcrPlane[sample.uvIndex]) - 128.0
+        let crVal = Float(cbcrPlane[sample.uvIndex + 1]) - 128.0
+        let r = yVal + 1.402 * crVal
+        let g = yVal - 0.344136 * cbVal - 0.714136 * crVal
+        let b = yVal + 1.772 * cbVal
+
+        return SIMD3<UInt8>(
+            UInt8(max(0, min(255, r))),
+            UInt8(max(0, min(255, g))),
+            UInt8(max(0, min(255, b)))
+        )
+    }
+
     
     /// Processes raw feature points and scene depth to create a structured point cloud.
     /// - Parameters:
@@ -104,57 +380,37 @@ struct PointCloudProcessor {
         let yPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
         let cbcrPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
         
-        let scaleX = Float(depthWidth) / Float(resolution.width)
-        let scaleY = Float(depthHeight) / Float(resolution.height)
-        let fx = intrinsics[0][0] * scaleX
-        let fy = intrinsics[1][1] * scaleY
-        let cx = intrinsics[2][0] * scaleX
-        let cy = intrinsics[2][1] * scaleY
-        
         let step = 4 // Process every 4th depth pixel for performance
-        
-        for y in stride(from: 0, to: depthHeight, by: step) {
-            for x in stride(from: 0, to: depthWidth, by: step) {
-                let depth = depthPointer[y * floatsPerRow + x]
-                guard depth > 0.1 && depth < 5.0 else { continue }
-                
-                // Unproject 2D depth pixel to 3D camera space
-                let xCamera = (Float(x) - cx) * depth / fx
-                // Camera Y-axis points UP, pixel Y-axis points DOWN. Must invert to prevent upside-down point clouds!
-                let yCamera = (cy - Float(y)) * depth / fy
-                let pointCamera = simd_float4(xCamera, yCamera, -depth, 1.0)
-                
-                // Transform to world space
-                let pointWorld = simd_mul(transform, pointCamera)
-                let point3D = simd_float3(pointWorld.x, pointWorld.y, pointWorld.z)
-                
-                let imgX = Int((Float(x) / Float(depthWidth)) * Float(imgWidth))
-                let imgY = Int((Float(y) / Float(depthHeight)) * Float(imgHeight))
-                
-                var color = SIMD3<UInt8>(255, 255, 255)
-                
-                if imgX >= 0 && imgX < imgWidth && imgY >= 0 && imgY < imgHeight, let yP = yPlane, let cbcrP = cbcrPlane {
-                    let yIndex = imgY * yPerRow + imgX
-                    let uvIndex = (imgY / 2) * cbcrPerRow + (imgX / 2) * 2
-                    
-                    let yVal = Float(yP[yIndex])
-                    let cbVal = Float(cbcrP[uvIndex]) - 128.0
-                    let crVal = Float(cbcrP[uvIndex + 1]) - 128.0
-                    
-                    // YCbCr to RGB conversion
-                    let r = yVal + 1.402 * crVal
-                    let g = yVal - 0.344136 * cbVal - 0.714136 * crVal
-                    let b = yVal + 1.772 * cbVal
-                    
-                    color = SIMD3<UInt8>(
-                        UInt8(max(0, min(255, r))),
-                        UInt8(max(0, min(255, g))),
-                        UInt8(max(0, min(255, b)))
-                    )
-                }
-                
-                processedPoints.append(ColoredPoint(position: point3D, color: color))
-            }
+        let table = Self.projectionTable(
+            depthWidth: depthWidth,
+            depthHeight: depthHeight,
+            depthFloatsPerRow: floatsPerRow,
+            imageWidth: imgWidth,
+            imageHeight: imgHeight,
+            yBytesPerRow: yPerRow,
+            cbcrBytesPerRow: cbcrPerRow,
+            intrinsics: intrinsics,
+            imageResolution: resolution,
+            step: step
+        )
+        processedPoints.reserveCapacity(table.samples.count)
+
+        for sample in table.samples {
+            let depth = depthPointer[sample.depthIndex]
+            guard depth > 0.1 && depth < 5.0 else { continue }
+
+            let pointCamera = simd_float4(
+                sample.cameraXFactor * depth,
+                sample.cameraYFactor * depth,
+                -depth,
+                1.0
+            )
+
+            let pointWorld = simd_mul(transform, pointCamera)
+            let point3D = simd_float3(pointWorld.x, pointWorld.y, pointWorld.z)
+            let color = Self.sampleColor(for: sample, yPlane: yPlane, cbcrPlane: cbcrPlane)
+
+            processedPoints.append(ColoredPoint(position: point3D, color: color))
         }
         
         return processedPoints
@@ -199,47 +455,254 @@ struct PointCloudProcessor {
         let depthW = depthMap.width
         let depthH = depthMap.height
 
-        let scaleX = Float(depthW) / Float(resolution.width)
-        let scaleY = Float(depthH) / Float(resolution.height)
-        let fx = intrinsics[0][0] * scaleX
-        let fy = intrinsics[1][1] * scaleY
-        let cx = intrinsics[2][0] * scaleX
-        let cy = intrinsics[2][1] * scaleY
-
         let step = 6 // Denser than LiDAR-only since DA V2 is high-resolution
-        processed.reserveCapacity((depthW / step) * (depthH / step))
+        let table = Self.projectionTable(
+            depthWidth: depthW,
+            depthHeight: depthH,
+            imageWidth: imgWidth,
+            imageHeight: imgHeight,
+            yBytesPerRow: yPerRow,
+            cbcrBytesPerRow: cbcrPerRow,
+            intrinsics: intrinsics,
+            imageResolution: resolution,
+            step: step
+        )
+        processed.reserveCapacity(table.samples.count)
 
-        for y in stride(from: 0, to: depthH, by: step) {
-            for x in stride(from: 0, to: depthW, by: step) {
-                let depth = depthMap.value(atX: x, y: y)
+        depthMap.withReadAccess { depthReader in
+            for sample in table.samples {
+                let depth = depthReader.value(atX: sample.depthX, y: sample.depthY)
                 guard depth.isFinite, depth > 0.1 && depth < 8.0 else { continue }
 
-                let xCamera = (Float(x) - cx) * depth / fx
-                let yCamera = (cy - Float(y)) * depth / fy
-                let pointCamera = simd_float4(xCamera, yCamera, -depth, 1.0)
+                let pointCamera = simd_float4(
+                    sample.cameraXFactor * depth,
+                    sample.cameraYFactor * depth,
+                    -depth,
+                    1.0
+                )
                 let pointWorld = simd_mul(transform, pointCamera)
                 let point3D = simd_float3(pointWorld.x, pointWorld.y, pointWorld.z)
+                let color = Self.sampleColor(for: sample, yPlane: yPlane, cbcrPlane: cbcrPlane)
 
-                let imgX = Int((Float(x) / Float(depthW)) * Float(imgWidth))
-                let imgY = Int((Float(y) / Float(depthH)) * Float(imgHeight))
+                processed.append(ColoredPoint(position: point3D, color: color))
+            }
+        }
 
-                var color = SIMD3<UInt8>(255, 255, 255)
-                if imgX >= 0, imgX < imgWidth, imgY >= 0, imgY < imgHeight,
-                   let yP = yPlane, let cbcrP = cbcrPlane {
-                    let yIndex = imgY * yPerRow + imgX
-                    let uvIndex = (imgY / 2) * cbcrPerRow + (imgX / 2) * 2
-                    let yVal = Float(yP[yIndex])
-                    let cbVal = Float(cbcrP[uvIndex]) - 128.0
-                    let crVal = Float(cbcrP[uvIndex + 1]) - 128.0
-                    let r = yVal + 1.402 * crVal
-                    let g = yVal - 0.344136 * cbVal - 0.714136 * crVal
-                    let b = yVal + 1.772 * cbVal
-                    color = SIMD3<UInt8>(
-                        UInt8(max(0, min(255, r))),
-                        UInt8(max(0, min(255, g))),
-                        UInt8(max(0, min(255, b)))
-                    )
+        return processed
+    }
+
+    /// Generates colored points from Depth Anything relative depth calibrated into metric scale.
+    /// LiDAR is not sampled per output point; any LiDAR contribution is limited to the calibration.
+    func processDepthAnythingPointCloud(
+        cameraImage pixelBuffer: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution resolution: CGSize,
+        transform: simd_float4x4,
+        relativeDepthMap: RelativeDepthMap,
+        calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
+    ) -> [ColoredPoint] {
+        var processed: [ColoredPoint] = []
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
+
+        let yPlane = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)?.assumingMemoryBound(to: UInt8.self)
+        let cbcrPlane = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)?.assumingMemoryBound(to: UInt8.self)
+        let yPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let cbcrPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+
+        let depthWidth = relativeDepthMap.width
+        let depthHeight = relativeDepthMap.height
+
+        let step = 6
+        let table = Self.projectionTable(
+            depthWidth: depthWidth,
+            depthHeight: depthHeight,
+            imageWidth: imgWidth,
+            imageHeight: imgHeight,
+            yBytesPerRow: yPerRow,
+            cbcrBytesPerRow: cbcrPerRow,
+            intrinsics: intrinsics,
+            imageResolution: resolution,
+            step: step
+        )
+        processed.reserveCapacity(table.samples.count)
+
+        relativeDepthMap.withReadAccess { relativeReader in
+            for sample in table.samples {
+                let relativeDepth = relativeReader.value(atX: sample.depthX, y: sample.depthY)
+                let depth = calibration.scale * relativeDepth + calibration.offset
+                guard depth.isFinite, depth > 0.1 && depth < 8.0 else { continue }
+
+                let pointCamera = simd_float4(
+                    sample.cameraXFactor * depth,
+                    sample.cameraYFactor * depth,
+                    -depth,
+                    1.0
+                )
+                let pointWorld = simd_mul(transform, pointCamera)
+                let point3D = simd_float3(pointWorld.x, pointWorld.y, pointWorld.z)
+                let color = Self.sampleColor(for: sample, yPlane: yPlane, cbcrPlane: cbcrPlane)
+
+                processed.append(ColoredPoint(position: point3D, color: color))
+            }
+        }
+
+        return processed
+    }
+
+    /// Generates a camera-frame point cloud from raw Depth Anything relative depth.
+    /// The coordinates are intentionally not metric; pair this with
+    /// `/mapping/depth_anything/calibration` to reconstruct calibrated depth.
+    func processRelativeDepthAnythingPointCloud(
+        cameraImage pixelBuffer: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution resolution: CGSize,
+        relativeDepthMap: RelativeDepthMap
+    ) -> [ColoredPoint] {
+        var processed: [ColoredPoint] = []
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
+
+        let yPlane = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)?.assumingMemoryBound(to: UInt8.self)
+        let cbcrPlane = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)?.assumingMemoryBound(to: UInt8.self)
+        let yPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let cbcrPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+
+        let depthWidth = relativeDepthMap.width
+        let depthHeight = relativeDepthMap.height
+
+        let step = 6
+        let table = Self.projectionTable(
+            depthWidth: depthWidth,
+            depthHeight: depthHeight,
+            imageWidth: imgWidth,
+            imageHeight: imgHeight,
+            yBytesPerRow: yPerRow,
+            cbcrBytesPerRow: cbcrPerRow,
+            intrinsics: intrinsics,
+            imageResolution: resolution,
+            step: step
+        )
+        processed.reserveCapacity(table.samples.count)
+
+        relativeDepthMap.withReadAccess { relativeReader in
+            for sample in table.samples {
+                let relativeDepth = relativeReader.value(atX: sample.depthX, y: sample.depthY)
+                guard relativeDepth.isFinite,
+                      relativeDepth > 0.000_001,
+                      relativeDepth < 10_000 else {
+                    continue
                 }
+
+                let point = SIMD3<Float>(
+                    sample.cameraXFactor * relativeDepth,
+                    sample.cameraYFactor * relativeDepth,
+                    -relativeDepth
+                )
+                let color = Self.sampleColor(for: sample, yPlane: yPlane, cbcrPlane: cbcrPlane)
+                processed.append(ColoredPoint(position: point, color: color))
+            }
+        }
+
+        return processed
+    }
+
+    /// Generates colored points by fusing Depth Anything relative depth with LiDAR
+    /// directly at each sampled output point, avoiding a full intermediate fused map.
+    func processFusedPointCloud(
+        cameraImage pixelBuffer: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution resolution: CGSize,
+        transform: simd_float4x4,
+        relativeDepthMap: RelativeDepthMap,
+        lidarDepthMap: CVPixelBuffer,
+        lidarConfidenceMap: CVPixelBuffer? = nil,
+        calibration cachedCalibration: DepthAnythingProcessor.MaximumLikelihoodCalibration? = nil
+    ) -> [ColoredPoint] {
+        let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
+        if let cachedCalibration {
+            calibration = cachedCalibration
+        } else {
+            guard let computedCalibration = DepthAnythingProcessor.maximumLikelihoodCalibration(
+                relative: relativeDepthMap,
+                lidarDepthMap: lidarDepthMap,
+                lidarConfidenceMap: lidarConfidenceMap
+            ) else { return [] }
+            calibration = computedCalibration
+        }
+
+        var processed: [ColoredPoint] = []
+
+        CVPixelBufferLockBaseAddress(lidarDepthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(lidarDepthMap, .readOnly) }
+
+        let lidarWidth = CVPixelBufferGetWidth(lidarDepthMap)
+        let lidarHeight = CVPixelBufferGetHeight(lidarDepthMap)
+        guard CVPixelBufferGetPixelFormatType(lidarDepthMap) == kCVPixelFormatType_DepthFloat32,
+              let lidarBase = CVPixelBufferGetBaseAddress(lidarDepthMap)?.assumingMemoryBound(to: Float32.self)
+        else { return [] }
+
+        let lidarFloatsPerRow = CVPixelBufferGetBytesPerRow(lidarDepthMap) / MemoryLayout<Float32>.stride
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
+
+        let yPlane = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)?.assumingMemoryBound(to: UInt8.self)
+        let cbcrPlane = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)?.assumingMemoryBound(to: UInt8.self)
+        let yPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let cbcrPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+
+        let depthWidth = relativeDepthMap.width
+        let depthHeight = relativeDepthMap.height
+
+        let step = 6
+        let table = Self.projectionTable(
+            depthWidth: depthWidth,
+            depthHeight: depthHeight,
+            imageWidth: imgWidth,
+            imageHeight: imgHeight,
+            yBytesPerRow: yPerRow,
+            cbcrBytesPerRow: cbcrPerRow,
+            lidarWidth: lidarWidth,
+            lidarHeight: lidarHeight,
+            lidarFloatsPerRow: lidarFloatsPerRow,
+            intrinsics: intrinsics,
+            imageResolution: resolution,
+            step: step
+        )
+        processed.reserveCapacity(table.samples.count)
+
+        relativeDepthMap.withReadAccess { relativeReader in
+            for sample in table.samples {
+                let lidarDepth = lidarBase[sample.lidarIndex]
+                let relativeDepth = relativeReader.value(atX: sample.depthX, y: sample.depthY)
+
+                guard let depth = DepthAnythingProcessor.maximumLikelihoodMetricDepth(
+                    relativeDepth: relativeDepth,
+                    lidarDepth: lidarDepth,
+                    calibration: calibration
+                ), depth > 0.1, depth < 8.0 else { continue }
+
+                let pointCamera = simd_float4(
+                    sample.cameraXFactor * depth,
+                    sample.cameraYFactor * depth,
+                    -depth,
+                    1.0
+                )
+                let pointWorld = simd_mul(transform, pointCamera)
+                let point3D = simd_float3(pointWorld.x, pointWorld.y, pointWorld.z)
+                let color = Self.sampleColor(for: sample, yPlane: yPlane, cbcrPlane: cbcrPlane)
 
                 processed.append(ColoredPoint(position: point3D, color: color))
             }

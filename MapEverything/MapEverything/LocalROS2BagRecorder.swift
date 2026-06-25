@@ -6,6 +6,9 @@
 import Foundation
 import Combine
 import SQLite3
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct LocalROS2BagRecorderConfiguration: Equatable {
     static let enabledStorageKey = "localROS2BagStorageEnabled"
@@ -160,6 +163,7 @@ struct LocalROS2BagSession: Identifiable, Hashable {
     let files: [LocalROS2BagFile]
     let byteCount: Int
     let modifiedAt: Date?
+    let preview: LocalROS2BagSessionPreview?
 
     var id: String {
         directoryURL.path
@@ -176,6 +180,77 @@ struct LocalROS2BagSession: Identifiable, Hashable {
     var byteCountLabel: String {
         ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
     }
+}
+
+struct LocalROS2BagSessionPreview: Codable, Hashable {
+    static let currentSchemaVersion = 1
+    static let cacheFileName = ".mapeverything-preview.json"
+    static let thumbnailFileName = ".mapeverything-thumbnail.jpg"
+
+    let schemaVersion: Int
+    let cacheKey: String
+    let generatedAt: Date
+    let messageCount: Int
+    let topicNames: [String]
+    let startedAtNanoseconds: Int64?
+    let endedAtNanoseconds: Int64?
+    let thumbnailRelativePath: String?
+
+    init(
+        cacheKey: String,
+        generatedAt: Date = Date(),
+        messageCount: Int,
+        topicNames: [String],
+        startedAtNanoseconds: Int64?,
+        endedAtNanoseconds: Int64?,
+        thumbnailRelativePath: String?
+    ) {
+        self.schemaVersion = Self.currentSchemaVersion
+        self.cacheKey = cacheKey
+        self.generatedAt = generatedAt
+        self.messageCount = messageCount
+        self.topicNames = topicNames.sorted()
+        self.startedAtNanoseconds = startedAtNanoseconds
+        self.endedAtNanoseconds = endedAtNanoseconds
+        self.thumbnailRelativePath = thumbnailRelativePath
+    }
+
+    var durationNanoseconds: Int64 {
+        guard let startedAtNanoseconds, let endedAtNanoseconds else { return 0 }
+        return max(0, endedAtNanoseconds - startedAtNanoseconds)
+    }
+
+    var durationLabel: String {
+        let seconds = Double(durationNanoseconds) / 1_000_000_000.0
+        guard seconds > 0 else { return "0s" }
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute, .second]
+        formatter.unitsStyle = .abbreviated
+        formatter.maximumUnitCount = 2
+        return formatter.string(from: seconds) ?? "\(Int(seconds))s"
+    }
+
+    var messageCountLabel: String {
+        "\(messageCount.formatted()) msgs"
+    }
+
+    var topicSummary: String {
+        guard !topicNames.isEmpty else { return "No topics" }
+        if topicNames.count <= 2 {
+            return topicNames.joined(separator: ", ")
+        }
+        return "\(topicNames[0]), \(topicNames[1]) +\(topicNames.count - 2)"
+    }
+
+    func thumbnailURL(relativeTo directoryURL: URL) -> URL? {
+        guard let thumbnailRelativePath else { return nil }
+        return directoryURL.appendingPathComponent(thumbnailRelativePath)
+    }
+}
+
+enum LocalROS2BagPreviewLoadingMode {
+    case cachedOnly
+    case scanIfNeeded
 }
 
 final class LocalROS2BagRecorder: ObservableObject {
@@ -217,6 +292,7 @@ final class LocalROS2BagRecorder: ObservableObject {
     private static let insertMessageSQL = "INSERT INTO messages(id, topic_id, timestamp, data) VALUES (?, ?, ?, ?)"
 
     private let queue = DispatchQueue(label: "com.mapeverything.localROS2BagRecorder", qos: .utility)
+    private let previewQueue = DispatchQueue(label: "com.mapeverything.localROS2BagPreviewScanner", qos: .utility)
     private let fileManager: FileManager
     private let baseDirectoryURL: URL?
     private var database: OpaquePointer?
@@ -333,6 +409,10 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     func listBagSessions() throws -> [LocalROS2BagSession] {
+        try listBagSessions(previewLoadingMode: .cachedOnly)
+    }
+
+    func listBagSessions(previewLoadingMode: LocalROS2BagPreviewLoadingMode) throws -> [LocalROS2BagSession] {
         let rootURL = try storageRootURL()
         guard fileManager.fileExists(atPath: rootURL.path) else { return [] }
 
@@ -345,10 +425,41 @@ final class LocalROS2BagRecorder: ObservableObject {
         return try directoryURLs.compactMap { url in
             let values = try url.resourceValues(forKeys: [.isDirectoryKey])
             guard values.isDirectory == true else { return nil }
-            return try bagSession(directoryURL: url)
+            return try bagSession(directoryURL: url, previewLoadingMode: previewLoadingMode)
         }
         .sorted { lhs, rhs in
             (lhs.modifiedAt ?? .distantPast) > (rhs.modifiedAt ?? .distantPast)
+        }
+    }
+
+    func listBagSessionsAsync(
+        previewLoadingMode: LocalROS2BagPreviewLoadingMode = .cachedOnly
+    ) async throws -> [LocalROS2BagSession] {
+        try await withCheckedThrowingContinuation { continuation in
+            previewQueue.async {
+                do {
+                    continuation.resume(returning: try self.listBagSessions(previewLoadingMode: previewLoadingMode))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func bagSessionWithPreviewScan(_ session: LocalROS2BagSession) async throws -> LocalROS2BagSession {
+        try await withCheckedThrowingContinuation { continuation in
+            previewQueue.async {
+                do {
+                    continuation.resume(
+                        returning: try self.bagSession(
+                            directoryURL: session.directoryURL,
+                            previewLoadingMode: .scanIfNeeded
+                        )
+                    )
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
 
@@ -421,7 +532,10 @@ final class LocalROS2BagRecorder: ObservableObject {
         return documentsURL.appendingPathComponent("ROS2Bags", isDirectory: true)
     }
 
-    private func bagSession(directoryURL: URL) throws -> LocalROS2BagSession {
+    private func bagSession(
+        directoryURL: URL,
+        previewLoadingMode: LocalROS2BagPreviewLoadingMode
+    ) throws -> LocalROS2BagSession {
         let fileURLs = try fileManager.contentsOfDirectory(
             at: directoryURL,
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
@@ -455,12 +569,236 @@ final class LocalROS2BagRecorder: ObservableObject {
         }
 
         let directoryValues = try directoryURL.resourceValues(forKeys: [.contentModificationDateKey])
+        let preview = preview(for: directoryURL, files: files, loadingMode: previewLoadingMode)
         return LocalROS2BagSession(
             directoryURL: directoryURL,
             files: files,
             byteCount: files.reduce(0) { $0 + $1.byteCount },
-            modifiedAt: directoryValues.contentModificationDate ?? files.compactMap(\.modifiedAt).max()
+            modifiedAt: directoryValues.contentModificationDate ?? files.compactMap(\.modifiedAt).max(),
+            preview: preview
         )
+    }
+
+    private func preview(
+        for directoryURL: URL,
+        files: [LocalROS2BagFile],
+        loadingMode: LocalROS2BagPreviewLoadingMode
+    ) -> LocalROS2BagSessionPreview? {
+        let cacheKey = previewCacheKey(files: files)
+        let cacheURL = directoryURL.appendingPathComponent(LocalROS2BagSessionPreview.cacheFileName)
+
+        if let cached = readCachedPreview(at: cacheURL),
+           cached.schemaVersion == LocalROS2BagSessionPreview.currentSchemaVersion,
+           cached.cacheKey == cacheKey {
+            return cached
+        }
+
+        guard loadingMode == .scanIfNeeded else { return nil }
+
+        let preview = buildPreview(for: directoryURL, files: files, cacheKey: cacheKey)
+        writeCachedPreview(preview, to: cacheURL)
+        return preview
+    }
+
+    private func previewCacheKey(files: [LocalROS2BagFile]) -> String {
+        files
+            .sorted { $0.relativePath < $1.relativePath }
+            .map { file in
+                let modifiedMilliseconds = Int64((file.modifiedAt?.timeIntervalSince1970 ?? 0) * 1000)
+                return "\(file.relativePath):\(file.byteCount):\(modifiedMilliseconds)"
+            }
+            .joined(separator: "|")
+    }
+
+    private func readCachedPreview(at url: URL) -> LocalROS2BagSessionPreview? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(LocalROS2BagSessionPreview.self, from: data)
+    }
+
+    private func writeCachedPreview(_ preview: LocalROS2BagSessionPreview, to url: URL) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(preview) else { return }
+        try? data.write(to: url, options: [.atomic])
+    }
+
+    private func buildPreview(
+        for directoryURL: URL,
+        files: [LocalROS2BagFile],
+        cacheKey: String
+    ) -> LocalROS2BagSessionPreview {
+        var messageCount = 0
+        var topicNames = Set<String>()
+        var startedAtNanoseconds: Int64?
+        var endedAtNanoseconds: Int64?
+        var thumbnailSourceData: Data?
+
+        for file in files where file.kind == .sqliteChunk {
+            guard let chunkPreview = sqlitePreview(from: file.url) else { continue }
+            messageCount += chunkPreview.messageCount
+            topicNames.formUnion(chunkPreview.topicNames)
+
+            if let start = chunkPreview.startedAtNanoseconds {
+                startedAtNanoseconds = min(startedAtNanoseconds ?? start, start)
+            }
+            if let end = chunkPreview.endedAtNanoseconds {
+                endedAtNanoseconds = max(endedAtNanoseconds ?? end, end)
+            }
+            if thumbnailSourceData == nil {
+                thumbnailSourceData = chunkPreview.thumbnailSourceData
+            }
+        }
+
+        let thumbnailRelativePath = thumbnailSourceData.flatMap {
+            writeThumbnail(from: $0, in: directoryURL)
+        }
+
+        return LocalROS2BagSessionPreview(
+            cacheKey: cacheKey,
+            messageCount: messageCount,
+            topicNames: Array(topicNames),
+            startedAtNanoseconds: startedAtNanoseconds,
+            endedAtNanoseconds: endedAtNanoseconds,
+            thumbnailRelativePath: thumbnailRelativePath
+        )
+    }
+
+    private struct SQLitePreview {
+        let messageCount: Int
+        let topicNames: Set<String>
+        let startedAtNanoseconds: Int64?
+        let endedAtNanoseconds: Int64?
+        let thumbnailSourceData: Data?
+    }
+
+    private func sqlitePreview(from url: URL) -> SQLitePreview? {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            if let database {
+                sqlite3_close(database)
+            }
+            return nil
+        }
+        defer { sqlite3_close(database) }
+
+        let messageCount = Int(sqliteInt64(
+            database: database,
+            sql: "SELECT COUNT(*) FROM messages"
+        ) ?? 0)
+        let start = sqliteInt64(
+            database: database,
+            sql: "SELECT MIN(timestamp) FROM messages"
+        )
+        let end = sqliteInt64(
+            database: database,
+            sql: "SELECT MAX(timestamp) FROM messages"
+        )
+        let topics = sqliteTopicNames(database: database)
+        let thumbnailData = sqliteFirstCameraImageData(database: database)
+
+        return SQLitePreview(
+            messageCount: messageCount,
+            topicNames: topics,
+            startedAtNanoseconds: start,
+            endedAtNanoseconds: end,
+            thumbnailSourceData: thumbnailData
+        )
+    }
+
+    private func sqliteInt64(database: OpaquePointer?, sql: String) -> Int64? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              sqlite3_column_type(statement, 0) != SQLITE_NULL else { return nil }
+        return sqlite3_column_int64(statement, 0)
+    }
+
+    private func sqliteTopicNames(database: OpaquePointer?) -> Set<String> {
+        var statement: OpaquePointer?
+        let sql = "SELECT DISTINCT name FROM topics ORDER BY name"
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        var names = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let value = sqlite3_column_text(statement, 0) else { continue }
+            names.insert(String(cString: value))
+        }
+        return names
+    }
+
+    private func sqliteFirstCameraImageData(database: OpaquePointer?) -> Data? {
+        var statement: OpaquePointer?
+        let sql = """
+        SELECT messages.data
+        FROM messages
+        JOIN topics ON messages.topic_id = topics.id
+        WHERE topics.name = ?
+        ORDER BY messages.timestamp ASC
+        LIMIT 1
+        """
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, ROS2TopicRegistry.shared.topic(.cameraCompressed), -1, sqliteTransientDestructor)
+
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let bytes = sqlite3_column_blob(statement, 0) else { return nil }
+
+        let byteCount = Int(sqlite3_column_bytes(statement, 0))
+        let payloadData = Data(bytes: bytes, count: byteCount)
+        return cameraImageData(fromRosbridgePayload: payloadData)
+    }
+
+    private func cameraImageData(fromRosbridgePayload payloadData: Data) -> Data? {
+        guard let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+              let msg = payload["msg"] as? [String: Any],
+              let format = (msg["format"] as? String)?.lowercased(),
+              format.contains("jpeg") || format.contains("jpg"),
+              let encoded = msg["data"] as? String else { return nil }
+
+        return Data(base64Encoded: encoded)
+    }
+
+    private func writeThumbnail(from imageData: Data, in directoryURL: URL) -> String? {
+        #if canImport(UIKit)
+        guard let image = UIImage(data: imageData) else { return nil }
+
+        let maxSide: CGFloat = 160
+        let sourceSize = image.size
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return nil }
+
+        let scale = min(maxSide / sourceSize.width, maxSide / sourceSize.height, 1)
+        let thumbnailSize = CGSize(
+            width: max(1, floor(sourceSize.width * scale)),
+            height: max(1, floor(sourceSize.height * scale))
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+
+        let renderer = UIGraphicsImageRenderer(size: thumbnailSize, format: format)
+        let thumbnailData = renderer.jpegData(withCompressionQuality: 0.72) { context in
+            UIColor.systemBackground.setFill()
+            context.fill(CGRect(origin: .zero, size: thumbnailSize))
+            image.draw(in: CGRect(origin: .zero, size: thumbnailSize))
+        }
+
+        let thumbnailURL = directoryURL.appendingPathComponent(LocalROS2BagSessionPreview.thumbnailFileName)
+        do {
+            try thumbnailData.write(to: thumbnailURL, options: [.atomic])
+            return LocalROS2BagSessionPreview.thumbnailFileName
+        } catch {
+            return nil
+        }
+        #else
+        return nil
+        #endif
     }
 
     private func bagName(sessionID: UUID?, date: Date) -> String {

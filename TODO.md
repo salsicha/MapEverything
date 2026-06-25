@@ -83,11 +83,12 @@
 - [x] Retire legacy `EnvironmentModel` saved-scan persistence after replacing local exports with session records and local ROS2 bag chunks.
 - [x] Remove orphaned point-cloud, mesh, blueprint, video, preview, and legacy cleanup/export helpers from the record-mode app.
 
-## P2 - Adaptive Indoor/Outdoor Mapping
+## P2 - Depth Anything Surface Mapping
 
-- [x] Add an adaptive mapping-mode policy that scores RoomPlan suitability, outdoor GPS context, LiDAR depth confidence, Depth Anything availability, thermal pressure, and operator override state.
-- [x] Prefer parametric RoomPlan capture for enclosed interiors and switch to LiDAR + Depth Anything outdoor mapping with GPS, satellite imagery, and DEM context when room semantics are not reliable.
-- [x] Publish active mapping mode, confidence, reason codes, and override state in `/mapping/session` and `/mapping/status`.
+- [x] Use a single Depth Anything surface mapping path for record mode.
+- [x] Publish LiDAR and relative Depth Anything point clouds as separate topics.
+- [x] Publish the Depth Anything calibration used by the live overlay mesh.
+- [x] Remove the old indoor/outdoor mode router and semantic room capture path from the app.
 
 ## P2 - Validation
 
@@ -128,7 +129,7 @@
 
 - [x] Reposition the app as a robotics mapping payload rather than a general room-scanning/remodeling tool.
 - [x] Update README product language around ROS2 mapping, field data capture, GPS, radio telemetry, satellite imagery, and DEM support.
-- [x] Keep RoomPlan as an optional semantic layer unless it conflicts with the robotics-first workflow.
+- [x] Remove semantic room capture so the robotics workflow stays focused on Depth Anything surfaces, LiDAR, GPS, DEM, satellite imagery, and ROS2 recording.
 - [x] Define MapEverything as a single record-mode ROS2 publisher with external recorder-side data retention by default and optional local SQLite bag fallback.
 - [x] Keep rosbridge WebSocket as the production bridge for now; no native ROS2/DDS iOS client or recorder-side binary receiver is integrated in this build.
 - [x] Remove unused measurement, remodeling, landscaping, saved-scan gallery, and legacy export trigger code from the single record-mode app.

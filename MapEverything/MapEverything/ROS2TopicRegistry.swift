@@ -7,7 +7,9 @@ import Foundation
 
 enum ROS2TopicID: String, CaseIterable, Codable, Hashable {
     case pose
-    case pointCloud
+    case lidarPointCloud
+    case depthAnythingPointCloud
+    case depthAnythingCalibration
     case imu
     case meshMarkers
     case meshSnapshot
@@ -124,10 +126,26 @@ final class ROS2TopicRegistry {
             isImplemented: true
         ),
         ROS2TopicDefinition(
-            id: .pointCloud,
+            id: .lidarPointCloud,
             stream: .pointCloud,
-            topic: "/mapping/pointcloud",
+            topic: "/mapping/pointcloud/lidar",
             messageType: "sensor_msgs/msg/PointCloud2",
+            defaultRateHz: 5,
+            isImplemented: true
+        ),
+        ROS2TopicDefinition(
+            id: .depthAnythingPointCloud,
+            stream: .pointCloud,
+            topic: "/mapping/pointcloud/depth_anything",
+            messageType: "sensor_msgs/msg/PointCloud2",
+            defaultRateHz: 5,
+            isImplemented: true
+        ),
+        ROS2TopicDefinition(
+            id: .depthAnythingCalibration,
+            stream: .pointCloud,
+            topic: "/mapping/depth_anything/calibration",
+            messageType: "reconstructor_msgs/msg/DepthAnythingCalibration",
             defaultRateHz: 5,
             isImplemented: true
         ),
@@ -248,7 +266,7 @@ final class ROS2TopicRegistry {
             stream: .satelliteImagery,
             topic: "/mapping/satellite/image/compressed",
             messageType: "sensor_msgs/msg/CompressedImage",
-            defaultRateHz: nil,
+            defaultRateHz: 1.0 / 60.0,
             isImplemented: true
         ),
         ROS2TopicDefinition(
@@ -256,7 +274,7 @@ final class ROS2TopicRegistry {
             stream: .satelliteImagery,
             topic: "/mapping/satellite/tile_info",
             messageType: "reconstructor_msgs/msg/GeoTileInfo",
-            defaultRateHz: nil,
+            defaultRateHz: 1.0 / 60.0,
             isImplemented: true
         ),
         ROS2TopicDefinition(
@@ -264,7 +282,7 @@ final class ROS2TopicRegistry {
             stream: .dem,
             topic: "/mapping/dem/tile",
             messageType: "reconstructor_msgs/msg/GeoRasterTile",
-            defaultRateHz: nil,
+            defaultRateHz: 1.0 / 60.0,
             isImplemented: true
         )
     ]

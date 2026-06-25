@@ -36,12 +36,15 @@ On the recorder workstation, monitor the same topics in parallel:
 ```bash
 ros2 topic hz /mapping/pose
 ros2 topic hz /mapping/gps/fix
-ros2 topic hz /mapping/pointcloud
+ros2 topic hz /mapping/pointcloud/lidar
+ros2 topic hz /mapping/pointcloud/depth_anything
+ros2 topic hz /mapping/depth_anything/calibration
 ros2 topic hz /mapping/satellite/image/compressed
 ros2 topic hz /mapping/satellite/tile_info
 ros2 topic hz /mapping/dem/tile
 
-ros2 topic bw /mapping/pointcloud
+ros2 topic bw /mapping/pointcloud/lidar
+ros2 topic bw /mapping/pointcloud/depth_anything
 ros2 topic bw /mapping/satellite/image/compressed
 ros2 topic bw /mapping/dem/tile
 ```
@@ -73,7 +76,9 @@ ros2 bag record -o mapeverything_validation \
  /mapping/camera/camera_info \
  /mapping/gps/fix \
  /mapping/gps/metadata \
- /mapping/pointcloud \
+ /mapping/pointcloud/lidar \
+ /mapping/pointcloud/depth_anything \
+ /mapping/depth_anything/calibration \
     /mapping/satellite/image/compressed \
     /mapping/satellite/tile_info \
     /mapping/dem/tile
@@ -84,7 +89,7 @@ ros2 bag record -o mapeverything_validation \
 | Area | Procedure | Pass Criteria |
 | :--- | :--- | :--- |
 | GPS | Start outdoors with precise location enabled, then walk at least 20 meters. | `/mapping/gps/fix` publishes finite lat/lon, covariance reflects accuracy, and `/mapping/gps/metadata` includes georeference JSON after an accurate fix. |
-| LiDAR + Depth Anything | Record in LiDAR + Depth Anything mode while moving around varied geometry. | `/mapping/pointcloud` publishes a stable colored fused point cloud in `map`, while camera image and camera_info remain near the 2 Hz budget. |
+| LiDAR + Depth Anything | Record in LiDAR + Depth Anything mode while moving around varied geometry. | `/mapping/pointcloud/lidar` publishes ARKit LiDAR-only colored points in `map`, `/mapping/pointcloud/depth_anything` publishes relative Depth Anything colored points in `iphone_camera`, and `/mapping/depth_anything/calibration` publishes the overlay mesh scale/offset while camera image and camera_info remain near the 2 Hz budget. |
 | BLE | Configure one or more beacon filters and enable Bluetooth. | `/mapping/radio` includes BLE observations or `/mapping/status` explains permission/filter state. |
 | Wi-Fi | Join the recorder network with Location permission and Wi-Fi info entitlement enabled. | Session metadata reports current Wi-Fi telemetry and avoids broad scan claims. |
 | Satellite fetch | Record with a valid outdoor GPS fix and network access. | `/mapping/satellite/tile_info` publishes bounds, CRS, attribution, source policy, and `device_pixel_x`/`device_pixel_y`, with imagery on `/mapping/satellite/image/compressed`. |

@@ -16,7 +16,6 @@ string radio_observation_schema
 string mesh_snapshot_schema
 string stream_payload_metrics
 string optional_geo_provider_configurations
-string adaptive_mapping
 string current_wifi_telemetry
 string ble_beacon_telemetry
 string network_path_diagnostics

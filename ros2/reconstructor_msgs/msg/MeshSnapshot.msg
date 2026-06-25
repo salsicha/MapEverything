@@ -14,6 +14,10 @@ bool is_truncated
 uint32 original_payload_bytes
 uint32 published_payload_bytes
 string compression
-geometry_msgs/Point[] vertices
-uint32[] triangle_indices
+string vertex_encoding
+uint32 vertex_stride_bytes
+uint8[] vertex_data
+string index_encoding
+uint32 index_stride_bytes
+uint8[] index_data
 string metadata_json

@@ -8,7 +8,6 @@
 import SwiftUI
 import RealityKit
 import ARKit
-import RoomPlan
 import SceneKit
 
 struct MeshRebuildThrottle {
@@ -64,7 +63,6 @@ struct ARViewContainer: UIViewControllerRepresentable {
     var maxPointLimit: Int
     var voxelSize: Float
     var boundingBoxSize: Float
-    var useRoomPlan: Bool
     
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -85,7 +83,6 @@ struct ARViewContainer: UIViewControllerRepresentable {
         uiViewController.maxPointLimit = maxPointLimit
         uiViewController.voxelSize = voxelSize
         uiViewController.boundingBoxSize = boundingBoxSize
-        uiViewController.useRoomPlan = useRoomPlan
     }
     
     class Coordinator: NSObject, ARViewControllerDelegate {
@@ -144,30 +141,32 @@ protocol ARViewControllerDelegate: AnyObject {
     func didUpdateMapperPreparation(isPreparing: Bool, depthAnythingReady: Bool)
 }
 
-class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDelegate, RoomCaptureSessionDelegate {
+class ARViewController: UIViewController, ARSessionDelegate {
     private struct SurfelPreviewMesh {
         let descriptor: MeshDescriptor
         let colorAtlas: CGImage
     }
 
+    private struct DepthAnythingMappingFrame {
+        let calibratedPoints: [ColoredPoint]
+        let relativePoints: [ColoredPoint]
+        let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
+        let relativeDepthSize: CGSize
+        let meshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
+    }
+
     var arView: ARView? // Using RealityKit's ARView
-    var roomCaptureView: RoomCaptureView?
-    var capturedRoom: CapturedRoom?
     
     weak var delegate: ARViewControllerDelegate?
     var isScanning: Bool = false {
         didSet {
             if oldValue != isScanning {
-                if useRoomPlan {
-                    if isScanning {
-                        roomCaptureView?.captureSession.run(configuration: RoomCaptureSession.Configuration())
-                    } else {
-                        roomCaptureView?.captureSession.stop()
-                    }
-                } else if isScanning {
+                if isScanning {
                     delegate?.didUpdateStoppedInspectionScene(nil)
+                    depthAnythingCalibrationCache.reset()
                     resumeWorldTrackingSession()
                 } else {
+                    depthAnythingCalibrationCache.reset()
                     freezeCurrentMeshForInspection()
                     cancelMeshUpdateTasks()
                     arView?.session.pause()
@@ -179,8 +178,8 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private let pointManager = PointCloudManager()
     private let surfelMap = ColoredSurfelMap()
     private let pointCloudProcessor = PointCloudProcessor()
-    private let adaptiveMappingController = AdaptiveMappingModeController.shared
     private var depthAnythingProcessor: DepthAnythingProcessor?
+    private let depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
     private var depthAnythingPreloadTask: Task<Void, Never>?
     private var lastEnhancedFrameTime: TimeInterval = 0
     private let enhancedFrameInterval: TimeInterval = 0.5 // Run Depth Anything at ~2 fps
@@ -206,16 +205,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             Task { await surfelMap.configure(voxelSize: max(0.02, voxelSize * 0.8)) }
         }
     }
-    var useRoomPlan: Bool = false {
-        didSet {
-            if oldValue != useRoomPlan {
-                setupViews()
-                if useRoomPlan, isScanning {
-                    roomCaptureView?.captureSession.run(configuration: RoomCaptureSession.Configuration())
-                }
-            }
-        }
-    }
     private var meshEntities: [UUID: ModelEntity] = [:]
     private var lastMapPublishTime: TimeInterval = 0
     private let meshSnapshotPublishConfiguration = MeshSnapshotPublishConfiguration.default
@@ -226,6 +215,12 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     private var liveSurfelAnchor: AnchorEntity?
     private var liveSurfelEntity: ModelEntity?
     private var liveSurfelUpdateTask: Task<Void, Never>?
+    private var liveDepthMeshAnchor: AnchorEntity?
+    private var liveDepthMeshEntity: ModelEntity?
+    private var liveDepthMeshUpdateTask: Task<Void, Never>?
+    private var latestDepthAnythingMeshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
+    private let depthMeshVisualizationInterval: TimeInterval = 0.5
+    private var lastDepthMeshVisualizationTime: TimeInterval = 0
     private var coachingOverlay: ARCoachingOverlayView?
     
     override func viewDidLoad() {
@@ -257,74 +252,61 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     deinit {
         depthAnythingPreloadTask?.cancel()
         arView?.session.pause()
-        roomCaptureView?.captureSession.stop()
         NotificationCenter.default.removeObserver(self)
     }
     
     private func setupViews() {
         // Explicitly pause hardware sensors before deallocating views to prevent massive battery drain
         arView?.session.pause()
-        roomCaptureView?.captureSession.stop()
         
         arView?.removeFromSuperview()
-        roomCaptureView?.removeFromSuperview()
         arView = nil
-        roomCaptureView = nil
         liveSurfelUpdateTask?.cancel()
         liveSurfelUpdateTask = nil
         liveSurfelEntity = nil
         liveSurfelAnchor = nil
+        liveDepthMeshUpdateTask?.cancel()
+        liveDepthMeshUpdateTask = nil
+        liveDepthMeshEntity = nil
+        liveDepthMeshAnchor = nil
+        latestDepthAnythingMeshSnapshot = nil
         coachingOverlay = nil
         
-        if useRoomPlan {
-            let rcv = RoomCaptureView(frame: view.bounds)
-            rcv.delegate = self
-            rcv.captureSession.delegate = self
-            view.addSubview(rcv)
-            rcv.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                rcv.topAnchor.constraint(equalTo: self.view.topAnchor),
-                rcv.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
-                rcv.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
-                rcv.trailingAnchor.constraint(equalTo: self.view.trailingAnchor)
-            ])
-            roomCaptureView = rcv
-        } else {
-            let av = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
-            self.view.addSubview(av)
-            
-            av.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                av.topAnchor.constraint(equalTo: self.view.topAnchor),
-                av.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
-                av.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
-                av.trailingAnchor.constraint(equalTo: self.view.trailingAnchor)
-            ])
-            
-            av.session.delegate = self
+        let av = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
+        self.view.addSubview(av)
 
-            guard let configuration = makeWorldTrackingConfiguration() else {
-                arView = av
-                return
-            }
-            
-            let overlay = ARCoachingOverlayView()
-            overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            overlay.session = av.session
-            overlay.goal = .anyPlane
-            av.addSubview(overlay)
-            coachingOverlay = overlay
-            
+        av.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            av.topAnchor.constraint(equalTo: self.view.topAnchor),
+            av.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+            av.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
+            av.trailingAnchor.constraint(equalTo: self.view.trailingAnchor)
+        ])
+
+        av.session.delegate = self
+
+        guard let configuration = makeWorldTrackingConfiguration() else {
             arView = av
-            if isScanning {
-                av.session.run(configuration)
-            }
+            return
+        }
+
+        let overlay = ARCoachingOverlayView()
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        overlay.session = av.session
+        overlay.goal = .anyPlane
+        av.addSubview(overlay)
+        coachingOverlay = overlay
+
+        arView = av
+        if isScanning {
+            av.session.run(configuration)
         }
     }
 
     private func resumeWorldTrackingSession() {
         guard let arView else { return }
         guard let configuration = makeWorldTrackingConfiguration() else { return }
+        depthAnythingCalibrationCache.reset()
         clearLiveMeshEntities()
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         updateVisualizationMode(currentMode)
@@ -392,9 +374,28 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         anchorEntities.values.forEach { arView?.scene.removeAnchor($0) }
         meshEntities.removeAll()
         anchorEntities.removeAll()
+        clearDepthAnythingMeshEntity()
+    }
+
+    private func clearDepthAnythingMeshEntity() {
+        liveDepthMeshUpdateTask?.cancel()
+        liveDepthMeshUpdateTask = nil
+        liveDepthMeshEntity?.removeFromParent()
+        liveDepthMeshEntity = nil
+        if let liveDepthMeshAnchor {
+            arView?.scene.removeAnchor(liveDepthMeshAnchor)
+        }
+        liveDepthMeshAnchor = nil
+        latestDepthAnythingMeshSnapshot = nil
     }
 
     private func freezeCurrentMeshForInspection() {
+        if let latestDepthAnythingMeshSnapshot,
+           let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
+            delegate?.didUpdateStoppedInspectionScene(scene)
+            return
+        }
+
         guard let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
               !anchors.isEmpty else {
             delegate?.didUpdateStoppedInspectionScene(nil)
@@ -417,28 +418,91 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                 return SCNVector3(transformed.x, transformed.y, transformed.z)
             }
 
-            let vertexSource = SCNGeometrySource(vertices: worldVertices)
-            let indexData = Data(bytes: mesh.indices, count: mesh.indices.count * MemoryLayout<UInt32>.size)
-            let element = SCNGeometryElement(
-                data: indexData,
-                primitiveType: .triangles,
-                primitiveCount: mesh.indices.count / 3,
-                bytesPerIndex: MemoryLayout<UInt32>.size
-            )
-            let geometry = SCNGeometry(sources: [vertexSource], elements: [element])
-            let material = SCNMaterial()
-            material.diffuse.contents = UIColor.systemCyan.withAlphaComponent(0.86)
-            material.emission.contents = UIColor.systemCyan.withAlphaComponent(0.16)
-            material.lightingModel = .constant
-            material.isDoubleSided = true
-            geometry.materials = [material]
-
-            let node = SCNNode(geometry: geometry)
-            scene.rootNode.addChildNode(node)
+            scene.rootNode.addChildNode(SCNNode(
+                geometry: makeLitInspectionGeometry(
+                    vertices: worldVertices,
+                    indices: mesh.indices,
+                    tint: .systemCyan
+                )
+            ))
             hasGeometry = true
         }
 
         return hasGeometry ? scene : nil
+    }
+
+    private func makeInspectionScene(from snapshot: MeshGenerator.DepthAnythingMeshSnapshot) -> SCNScene? {
+        guard !snapshot.vertices.isEmpty, snapshot.indices.count >= 3 else { return nil }
+
+        let scene = SCNScene()
+        let worldVertices = snapshot.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
+        scene.rootNode.addChildNode(SCNNode(
+            geometry: makeLitInspectionGeometry(
+                vertices: worldVertices,
+                indices: snapshot.indices,
+                tint: .systemTeal
+            )
+        ))
+        return scene
+    }
+
+    private func makeLitInspectionGeometry(
+        vertices: [SCNVector3],
+        indices: [UInt32],
+        tint: UIColor
+    ) -> SCNGeometry {
+        let vertexSource = SCNGeometrySource(vertices: vertices)
+        let normalSource = SCNGeometrySource(normals: inspectionNormals(for: vertices, indices: indices))
+        let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<UInt32>.size)
+        let element = SCNGeometryElement(
+            data: indexData,
+            primitiveType: .triangles,
+            primitiveCount: indices.count / 3,
+            bytesPerIndex: MemoryLayout<UInt32>.size
+        )
+        let geometry = SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
+        let material = SCNMaterial()
+        material.diffuse.contents = tint.withAlphaComponent(0.9)
+        material.ambient.contents = tint.withAlphaComponent(0.24)
+        material.specular.contents = UIColor.white.withAlphaComponent(0.36)
+        material.emission.contents = tint.withAlphaComponent(0.035)
+        material.shininess = 0.42
+        material.lightingModel = .blinn
+        material.isDoubleSided = true
+        geometry.materials = [material]
+        return geometry
+    }
+
+    private func inspectionNormals(for vertices: [SCNVector3], indices: [UInt32]) -> [SCNVector3] {
+        guard !vertices.isEmpty else { return [] }
+        var accumulated = Array(repeating: SIMD3<Float>(0, 0, 0), count: vertices.count)
+
+        for triangleStart in stride(from: 0, to: indices.count - 2, by: 3) {
+            let i0 = Int(indices[triangleStart])
+            let i1 = Int(indices[triangleStart + 1])
+            let i2 = Int(indices[triangleStart + 2])
+            guard vertices.indices.contains(i0),
+                  vertices.indices.contains(i1),
+                  vertices.indices.contains(i2) else { continue }
+
+            let v0 = SIMD3<Float>(vertices[i0].x, vertices[i0].y, vertices[i0].z)
+            let v1 = SIMD3<Float>(vertices[i1].x, vertices[i1].y, vertices[i1].z)
+            let v2 = SIMD3<Float>(vertices[i2].x, vertices[i2].y, vertices[i2].z)
+            let normal = simd_cross(v1 - v0, v2 - v0)
+            guard simd_length_squared(normal) > 0.000001 else { continue }
+
+            let unitNormal = simd_normalize(normal)
+            accumulated[i0] += unitNormal
+            accumulated[i1] += unitNormal
+            accumulated[i2] += unitNormal
+        }
+
+        return accumulated.map { normal in
+            let normalized = simd_length_squared(normal) > 0.000001
+                ? simd_normalize(normal)
+                : SIMD3<Float>(0, 1, 0)
+            return SCNVector3(normalized.x, normalized.y, normalized.z)
+        }
     }
 
     private func cancelMeshUpdateTasks() {
@@ -457,90 +521,26 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         depthAnythingProcessor != nil
     }
 
-    private func evaluateAdaptiveMappingPolicy(frame: ARFrame) {
-        let depthConfidence: Double
-        if frame.smoothedSceneDepth != nil {
-            depthConfidence = 1.0
-        } else if frame.sceneDepth != nil {
-            depthConfidence = 0.75
-        } else {
-            depthConfidence = 0.15
-        }
-
-        adaptiveMappingController.update(
-            input: makeAdaptiveMappingInput(
-                roomPlanObjectCount: capturedRoomObjectCount,
-                lidarDepthConfidence: depthConfidence
-            )
-        )
-    }
-
-    private func evaluateAdaptiveMappingPolicy(room: CapturedRoom) {
-        adaptiveMappingController.update(
-            input: makeAdaptiveMappingInput(
-                roomPlanObjectCount: capturedRoomElementCount(room),
-                lidarDepthConfidence: fallbackLiDARDepthConfidence
-            )
-        )
-    }
-
-    private func makeAdaptiveMappingInput(
-        roomPlanObjectCount: Int,
-        lidarDepthConfidence: Double
-    ) -> AdaptiveMappingModeInput {
-        let localization = IndoorLocalizationManager.shared
-        let horizontalAccuracy = localization.lastHorizontalAccuracy >= 0
-            ? localization.lastHorizontalAccuracy
-            : nil
-
-        return AdaptiveMappingModeInput(
-            roomPlanAvailable: RoomCaptureSession.isSupported,
-            roomPlanObjectCount: roomPlanObjectCount,
-            indoorRegistrationQuality: localization.lastIndoorRegistrationQuality,
-            globalRegistrationQuality: localization.lastGlobalRegistrationQuality,
-            gpsHorizontalAccuracyMeters: horizontalAccuracy,
-            lidarDepthConfidence: lidarDepthConfidence,
-            depthAnythingAvailable: isDepthAnythingModelAvailable,
-            thermalState: ProcessInfo.processInfo.thermalState,
-            operatorOverride: adaptiveMappingController.operatorOverride
-        )
-    }
-
-    private var capturedRoomObjectCount: Int {
-        capturedRoom.map(capturedRoomElementCount) ?? 0
-    }
-
-    private var fallbackLiDARDepthConfidence: Double {
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            return 0.75
-        }
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            return 0.55
-        }
-        return 0.15
-    }
-
-    private func capturedRoomElementCount(_ room: CapturedRoom) -> Int {
-        room.walls.count + room.doors.count + room.windows.count + room.objects.count
-    }
-
     @MainActor
-    private func shouldUseFusedMappingDepth() -> Bool {
-        guard depthAnythingProcessor != nil, !useRoomPlan else { return false }
+    private func shouldUseDepthAnythingMappingDepth() -> Bool {
+        guard depthAnythingProcessor != nil else { return false }
         if ProcessInfo.processInfo.thermalState == .critical { return false }
         return true
     }
 
-    private func processFusedMappingFrame(
+    private func processDepthAnythingMappingFrame(
         timestamp: TimeInterval,
         cameraImage: CVPixelBuffer,
         lidarDepthMap: CVPixelBuffer,
+        lidarConfidenceMap: CVPixelBuffer?,
         intrinsics: simd_float3x3,
         imageResolution: CGSize,
-        transform: simd_float4x4
-    ) async -> [ColoredPoint]? {
-        // Rate-limit so the model only runs at ~enhancedFrameInterval. Returning an
-        // empty array means "skip this frame" rather than falling back to LiDAR-only.
+        transform: simd_float4x4,
+        shouldBuildMesh: Bool
+    ) async -> DepthAnythingMappingFrame? {
+        // Rate-limit so the model only runs at ~enhancedFrameInterval. A skipped
+        // frame leaves the current Depth Anything mesh in place instead of falling
+        // back to LiDAR-derived visual mapping.
         let canRun: Bool = await MainActor.run {
             guard timestamp - lastEnhancedFrameTime >= enhancedFrameInterval,
                   !isRunningEnhancedInference else { return false }
@@ -548,7 +548,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             isRunningEnhancedInference = true
             return true
         }
-        guard canRun else { return [] }
+        guard canRun else { return nil }
 
         defer {
             Task { @MainActor in self.isRunningEnhancedInference = false }
@@ -557,14 +557,46 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         guard let processor = depthAnythingProcessor else { return nil }
 
         guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
-        guard let fused = processor.fuseMaximumLikelihood(relative: relative, lidarDepthMap: lidarDepthMap) else { return nil }
+        guard let calibration = depthAnythingCalibrationCache.calibration(
+            relative: relative,
+            lidarDepthMap: lidarDepthMap,
+            lidarConfidenceMap: lidarConfidenceMap,
+            timestamp: timestamp,
+            cameraTransform: transform
+        ) else { return nil }
 
-        return pointCloudProcessor.processPointCloudEnhanced(
+        let calibratedPoints = pointCloudProcessor.processDepthAnythingPointCloud(
             cameraImage: cameraImage,
             intrinsics: intrinsics,
             imageResolution: imageResolution,
             transform: transform,
-            depthMap: fused
+            relativeDepthMap: relative,
+            calibration: calibration
+        )
+        let relativePoints = pointCloudProcessor.processRelativeDepthAnythingPointCloud(
+            cameraImage: cameraImage,
+            intrinsics: intrinsics,
+            imageResolution: imageResolution,
+            relativeDepthMap: relative
+        )
+
+        let meshSnapshot = shouldBuildMesh
+            ? MeshGenerator.createDepthAnythingMeshSnapshot(
+                from: relative,
+                calibration: calibration,
+                intrinsics: intrinsics,
+                imageResolution: imageResolution,
+                transform: transform
+            )
+            : nil
+
+        guard !calibratedPoints.isEmpty || !relativePoints.isEmpty || meshSnapshot != nil else { return nil }
+        return DepthAnythingMappingFrame(
+            calibratedPoints: calibratedPoints,
+            relativePoints: relativePoints,
+            calibration: calibration,
+            relativeDepthSize: CGSize(width: CGFloat(relative.width), height: CGFloat(relative.height)),
+            meshSnapshot: meshSnapshot
         )
     }
 
@@ -618,6 +650,53 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                 }
             } catch {
                 print("Failed to create surfel preview mesh: \(error)")
+            }
+        }
+    }
+
+    private func updateLiveDepthMeshVisualization(with snapshot: MeshGenerator.DepthAnythingMeshSnapshot?) {
+        liveDepthMeshUpdateTask?.cancel()
+
+        guard currentMode == .solidMesh else { return }
+        guard let snapshot else {
+            liveDepthMeshEntity?.removeFromParent()
+            liveDepthMeshEntity = nil
+            latestDepthAnythingMeshSnapshot = nil
+            return
+        }
+
+        latestDepthAnythingMeshSnapshot = snapshot
+        let descriptor = snapshot.descriptor
+        liveDepthMeshUpdateTask = Task { [weak self] in
+            guard let self = self else { return }
+
+            do {
+                let meshResource = try await MeshResource(from: [descriptor])
+                let material = UnlitMaterial(color: UIColor.systemTeal.withAlphaComponent(0.72))
+                let entity = ModelEntity(mesh: meshResource, materials: [material])
+
+                guard !Task.isCancelled else { return }
+
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+
+                    self.liveDepthMeshEntity?.removeFromParent()
+
+                    let anchor: AnchorEntity
+                    if let existingAnchor = self.liveDepthMeshAnchor {
+                        anchor = existingAnchor
+                    } else {
+                        anchor = AnchorEntity(world: .zero)
+                        self.liveDepthMeshAnchor = anchor
+                        self.arView?.scene.addAnchor(anchor)
+                    }
+
+                    anchor.addChild(entity)
+                    anchor.isEnabled = self.currentMode == .solidMesh
+                    self.liveDepthMeshEntity = entity
+                }
+            } catch {
+                print("Failed to create Depth Anything mesh preview: \(error)")
             }
         }
     }
@@ -723,17 +802,17 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         arView?.debugOptions.remove([.showFeaturePoints, .showSceneUnderstanding])
         meshEntities.values.forEach { $0.isEnabled = false }
         liveSurfelAnchor?.isEnabled = false
+        liveDepthMeshAnchor?.isEnabled = false
         guard isScanning else { return }
         
         switch mode {
         case .solidMesh:
-            arView?.debugOptions.insert(.showSceneUnderstanding)
-            meshEntities.values.forEach { $0.isEnabled = true }
+            liveDepthMeshAnchor?.isEnabled = true
         case .surfels:
             liveSurfelAnchor?.isEnabled = true
         case .wireframe:
             arView?.debugOptions.insert(.showSceneUnderstanding)
-        case .roomPlan, .none:
+        case .none:
             break
         }
     }
@@ -743,7 +822,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         guard isScanning else { return }
 
         MapGeoreferencer.shared.updateMapPose(frame.camera.transform, timestamp: frame.timestamp)
-        evaluateAdaptiveMappingPolicy(frame: frame)
         
         if ROS2BridgeClient.shared.isConnected {
             ROS2BridgeClient.shared.publishPose(frame.camera.transform, timestamp: frame.timestamp)
@@ -751,7 +829,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             ROS2BridgeClient.shared.publishTF(frame.camera.transform, timestamp: frame.timestamp)
         }
         
-        // Only accumulate LiDAR points if spatial tracking is highly accurate to prevent garbage data
+        // Only accumulate visual mapping data when spatial tracking is highly accurate to prevent garbage data.
         guard case .normal = frame.camera.trackingState else { return }
         
         // Throttle processing to prevent CPU overload and memory churn
@@ -769,6 +847,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         }
         let cameraImage = frame.capturedImage
         let lidarDepthMap = sceneDepth.depthMap
+        let lidarConfidenceMap = sceneDepth.confidenceMap
         let intrinsics = frame.camera.intrinsics
         let imageResolution = frame.camera.imageResolution
         let cameraPosition = SIMD3<Float>(
@@ -777,15 +856,16 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             transform.columns.3.z
         )
         let topicRegistry = ROS2TopicRegistry.shared
-        let shouldUseFusedDepth = shouldUseFusedMappingDepth()
+        let shouldUseDepthAnythingDepth = shouldUseDepthAnythingMappingDepth()
         let shouldPublishPointCloud = topicRegistry.isStreamEnabled(.pointCloud)
-            && shouldUseFusedDepth
             && timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
         let shouldPublishCameraImage = topicRegistry.isStreamEnabled(.camera)
             && timestamp - lastCameraImagePublishTime >= cameraImagePublishInterval
             && !isPublishingCameraImage
         let shouldRefreshSurfelVisualization = currentMode == .surfels
             && timestamp - lastSurfelVisualizationTime >= surfelVisualizationInterval
+        let shouldRefreshDepthMeshVisualization = currentMode == .solidMesh
+            && timestamp - lastDepthMeshVisualizationTime >= depthMeshVisualizationInterval
 
         if shouldPublishCameraImage, ROS2BridgeClient.shared.isConnected {
             lastCameraImagePublishTime = timestamp
@@ -808,33 +888,27 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
 
-            let newPoints: [ColoredPoint]
-            let depthAnythingPointCloud: [ColoredPoint]
-            if shouldUseFusedDepth {
-                if let fusedPoints = await self.processFusedMappingFrame(
+            let mappingFrame: DepthAnythingMappingFrame?
+            if shouldUseDepthAnythingDepth {
+                mappingFrame = await self.processDepthAnythingMappingFrame(
                     timestamp: timestamp,
                     cameraImage: cameraImage,
                     lidarDepthMap: lidarDepthMap,
+                    lidarConfidenceMap: lidarConfidenceMap,
                     intrinsics: intrinsics,
                     imageResolution: imageResolution,
-                    transform: transform
-                ) {
-                    newPoints = fusedPoints
-                    depthAnythingPointCloud = fusedPoints
-                } else {
-                    newPoints = autoreleasepool {
-                        self.pointCloudProcessor.processPointCloud(
-                            depthMap: lidarDepthMap,
-                            cameraImage: cameraImage,
-                            intrinsics: intrinsics,
-                            imageResolution: imageResolution,
-                            transform: transform
-                        )
-                    }
-                    depthAnythingPointCloud = []
-                }
+                    transform: transform,
+                    shouldBuildMesh: shouldRefreshDepthMeshVisualization
+                )
             } else {
-                newPoints = autoreleasepool {
+                mappingFrame = nil
+            }
+
+            let depthAnythingPointCloud = mappingFrame?.relativePoints ?? []
+            let newPoints = mappingFrame?.calibratedPoints ?? []
+            let lidarPointCloud: [ColoredPoint]
+            if shouldPublishPointCloud {
+                lidarPointCloud = autoreleasepool {
                     self.pointCloudProcessor.processPointCloud(
                         depthMap: lidarDepthMap,
                         cameraImage: cameraImage,
@@ -843,7 +917,41 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                         transform: transform
                     )
                 }
-                depthAnythingPointCloud = []
+            } else {
+                lidarPointCloud = []
+            }
+
+            if shouldPublishPointCloud {
+                // Downsample the network payload to a sparse 10cm grid to prevent saturating the Wi-Fi bandwidth.
+                let sparseLiDARPoints = self.pointCloudProcessor.voxelGridFilter(points: lidarPointCloud, voxelSize: 0.1)
+                let sparseDepthAnythingPoints = self.pointCloudProcessor.voxelGridFilter(points: depthAnythingPointCloud, voxelSize: 0.1)
+
+                if !sparseLiDARPoints.isEmpty {
+                    ROS2BridgeClient.shared.publishLiDARPointCloud(sparseLiDARPoints, timestamp: timestamp)
+                }
+                if !sparseDepthAnythingPoints.isEmpty {
+                    ROS2BridgeClient.shared.publishDepthAnythingPointCloud(sparseDepthAnythingPoints, timestamp: timestamp)
+                }
+                if let mappingFrame {
+                    ROS2BridgeClient.shared.publishDepthAnythingCalibration(
+                        mappingFrame.calibration,
+                        relativeDepthSize: mappingFrame.relativeDepthSize,
+                        imageResolution: imageResolution,
+                        timestamp: timestamp
+                    )
+                }
+                if !sparseLiDARPoints.isEmpty || !sparseDepthAnythingPoints.isEmpty || mappingFrame != nil {
+                    await MainActor.run {
+                        self.lastPointCloudPublishTime = timestamp
+                    }
+                }
+            }
+
+            if let meshSnapshot = mappingFrame?.meshSnapshot {
+                await MainActor.run {
+                    self.lastDepthMeshVisualizationTime = timestamp
+                    self.updateLiveDepthMeshVisualization(with: meshSnapshot)
+                }
             }
 
             if !newPoints.isEmpty {
@@ -852,14 +960,6 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                     observerPosition: cameraPosition,
                     timestamp: timestamp
                 )
-                if shouldPublishPointCloud, !depthAnythingPointCloud.isEmpty {
-                    // Downsample the network payload to a sparse 10cm grid to prevent saturating the Wi-Fi bandwidth
-                    let sparsePoints = self.pointCloudProcessor.voxelGridFilter(points: depthAnythingPointCloud, voxelSize: 0.1)
-                    ROS2BridgeClient.shared.publishPointCloud(sparsePoints, timestamp: timestamp)
-                    await MainActor.run {
-                        self.lastPointCloudPublishTime = timestamp
-                    }
-                }
                 if shouldRefreshSurfelVisualization {
                     let surfelSnapshot = await self.surfelMap.snapshot(maxCount: self.maxDisplayedSurfels)
                     let previewSurfels = Array(surfelSnapshot.prefix(self.maxDisplayedSurfels))
@@ -889,103 +989,11 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         if isScanning {
             publishMapToROS2IfNeeded(anchors: anchors)
         }
-        
-        for anchor in anchors {
-            if let meshAnchor = anchor as? ARMeshAnchor {
-                guard isScanning else { continue }
-                let identifier = meshAnchor.identifier
-                let rebuildToken = meshRebuildThrottle.begin(
-                    anchorID: identifier,
-                    now: ProcessInfo.processInfo.systemUptime,
-                    force: true
-                )
-                guard let rebuildToken else { continue }
-
-                let desc = MeshGenerator.createDescriptor(from: meshAnchor.geometry)
-                
-                // Create and add the tracking anchor immediately on the main thread
-                let anchorEntity = AnchorEntity(anchor: meshAnchor)
-                self.anchorEntities[identifier] = anchorEntity
-                self.arView?.scene.addAnchor(anchorEntity)
-                
-                let isSolid = (currentMode == .solidMesh)
-                
-                meshUpdateTasks[identifier]?.cancel()
-                
-                let task = Task { [weak self] in
-                    defer {
-                        Task { @MainActor in
-                            self?.finishMeshRebuild(anchorID: identifier, token: rebuildToken)
-                        }
-                    }
-                    guard let self = self else { return }
-                    
-                    do {
-                        let meshResource = try await MeshResource(from: [desc])
-                        let material = UnlitMaterial(color: UIColor.systemCyan.withAlphaComponent(0.85))
-                        let modelEntity = ModelEntity(mesh: meshResource, materials: [material])
-                        modelEntity.isEnabled = isSolid
-                        
-                        guard !Task.isCancelled else { return }
-                        
-                        await MainActor.run {
-                            guard !Task.isCancelled else { return }
-                            // Ensure the user hasn't cleared the scan while we were generating
-                            if let targetAnchor = self.anchorEntities[identifier] {
-                                self.meshEntities[identifier] = modelEntity
-                                targetAnchor.addChild(modelEntity)
-                            }
-                        }
-                    } catch {
-                        print("Failed to create mesh entity: \(error)")
-                    }
-                }
-                meshUpdateTasks[identifier] = task
-            }
-        }
     }
     
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         guard isScanning else { return }
         publishMapToROS2IfNeeded(anchors: anchors)
-        
-        for anchor in anchors {
-            if let meshAnchor = anchor as? ARMeshAnchor,
-               let entity = meshEntities[meshAnchor.identifier] {
-                let identifier = meshAnchor.identifier
-                let rebuildToken = meshRebuildThrottle.begin(
-                    anchorID: identifier,
-                    now: ProcessInfo.processInfo.systemUptime
-                )
-                guard let rebuildToken else { continue }
-
-                let desc = MeshGenerator.createDescriptor(from: meshAnchor.geometry)
-                
-                let task = Task { [weak self, weak entity] in
-                    defer {
-                        Task { @MainActor in
-                            self?.finishMeshRebuild(anchorID: identifier, token: rebuildToken)
-                        }
-                    }
-                    guard let entity = entity else { return }
-                    do {
-                        let meshResource = try await MeshResource(from: [desc])
-                        guard !Task.isCancelled else { return }
-
-                        await MainActor.run {
-                            guard !Task.isCancelled else { return }
-                            if var modelComponent = entity.components[ModelComponent.self] as? ModelComponent {
-                                modelComponent.mesh = meshResource
-                                entity.components.set(modelComponent)
-                            }
-                        }
-                    } catch {
-                        print("Failed to update mesh entity: \(error)")
-                    }
-                }
-                meshUpdateTasks[identifier] = task
-            }
-        }
     }
     
     private func publishMapToROS2IfNeeded(anchors: [ARAnchor]) {
@@ -1063,38 +1071,4 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
         }
     }
 
-    // MARK: - RoomCaptureViewDelegate
-    func captureView(shouldPresent roomDataForProcessing: CapturedRoomData, error: Error?) -> Bool {
-        if let error = error {
-            print("RoomCaptureView processing error: \(error)")
-            delegate?.didFailWithError(error)
-            return false
-        }
-        return true
-    }
-
-    func captureView(didPresent processedResult: CapturedRoom, error: Error?) {
-        if let error = error {
-            print("RoomCaptureView result error: \(error)")
-            delegate?.didFailWithError(error)
-        } else {
-            self.capturedRoom = processedResult
-            evaluateAdaptiveMappingPolicy(room: processedResult)
-            delegate?.didUpdateTrackingFeedback("Room captured successfully!")
-            
-            let objectCount = capturedRoomElementCount(processedResult)
-            delegate?.didUpdatePointCount(objectCount)
-        }
-    }
-    
-    // MARK: - RoomCaptureSessionDelegate
-    func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
-        evaluateAdaptiveMappingPolicy(room: room)
-        let objectCount = capturedRoomElementCount(room)
-        delegate?.didUpdatePointCount(objectCount)
-        
-        if ROS2BridgeClient.shared.isConnected {
-            ROS2BridgeClient.shared.publishRoomPlan(room, timestamp: ProcessInfo.processInfo.systemUptime)
-        }
-    }
 }

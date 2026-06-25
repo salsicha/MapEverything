@@ -63,7 +63,7 @@ It uses the current `xcodebuild` `app-store-connect` export method and `upload` 
    - Install on a LiDAR device.
    - Confirm first launch, portrait lock, loading screen, camera permission, location permission, local network prompt, and Bluetooth permission.
    - Record at least one indoor and one outdoor session.
-   - Verify `/mapping/pose`, `/mapping/camera/image/compressed`, `/mapping/camera/camera_info`, `/mapping/pointcloud`, `/mapping/gps/fix`, `/mapping/gps/metadata`, `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info`, and `/mapping/dem/tile` in rosbag2.
+   - Verify `/mapping/pose`, `/mapping/camera/image/compressed`, `/mapping/camera/camera_info`, `/mapping/pointcloud/lidar`, `/mapping/pointcloud/depth_anything`, `/mapping/depth_anything/calibration`, `/mapping/gps/fix`, `/mapping/gps/metadata`, `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info`, and `/mapping/dem/tile` in rosbag2.
    - Replay the bag in RViz using `ros2/rviz/mapeverything.rviz`.
 
 4. Archive.

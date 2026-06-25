@@ -9,7 +9,6 @@ import CoreMotion
 import CoreImage
 import CoreLocation
 import Combine
-import RoomPlan
 import UIKit
 
 struct LocalSampleBufferStats: Equatable {
@@ -731,9 +730,129 @@ class ROS2BridgeClient: ObservableObject {
         send(op: "publish", topic: topicRegistry.topic(.cameraInfo), msg: cameraInfo)
     }
     
+    func publishLiDARPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
+        publishPointCloud(points, topicID: .lidarPointCloud, frameID: FrameID.map, timestamp: timestamp)
+    }
+
+    func publishDepthAnythingPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
+        publishPointCloud(points, topicID: .depthAnythingPointCloud, frameID: FrameID.iphoneCamera, timestamp: timestamp)
+    }
+
+    func publishDepthAnythingCalibration(
+        _ calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
+        relativeDepthSize: CGSize,
+        imageResolution: CGSize,
+        timestamp: TimeInterval
+    ) {
+        guard topicRegistry.isStreamEnabled(.pointCloud) else { return }
+
+        let topic = topicRegistry.topic(.depthAnythingCalibration)
+        let msg = Self.makeDepthAnythingCalibrationMessage(
+            calibration: calibration,
+            header: createHeader(frameId: FrameID.iphoneCamera, timestamp: timestamp),
+            relativeDepthSize: relativeDepthSize,
+            imageResolution: imageResolution,
+            relativePointCloudTopic: topicRegistry.topic(.depthAnythingPointCloud),
+            frameID: FrameID.iphoneCamera
+        )
+        let encodedBytes = encodedPublishPayloadByteCount(topic: topic, msg: msg) ?? 0
+        recordStreamPayloadMetric(
+            stream: .pointCloud,
+            originalBytes: MemoryLayout<Float>.stride * 2,
+            encodedBytes: encodedBytes,
+            compression: "depthanything_calibration_json"
+        )
+
+        publishOrBufferLocalSample(
+            kind: .pointCloud,
+            topic: topic,
+            msg: msg
+        )
+    }
+
     func publishPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
+        publishDepthAnythingPointCloud(points, timestamp: timestamp)
+    }
+
+    private func publishPointCloud(
+        _ points: [ColoredPoint],
+        topicID: ROS2TopicID,
+        frameID: String,
+        timestamp: TimeInterval
+    ) {
         guard topicRegistry.isStreamEnabled(.pointCloud), !points.isEmpty else { return }
-        
+
+        let topic = topicRegistry.topic(topicID)
+        let msg = Self.makeColoredPointCloudMessage(
+            points: points,
+            header: createHeader(frameId: frameID, timestamp: timestamp)
+        )
+        let dataCount = points.count * 16
+        let encodedPointData = msg["data"] as? String ?? ""
+        recordStreamPayloadMetric(
+            stream: .pointCloud,
+            originalBytes: dataCount,
+            encodedBytes: encodedPointData.utf8.count,
+            compression: "pointcloud2_binary_base64"
+        )
+
+        publishOrBufferLocalSample(
+            kind: .pointCloud,
+            topic: topic,
+            msg: msg
+        )
+    }
+
+    static func makeDepthAnythingCalibrationMessage(
+        calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
+        header: [String: Any],
+        relativeDepthSize: CGSize,
+        imageResolution: CGSize,
+        relativePointCloudTopic: String,
+        frameID: String
+    ) -> [String: Any] {
+        let metadata: [String: Any] = [
+            "relative_pointcloud_coordinate_frame": "camera",
+            "relative_pointcloud_semantics": "x_y_z_are_camera_ray_coordinates_scaled_by_raw_depthanything_relative_depth",
+            "metric_reconstruction": "metric_depth_m = scale * relative_depth + offset; recompute camera ray coordinates with the same intrinsics before transforming to map",
+            "uses_lidar_for_scale_calibration": true,
+            "overlay_mesh_uses_calibrated_depth": true
+        ]
+
+        let metadataJSON: String
+        if JSONSerialization.isValidJSONObject(metadata),
+           let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]),
+           let string = String(data: data, encoding: .utf8) {
+            metadataJSON = string
+        } else {
+            metadataJSON = "{}"
+        }
+
+        return [
+            "header": header,
+            "schema_version": 1,
+            "source": "depth_anything_v2_lidar_calibrated",
+            "relative_pointcloud_topic": relativePointCloudTopic,
+            "overlay_mesh_source": "calibrated_depthanything_grid",
+            "frame_id": frameID,
+            "relative_depth_width": max(0, Int(relativeDepthSize.width.rounded())),
+            "relative_depth_height": max(0, Int(relativeDepthSize.height.rounded())),
+            "image_width": max(0, Int(imageResolution.width.rounded())),
+            "image_height": max(0, Int(imageResolution.height.rounded())),
+            "scale": Double(calibration.scale),
+            "offset": Double(calibration.offset),
+            "equation": "metric_depth_m = scale * relative_depth + offset",
+            "relative_depth_units": "depthanything_relative",
+            "metric_depth_units": "m",
+            "calibration_source": "arkit_lidar_maximum_likelihood",
+            "metadata_json": metadataJSON
+        ]
+    }
+
+    static func makeColoredPointCloudMessage(
+        points: [ColoredPoint],
+        header: [String: Any]
+    ) -> [String: Any] {
         // Pack points and colors into a tight Base64 byte array for PointCloud2
         let pointStep = 16
         let dataCount = points.count * pointStep
@@ -752,16 +871,8 @@ class ROS2BridgeClient: ObservableObject {
             }
         }
         
-        let encodedPointData = data.base64EncodedString()
-        recordStreamPayloadMetric(
-            stream: .pointCloud,
-            originalBytes: dataCount,
-            encodedBytes: encodedPointData.utf8.count,
-            compression: "pointcloud2_binary_base64"
-        )
-
-        let msg: [String: Any] = [
-            "header": createHeader(frameId: "map", timestamp: timestamp),
+        return [
+            "header": header,
             "height": 1,
             "width": points.count,
             "fields": [
@@ -773,14 +884,9 @@ class ROS2BridgeClient: ObservableObject {
             "is_bigendian": false,
             "point_step": pointStep,
             "row_step": points.count * pointStep,
-            "data": encodedPointData,
+            "data": data.base64EncodedString(),
             "is_dense": true
         ]
-        publishOrBufferLocalSample(
-            kind: .pointCloud,
-            topic: topicRegistry.topic(.pointCloud),
-            msg: msg
-        )
     }
 
     static func makeSurfelPointCloudMessage(
@@ -840,7 +946,7 @@ class ROS2BridgeClient: ObservableObject {
 
     func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
         // Surfels remain an internal reconstruction/export format. ROS output
-        // uses /mapping/pointcloud from Depth Anything fused depth.
+        // uses source-specific /mapping/pointcloud/... PointCloud2 topics.
     }
     
     func publishMap(meshAnchors: [ARMeshAnchor], timestamp: TimeInterval) {
@@ -879,41 +985,37 @@ class ROS2BridgeClient: ObservableObject {
             markers.append(marker)
         }
 
-        guard !markers.isEmpty else { return }
-
         let topic = topicRegistry.topic(.meshMarkers)
-        let fittedMarkers = fitMeshMarkersToPayloadLimit(
-            markers,
-            topic: topic,
-            maxPayloadBytes: meshSnapshotConfiguration.maxPayloadBytes
-        )
-        guard !fittedMarkers.isEmpty else { return }
-
-        let markerMessage: [String: Any] = ["markers": fittedMarkers]
-        if let encodedBytes = encodedPublishPayloadByteCount(topic: topic, msg: markerMessage) {
-            recordStreamPayloadMetric(
-                stream: .mesh,
-                originalBytes: trianglePointsIncluded * 3 * MemoryLayout<Float>.size,
-                encodedBytes: encodedBytes,
-                compression: "visualization_marker_array_json"
+        if !markers.isEmpty {
+            let fittedMarkers = fitMeshMarkersToPayloadLimit(
+                markers,
+                topic: topic,
+                maxPayloadBytes: meshSnapshotConfiguration.maxPayloadBytes
             )
+            if !fittedMarkers.isEmpty {
+                let markerMessage: [String: Any] = ["markers": fittedMarkers]
+                if let encodedBytes = encodedPublishPayloadByteCount(topic: topic, msg: markerMessage) {
+                    recordStreamPayloadMetric(
+                        stream: .mesh,
+                        originalBytes: trianglePointsIncluded * 3 * MemoryLayout<Float>.size,
+                        encodedBytes: encodedBytes,
+                        compression: "visualization_marker_array_json"
+                    )
+                }
+                publishOrBufferLocalSample(kind: .mesh, topic: topic, msg: markerMessage)
+            }
         }
-        publishOrBufferLocalSample(kind: .mesh, topic: topic, msg: markerMessage)
 
         let snapshotTopic = topicRegistry.topic(.meshSnapshot)
-        let snapshotPoints = fittedMarkers.flatMap { marker in
-            marker["points"] as? [[String: Float]] ?? []
-        }
-        let snapshotMessage = MeshSnapshotMessageBuilder.makeTriangleListMessage(
+        let snapshotMessage = MeshSnapshotMessageBuilder.makeSafeMeshMessage(
             header: createHeader(frameId: FrameID.map, timestamp: timestamp),
             snapshotID: UUID().uuidString,
             source: "arkit_mesh",
             frameID: FrameID.map,
-            anchorCount: safeMeshes.count,
-            trianglePoints: snapshotPoints,
-            originalTrianglePointCount: trianglePointsIncluded,
+            safeMeshes: safeMeshes,
+            maxTrianglePoints: meshSnapshotConfiguration.maxTrianglePoints,
             maxPayloadBytes: meshSnapshotConfiguration.maxPayloadBytes,
-            compression: "none",
+            compression: "mesh_snapshot_binary_base64",
             metadata: [
                 "fallback_marker_topic": topic,
                 "max_payload_bytes": meshSnapshotConfiguration.maxPayloadBytes,
@@ -921,6 +1023,7 @@ class ROS2BridgeClient: ObservableObject {
             ],
             topic: snapshotTopic
         )
+        guard (snapshotMessage["triangle_count"] as? Int ?? 0) > 0 else { return }
         let originalSnapshotBytes = snapshotMessage["original_payload_bytes"] as? Int ?? 0
         let publishedSnapshotBytes = snapshotMessage["published_payload_bytes"] as? Int
             ?? encodedPublishPayloadByteCount(topic: snapshotTopic, msg: snapshotMessage)
@@ -929,7 +1032,7 @@ class ROS2BridgeClient: ObservableObject {
             stream: .mesh,
             originalBytes: originalSnapshotBytes,
             encodedBytes: publishedSnapshotBytes,
-            compression: "mesh_snapshot_json"
+            compression: "mesh_snapshot_binary_base64"
         )
         publishOrBufferLocalSample(kind: .mesh, topic: snapshotTopic, msg: snapshotMessage)
     }
@@ -1078,50 +1181,6 @@ class ROS2BridgeClient: ObservableObject {
             encodedBytes: encodedBytes,
             compression: compression
         )
-    }
-
-    func publishRoomPlan(_ room: CapturedRoom, timestamp: TimeInterval) {
-        guard topicRegistry.isStreamEnabled(.mesh) else { return }
-
-        var markers: [[String: Any]] = []
-        var markerId = 0
-        
-        func addMarkers(for dimensions: [simd_float3], transforms: [simd_float4x4], r: Float, g: Float, b: Float, a: Float, ns: String) {
-            for i in 0..<dimensions.count {
-                let pos = transforms[i].columns.3
-                let quat = simd_quatf(transforms[i])
-                
-                let marker: [String: Any] = [
-                    "header": createHeader(frameId: "map", timestamp: timestamp),
-                    "ns": ns,
-                    "id": markerId,
-                    "type": 1, // 1 = CUBE
-                    "action": 0, // ADD
-                    "pose": [
-                        "position": ["x": pos.x, "y": pos.y, "z": pos.z],
-                        "orientation": ["x": quat.vector.x, "y": quat.vector.y, "z": quat.vector.z, "w": quat.vector.w]
-                    ],
-                    "scale": ["x": dimensions[i].x, "y": dimensions[i].y, "z": dimensions[i].z],
-                    "color": ["r": r, "g": g, "b": b, "a": a]
-                ]
-                markers.append(marker)
-                markerId += 1
-            }
-        }
-        
-        addMarkers(for: room.walls.map { $0.dimensions }, transforms: room.walls.map { $0.transform }, r: 0.1, g: 0.3, b: 0.8, a: 0.6, ns: "walls")
-        addMarkers(for: room.objects.map { $0.dimensions }, transforms: room.objects.map { $0.transform }, r: 0.8, g: 0.8, b: 0.8, a: 0.5, ns: "objects")
-        addMarkers(for: room.doors.map { $0.dimensions }, transforms: room.doors.map { $0.transform }, r: 1.0, g: 1.0, b: 1.0, a: 0.3, ns: "doors")
-        addMarkers(for: room.windows.map { $0.dimensions }, transforms: room.windows.map { $0.transform }, r: 0.5, g: 0.8, b: 1.0, a: 0.4, ns: "windows")
-        
-        if !markers.isEmpty {
-            let msg: [String: Any] = ["markers": markers]
-            publishOrBufferLocalSample(
-                kind: .mesh,
-                topic: topicRegistry.topic(.meshMarkers),
-                msg: msg
-            )
-        }
     }
 
     func publishSatelliteTile(_ tile: GeoTilePayload, timestamp: TimeInterval) {
@@ -1357,7 +1416,6 @@ class ROS2BridgeClient: ObservableObject {
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
         let localBagRecorder = LocalROS2BagRecorder.shared
-        let adaptiveMappingController = AdaptiveMappingModeController.shared
         let optionalGeoProviderConfigurations = GeoTileProviderConfigurationStore.load()
         let advertisedTopics = topicRegistry.advertisedTopics().map { definition in
             [
@@ -1395,7 +1453,6 @@ class ROS2BridgeClient: ObservableObject {
             "mesh_snapshot_schema": rosJSONString(MeshSnapshotMessageSchema.shared.rosMessage),
             "stream_payload_metrics": rosJSONString(streamPayloadMetrics.rosMessage),
             "optional_geo_provider_configurations": rosJSONString(optionalGeoProviderConfigurations.map(\.rosMessage), fallback: "[]"),
-            "adaptive_mapping": rosJSONString(adaptiveMappingController.sessionMetadata),
             "current_wifi_telemetry": rosJSONString(currentWiFiTelemetryManager.sessionMetadata),
             "ble_beacon_telemetry": rosJSONString(bleBeaconTelemetryManager.sessionMetadata),
             "network_path_diagnostics": rosJSONString(networkPathDiagnosticsManager.sessionMetadata),
@@ -1439,7 +1496,6 @@ class ROS2BridgeClient: ObservableObject {
         let networkPathDiagnosticsManager = NetworkPathDiagnosticsManager.shared
         let recorderEndpointProbeManager = RecorderEndpointProbeManager.shared
         let localBagRecorder = LocalROS2BagRecorder.shared
-        let adaptiveMappingController = AdaptiveMappingModeController.shared
         let optionalGeoProviderDiagnosticValues = GeoTileProviderConfigurationStore.diagnosticValues
         let payloadMetricSnapshots = streamPayloadMetrics.allSnapshots()
         let enabledStreams = MappingSensorStream.allCases
@@ -1507,12 +1563,6 @@ class ROS2BridgeClient: ObservableObject {
                     level: 0,
                     message: payloadMetricSnapshots.isEmpty ? "No payload metrics published yet" : "Stream payload metrics nominal",
                     values: streamPayloadDiagnosticValues(payloadMetricSnapshots)
-                ),
-                diagnosticStatus(
-                    name: "mapping/adaptive_mapping",
-                    level: adaptiveMappingController.diagnosticLevel,
-                    message: adaptiveMappingController.diagnosticMessage,
-                    values: adaptiveMappingController.diagnosticValues
                 ),
                 diagnosticStatus(
                     name: "mapping/geotiles",

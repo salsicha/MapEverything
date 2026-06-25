@@ -4,7 +4,7 @@
 
 MapEverything is a robotics mapping payload for iPhone and iPad Pro hardware. The app acts as a mobile sensor node that captures local geometry, geospatial context, radio observations, and device pose, then publishes synchronized ROS2 messages to a workstation or robot for rosbag recording, map fusion, and downstream autonomy workflows.
 
-The app should prioritize reliable field mapping over consumer design features. A successful default session produces a time-synchronized ROS2 bag containing ARKit-derived pose, low-rate camera frames with intrinsics, GPS fixes, Depth Anything fused point clouds, satellite imagery tiles, and DEM/elevation tiles, with mesh, radio, diagnostics, and session metadata available as opt-in profiles.
+The app should prioritize reliable field mapping over consumer design features. A successful default session produces a time-synchronized ROS2 bag containing ARKit-derived pose, low-rate camera frames with intrinsics, GPS fixes, LiDAR point clouds, relative Depth Anything point clouds with overlay calibration, satellite imagery tiles, and DEM/elevation tiles, with mesh, radio, diagnostics, and session metadata available as opt-in profiles.
 
 MapEverything has one operator mode: record. Starting a session publishes the configured robotics topic set over ROS2; stopping a session stops publication. Stream selection, topic filtering, and data retention belong on the recorder-side ROS2/rosbag setup, not in per-stream app toggles. The iPhone is not treated as the session recorder of record by default, aside from transient retry buffers and provider caches needed to publish reliably; an explicit off-by-default local SQLite bag option can mirror outgoing rosbridge payloads into chunked on-device fallback files.
 
@@ -38,7 +38,9 @@ This differs from room-scanning apps because the primary output is not a floorpl
 
 ### LiDAR, Point Cloud, and Mesh
 
-- Publish downsampled Depth Anything + LiDAR fused `sensor_msgs/PointCloud2` by default.
+- Publish downsampled LiDAR and relative Depth Anything `sensor_msgs/PointCloud2` streams as separate topics by default.
+- Publish the Depth Anything scale/offset calibration used by the live overlay mesh so recorder-side consumers can reconstruct metric depth from the relative point cloud.
+- Build the live solid mesh overlay from the calibrated Depth Anything depth grid rather than fusing LiDAR and Depth Anything points.
 - Keep colored surfel reconstruction as an internal/export path rather than a ROS topic.
 - Publish reconstructed AR mesh as either:
   - `visualization_msgs/MarkerArray` for RViz compatibility.
@@ -138,12 +140,14 @@ Recommended output:
 | `/mapping/imu` | `sensor_msgs/msg/Imu` | opt-in | Device IMU. |
 | `/mapping/gps/fix` | `sensor_msgs/msg/NavSatFix` | 1-10 Hz | GPS position and accuracy. |
 | `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | Camera frames for context, replay, and loop closure without saturating the iPhone. |
-| `/mapping/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~2 Hz | Downsampled Depth Anything + LiDAR fused point cloud. |
+| `/mapping/pointcloud/lidar` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Downsampled ARKit LiDAR-only colored point cloud. |
+| `/mapping/pointcloud/depth_anything` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Downsampled relative Depth Anything colored point cloud in `iphone_camera`. |
+| `/mapping/depth_anything/calibration` | `reconstructor_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Scale/offset calibration used by the live overlay mesh. |
 | `/mapping/map` | `visualization_msgs/msg/MarkerArray` | 0.2-2 Hz | RViz-friendly mesh and semantic objects. |
 | `/mapping/radio` | `reconstructor_msgs/msg/RadioObservation` | 0.5-5 Hz | Wi-Fi, BLE, link, or external radio measurements. |
-| `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Satellite imagery tile payloads. |
-| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery georeference metadata and device pixel coordinates. |
-| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM/elevation raster payloads and device pixel coordinates. |
+| `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | 1/min | Satellite imagery tile payloads. |
+| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | 1/min | Satellite imagery georeference metadata and device pixel coordinates. |
+| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | 1/min | DEM/elevation raster payloads and device pixel coordinates. |
 | `/mapping/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, sensor, permission, bridge, and recorder health. |
 | `/mapping/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session metadata and configuration. |
 
@@ -160,18 +164,18 @@ Initial messages:
 - `RadioObservation.msg`
 - `GeoTileInfo.msg`
 - `GeoRasterTile.msg`
+- `DepthAnythingCalibration.msg`
 - `IndoorLocalization.msg`
 - `MeshSnapshot.msg`
 - `PublisherStats.msg`
 
 `RadioObservation.msg` is schema version 1 and uses `std_msgs/Header` plus optional `geometry_msgs/Point` map position fields. The stable fields include session ID, channel ID, observation kind, source API, source ID, radio type, optional geodetic position, Wi-Fi SSID/BSSID/normalized signal strength, BLE peripheral/service/RSSI fields, Network.framework path fields, recorder probe RTT/throughput fields, external-adapter frequency/RSSI/SNR/quality fields, success/error, and `metadata_json` for channel-specific payloads. Unset numeric fields use `0.0` for rosbridge JSON compatibility; unset strings and arrays are empty.
 
-The recorder device must build this package before recording custom topics with `rosbag2`. The starter RViz configuration is `ros2/rviz/mapeverything.rviz`; it covers native pose, GPS, Depth Anything point-cloud, camera, and satellite image displays, with disabled placeholder layers for optional radio, DEM, mesh, and converter outputs.
+The recorder device must build this package before recording custom topics with `rosbag2`. The starter RViz configuration is `ros2/rviz/mapeverything.rviz`; it covers native pose, GPS, LiDAR and Depth Anything point-clouds, camera, and satellite image displays, with disabled placeholder layers for optional radio, DEM, mesh, and converter outputs.
 
 Colored surface reconstruction remains an on-device/export format. ROS output uses
-the standard `/mapping/pointcloud` `PointCloud2` topic with `x`, `y`, `z`,
-and packed `rgb` fields generated from the Depth Anything + LiDAR fused depth
-path.
+standard `/mapping/pointcloud/lidar` and `/mapping/pointcloud/depth_anything`
+`PointCloud2` topics with `x`, `y`, `z`, and packed `rgb` fields.
 
 ## iOS Architecture Plan
 
@@ -254,5 +258,4 @@ path.
 
 - Whether to add an offline packaged map product for field deployments, separate from the default online provider registry.
 - Whether to support custom ROS messages only, or also standard-message fallbacks for every stream.
-- Whether to keep RoomPlan as an optional semantic layer or remove it from the default robotics workflow.
-- Whether to rename the app before implementing the robotics UI.
+- Whether to add a native binary bridge after rosbridge throughput limits are measured.

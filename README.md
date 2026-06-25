@@ -5,13 +5,13 @@
 ![ARKit](https://img.shields.io/badge/ARKit-LiDAR-black.svg?style=for-the-badge&logo=arkit)
 ![ROS2](https://img.shields.io/badge/ROS2-Humble%2FIron-green.svg?style=for-the-badge&logo=ros)
 
-**MapEverything** is a robotics-first mapping payload for iOS. It turns a LiDAR-equipped iPhone or iPad Pro into a lightweight ROS2 sensor node that publishes device pose, low-rate camera frames, GPS, Depth Anything fused point clouds, satellite imagery, and DEM/elevation tiles for recording on another ROS2 device.
+**MapEverything** is a robotics-first mapping payload for iOS. It turns a LiDAR-equipped iPhone or iPad Pro into a lightweight ROS2 sensor node that publishes device pose, low-rate camera frames, GPS, LiDAR point clouds, relative Depth Anything point clouds with overlay calibration, satellite imagery, and DEM/elevation tiles for recording on another ROS2 device.
 
-The default record profile publishes camera frames at a conservative 2 Hz and publishes a downsampled Depth Anything fused point cloud instead of surfel maps so the iPhone can spend its budget on AR tracking, dense depth inference, GPS/geotile context, and reliable WebSocket publishing. Mesh, IMU, radio, and diagnostic topics remain implemented for opt-in debug or field profiles.
+The default record profile publishes camera frames at a conservative 2 Hz and publishes downsampled LiDAR clouds, relative Depth Anything clouds, and Depth Anything calibration instead of surfel maps so the iPhone can spend its budget on AR tracking, dense depth inference, GPS/geotile context, and reliable WebSocket publishing. Mesh, IMU, radio, and diagnostic topics remain implemented for opt-in debug or field profiles.
 
 MapEverything is intentionally a single record-mode publisher by default. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. An off-by-default local SQLite bag option can mirror published topics into chunked rosbag2-style files on device for field fallback or later conversion.
 
-The mapping architecture separates capture engines from mode selection. An adaptive policy prefers RoomPlan for enclosed interiors and switches to outdoor LiDAR + Depth Anything mapping with GPS, satellite, and DEM context when room semantics are not reliable.
+The mapping architecture now uses one surface reconstruction path: ARKit pose tracking plus Depth Anything dense depth, with LiDAR kept as a separate point-cloud stream and calibration source. GPS, satellite imagery, and DEM context run alongside the same pipeline indoors or outdoors.
 
 See [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md) for the implementation concept and [TODO.md](TODO.md) for the phased task list.
 
@@ -27,17 +27,10 @@ See [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md) for the
      Mapping Session Manager      SwiftData persistence
              |                           |
              v                           v
-  Adaptive Mapping Policy         MappingSessionModel
-                                  SensorStreamModel
-             |                    GeoTileModel
-    +--------+--------+
-    |                 |
-    v                 v
-RoomPlan        LiDAR + Depth Anything
-indoor          outdoor / open-area
-parametrics     dense geometry
-    |                 |
-    +--------+--------+
+ Depth Anything Surface Pipeline  MappingSessionModel
+             |                    SensorStreamModel
+             v                    GeoTileModel
+ ARKit pose + LiDAR calibration + camera color
              |
              v
  GPS / ENU georeference + satellite imagery + DEM tiles
@@ -49,12 +42,11 @@ parametrics     dense geometry
  optional local SQLite bag chunks
 ```
 
-### 1. Mapping Engines and Mode Routing
-* **LiDAR + Depth Anything Mapping:** Projects the camera's YCbCr frames onto metric 3D depth coordinates derived from ARKit LiDAR and Depth Anything dense relative depth. Points are buffered in a custom `PointCloudManager` actor off the main thread, downsampled using **Voxel Grid filters**, and cleared of noise using a spatial **Radius Outlier Removal (ROR)** algorithm.
+### 1. Surface Mapping Pipeline
+* **Depth Anything Surface Mapping:** Projects the camera's YCbCr frames onto metric 3D depth coordinates derived from Depth Anything dense relative depth with LiDAR used for scale calibration, not per-point fusion. The live solid mesh overlay is built from the calibrated Depth Anything depth grid, while ROS receives a LiDAR point cloud, a relative Depth Anything point cloud, and the calibration used by the overlay mesh as separate topics.
 * **Colored Surfel Reconstruction:** Fuses repeated RGB-D samples into a bounded voxel-hashed surfel map with weighted color, position, view-facing normals, radius, confidence, and observation counts. This provides a fuller colored surface reconstruction on device without the training cost of Gaussian splatting.
-* **Parametric RoomPlan Mapping:** Uses Apple's local Core ML scene understanding to isolate indoor surfaces (walls, windows, doors) and objects (tables, sofas, chairs), then publishes clean parametric bounding boxes alongside regular pose and sensor streams.
-* **Adaptive Mapping Policy:** Scores RoomPlan suitability, outdoor GPS context, LiDAR confidence, Depth Anything availability, thermal pressure, and operator override state. It prefers RoomPlan inside enclosed rooms and switches to LiDAR + Depth Anything outdoors or in spaces where room semantics are weak.
-* **Geospatial Context:** GPS, heading, ENU frame registration, satellite imagery, and DEM/elevation tiles run alongside either mapping engine so outdoor datasets carry terrain and map context rather than only local AR geometry.
+* **Single Record Mode:** Recording always follows the same surface pipeline so ROS topics, local bags, and replay metadata stay predictable across indoor and outdoor sessions.
+* **Geospatial Context:** GPS, heading, ENU frame registration, satellite imagery, and DEM/elevation tiles run alongside the surface pipeline so outdoor datasets carry terrain and map context rather than only local AR geometry.
 
 ### 2. ROS and Local Bag Recording
 MapEverything treats the external ROS2 recorder as the authoritative dataset sink. The iPhone publishes synchronized pose, camera, point cloud, GPS, geotile, DEM, radio, and diagnostics topics through rosbridge, while an optional on-device fallback mirrors those same rosbridge JSON payloads into chunked rosbag2-style SQLite files.
@@ -81,7 +73,7 @@ Local bag storage is off by default and controlled from the main recording surfa
 
 ### How to Record a Mapping Session
 1. Wait for the startup overlay to show **Ready** or **Ready Without Depth Model**.
-2. Tap **Start Mapping**. ARKit begins tracking, Depth Anything/LiDAR fusion starts, and enabled ROS/local bag streams begin publishing.
+2. Tap **Start Mapping**. ARKit begins tracking, Depth Anything inference starts, and enabled ROS/local bag streams begin publishing.
 3. Walk slowly and steadily.
    * *Move Slower Warnings:* If tracking is degraded by quick sweeps, a warning hum will trigger via the haptic motor and display a caution banner.
    * *Thermal State Throttling:* MapEverything monitors CPU temperature. If the device starts heating up, the frame-processing interval is automatically scaled down to avoid thermal crashes.
@@ -91,14 +83,14 @@ Local bag storage is off by default and controlled from the main recording surfa
 
 ---
 
-### Adaptive RoomPlan and Outdoor Mapping
-The adaptive mapping policy can select RoomPlan for enclosed interiors when room semantics are strong, or the LiDAR + Depth Anything path for outdoor and open-area mapping. The chosen mode, confidence, and reasons are published in `/mapping/session` and `/mapping/status` so the recorder can explain which capture path produced the data.
+### Depth Anything Surface Mapping
+MapEverything uses a single mapping engine for record mode. ARKit provides camera pose, Depth Anything provides dense relative depth for the live surface mesh, LiDAR calibrates that depth for visualization and remains available as its own sparse point-cloud topic, and GPS/geotile context is published when available.
 
 ---
 
 ## 🛰️ ROS 2 Bridge Integration Guide
 
-MapEverything acts as a robust WebSocket-based edge sensor node. It connects directly to standard `rosbridge_suite` networks and, by default, streams pose, low-rate camera imagery with intrinsics, GPS, Depth Anything fused point clouds, satellite tile payloads, satellite tile georeferencing, and DEM raster tiles into your ROS2 workspace.
+MapEverything acts as a robust WebSocket-based edge sensor node. It connects directly to standard `rosbridge_suite` networks and, by default, streams pose, low-rate camera imagery with intrinsics, GPS, LiDAR point clouds, relative Depth Anything point clouds with calibration, satellite tile payloads, satellite tile georeferencing, and DEM raster tiles into your ROS2 workspace.
 
 The current ROS topic namespace is `/mapping`.
 
@@ -106,7 +98,7 @@ Transport decision: MapEverything continues to use `rosbridge_suite` over WebSoc
 
 The companion ROS2 custom message package lives in [ros2/reconstructor_msgs](ros2/reconstructor_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
 
-Local SQLite bag storage is controlled by the **Save Local** button and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The **Share Local Bags** button opens a browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
+Local SQLite bag storage is controlled by the **Save Local** button and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The **Share Local Bags** button opens a browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. The browser caches per-session preview metadata and camera thumbnails in hidden sidecar files so repeated scans of saved bags stay quick. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
 
 Use [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) to convert shared local chunks into a native ROS2 bag. Run it from a sourced ROS2 workspace that can import `rosbag2_py`, `rclpy`, and `reconstructor_msgs`:
 
@@ -147,20 +139,22 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/mapping/imu` | `sensor_msgs/msg/Imu` | opt-in | High-fidelity IMU data containing orientation quaternions, angular velocities, and linear accelerations (including gravity). |
 | `/mapping/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
 | `/mapping/gps/metadata` | `reconstructor_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
-| `/mapping/pointcloud` | `sensor_msgs/msg/PointCloud2` | ~2 Hz | Depth Anything + LiDAR fused point-cloud payloads downsampled to a sparse 10cm grid. |
+| `/mapping/pointcloud/lidar` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | ARKit LiDAR-only colored point-cloud payloads downsampled to a sparse 10cm grid. |
+| `/mapping/pointcloud/depth_anything` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Relative Depth Anything colored point-cloud payloads in `iphone_camera`, downsampled to a sparse grid. Coordinates are not metric. |
+| `/mapping/depth_anything/calibration` | `reconstructor_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Scale/offset calibration used by the live overlay mesh: `metric_depth_m = scale * relative_depth + offset`. |
 | `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | JPEG-compressed native ARKit camera image stream for visual loop closure and recorder context. |
 | `/mapping/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | 2 Hz | Same-timestamp camera intrinsics for the compressed image stream. |
-| `/mapping/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits active reconstructed LiDAR triangular meshes (`TRIANGLE_LIST`) and parametric RoomPlan bounding boxes (`CUBE`) for instant Rviz2 display. |
-| `/mapping/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with truncation and payload-size metadata. |
+| `/mapping/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits reconstructed triangular mesh markers (`TRIANGLE_LIST`) for instant Rviz2 display when mesh publishing is enabled. |
+| `/mapping/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with base64 packed little-endian vertex/index bytes plus truncation and payload-size metadata. |
 | `/mapping/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
 | `/mapping/indoor_localization` | `reconstructor_msgs/msg/IndoorLocalization` | ~1 Hz | Indoor-aware Core Location sample with floor, heading, and registration quality metadata. |
-| `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | on fetch | Compressed satellite imagery tile payload. |
-| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | on fetch | Satellite imagery provider, bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the tile. |
-| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | on fetch | DEM raster payload with bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the raster tile. |
+| `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | 1/min | Compressed satellite imagery tile payload. |
+| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | 1/min | Satellite imagery provider, bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the tile. |
+| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | 1/min | DEM raster payload with bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the raster tile. |
 | `/mapping/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, recorder configuration, and local bag status. |
 | `/mapping/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
 
-The default advertised topic set is `/mapping/pose`, `/mapping/camera/image/compressed`, `/mapping/camera/camera_info`, `/mapping/pointcloud`, `/mapping/gps/fix`, `/mapping/gps/metadata`, `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info`, and `/mapping/dem/tile`. Optional odometry, TF, mesh, IMU, radio, session, and diagnostics streams can still be re-enabled in custom profiles.
+The default advertised topic set is `/mapping/pose`, `/mapping/camera/image/compressed`, `/mapping/camera/camera_info`, `/mapping/pointcloud/lidar`, `/mapping/pointcloud/depth_anything`, `/mapping/depth_anything/calibration`, `/mapping/gps/fix`, `/mapping/gps/metadata`, `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info`, and `/mapping/dem/tile`. Optional odometry, TF, mesh, IMU, radio, session, and diagnostics streams can still be re-enabled in custom profiles.
 
 For loop-closure consumers such as ArrayDataEngine, MapEverything publishes intrinsic values on `/mapping/camera/camera_info`: image `width`/`height`, focal lengths `fx`/`fy`, principal point `cx`/`cy`, full `K` and `P` matrices, identity rectification `R`, `plumb_bob` distortion model, and zero distortion coefficients because ARKit frames are treated as rectified pinhole images. Camera JPEG encoding is capped at 2 Hz and skips overlapping encodes to protect AR tracking and Depth Anything inference.
 
@@ -262,10 +256,11 @@ Configure your RViz2 workspace using the settings below:
    - Set **Fixed Frame** to `map`.
 2. **Add the Pose Displays:**
    - Add `/mapping/pose` to observe the live device trajectory in the `map` frame.
-3. **Add the Depth Anything Point Cloud:**
-   - Click **Add**, select **By Topic**, and choose `/mapping/pointcloud` -> **PointCloud2**.
+3. **Add the Point Clouds:**
+   - Click **Add**, select **By Topic**, and choose `/mapping/pointcloud/lidar` -> **PointCloud2**.
+   - Add `/mapping/pointcloud/depth_anything` -> **PointCloud2** as a second display.
    - Change the **Style** to `Points` and set the **Size** to `0.02m`.
-   - Set **Color Transformer** to `RGB8` to render the fused point cloud in realistic, full color.
+   - Set **Color Transformer** to `RGB8` to render both colored point clouds in realistic, full color.
 4. **Add Geospatial Context:**
    - Record `/mapping/gps/fix`, `/mapping/gps/metadata`, `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info`, and `/mapping/dem/tile`.
    - `GeoTileInfo` and `GeoRasterTile` expose `device_pixel_x`, `device_pixel_y`, `tile_width`, `tile_height`, `pixel_origin`, and `pixel_units` so the recorder can place the phone inside each downloaded tile.
@@ -274,15 +269,10 @@ Configure your RViz2 workspace using the settings below:
 
 ## ⚙️ Technical System Architecture
 
-### Mapping Mode Architecture
+### Surface Mapping Architecture
 `MappingSessionManager` owns the record-mode lifecycle, enabled streams, recorder URL, bridge transport, and session metadata. SwiftData persists the active mapping schema through `MapEverythingModelSchema`, including `MappingSessionModel`, `SensorStreamModel`, and `GeoTileModel`.
 
-The adaptive mapping router belongs above the capture engines. It observes RoomPlan availability, AR tracking state, LiDAR depth confidence, Depth Anything health, GPS quality, Core Location indoor metadata, terrain tile coverage, thermal pressure, and operator override state. The router then selects one of two primary capture paths:
-
-* **Indoor parametric path:** RoomPlan can publish semantic walls, openings, and object bounding boxes through optional mesh topics while the default recorder profile keeps pose, camera, GPS, Depth Anything point clouds, satellite imagery, and DEM context active.
-* **Outdoor/open-area path:** ARKit LiDAR, Depth Anything fusion, GPS/ENU registration, satellite imagery, and DEM tiles publish dense point-cloud geometry and geospatial context without depending on RoomPlan's indoor assumptions.
-
-The selected mode, confidence, reason codes, and any operator override are reflected in `/mapping/session` and `/mapping/status` so the remote recorder can explain what it captured.
+The mapping stack has one primary capture path. ARKit world tracking provides the camera pose, Depth Anything generates dense relative depth, LiDAR supplies an independent sparse point cloud and scale calibration for the overlay mesh, and GPS/ENU registration adds geospatial context when available. `/mapping/session` and `/mapping/status` report the fixed mapping engine, enabled streams, recorder configuration, local bag state, geotile state, and diagnostics so remote recorders can explain what was captured.
 
 ### Outlier Filtration Pipeline
 The point cloud goes through three distinct stages of cleanup before publishing or recording:
@@ -312,4 +302,4 @@ mode, and compression ratio when diagnostics/session streams are enabled.
 ---
 
 ## 🤝 Contributing & License
-Contributions, bug reports, and features are welcome! Feel free to open a pull request if you'd like to implement new mesh generation pipelines, support CBOR/binary WebSockets, or expand RoomPlan geometry parsing. This project is licensed under the MIT License.
+Contributions, bug reports, and features are welcome! Feel free to open a pull request if you'd like to implement new mesh generation pipelines, improve Depth Anything calibration, or support CBOR/binary WebSockets. This project is licensed under the MIT License.

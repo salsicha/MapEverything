@@ -12,6 +12,7 @@ set(msg_files
   "msg/RadioObservation.msg"
   "msg/GeoTileInfo.msg"
   "msg/GeoRasterTile.msg"
+  "msg/DepthAnythingCalibration.msg"
   "msg/IndoorLocalization.msg"
   "msg/MeshSnapshot.msg"
   "msg/PublisherStats.msg"

@@ -9,10 +9,12 @@ import Testing
 import Foundation
 import simd
 import CoreGraphics
+import CoreML
 import CoreVideo
 import CoreLocation
 import SwiftData
 import SQLite3
+import UIKit
 @testable import MapEverything
 
 struct MapEverythingTests {
@@ -49,6 +51,47 @@ struct MapEverythingTests {
         let downsampled = processor.voxelGridFilter(points: points, voxelSize: 0.05)
         
         #expect(downsampled.count == 2)
+    }
+
+    @Test("Point cloud processor fuses Depth Anything and LiDAR directly into points")
+    func testPointCloudProcessorDirectFusedDepthPoints() throws {
+        let width = 32
+        let height = 32
+        var relativeData: [Float] = []
+        relativeData.reserveCapacity(width * height)
+
+        for y in 0..<height {
+            for x in 0..<width {
+                relativeData.append(0.5 + Float(x + y) / Float(width + height))
+            }
+        }
+
+        let relativeDepthMap = RelativeDepthMap(width: width, height: height, data: relativeData)
+        let lidarDepthMap = try makeDepthFloat32PixelBuffer(
+            width: width,
+            height: height,
+            values: relativeData.map { 2.0 * $0 + 0.5 }
+        )
+        let cameraImage = try makeYpCbCrPixelBuffer(width: width, height: height, luma: 128, cb: 128, cr: 128)
+
+        var intrinsics = matrix_identity_float3x3
+        intrinsics[0][0] = 24
+        intrinsics[1][1] = 24
+        intrinsics[2][0] = Float(width) / 2
+        intrinsics[2][1] = Float(height) / 2
+
+        let points = PointCloudProcessor().processFusedPointCloud(
+            cameraImage: cameraImage,
+            intrinsics: intrinsics,
+            imageResolution: CGSize(width: width, height: height),
+            transform: matrix_identity_float4x4,
+            relativeDepthMap: relativeDepthMap,
+            lidarDepthMap: lidarDepthMap
+        )
+
+        #expect(points.count == 36)
+        #expect(points.allSatisfy { $0.position.z < -1.4 && $0.position.z > -3.5 })
+        #expect(points.allSatisfy { $0.color == SIMD3<UInt8>(128, 128, 128) })
     }
 
     @Test("Colored surfel map fuses repeated RGB-D samples")
@@ -211,6 +254,12 @@ struct MapEverythingTests {
         // Verify all values are finite
         let allFinite = map.data.allSatisfy { $0.isFinite }
         #expect(allFinite, "Depth map contains non-finite values")
+
+        let secondDepthMap = processor!.inferRelativeDepth(from: buffer)
+        let secondMap = try #require(secondDepthMap, "reused Vision request returned nil")
+        #expect(secondMap.width == map.width)
+        #expect(secondMap.height == map.height)
+        #expect(secondMap.data.count == map.data.count)
     }
 
     @Test("Affine transform correctly maps relative depth to metric")
@@ -222,6 +271,143 @@ struct MapEverythingTests {
         #expect(map.data[1] == 2.0)
         #expect(map.data[2] == 3.0)
         #expect(map.data[3] == 5.0)
+    }
+
+    @Test("RelativeDepthMap reads native model outputs without eager copies")
+    func testRelativeDepthMapViewsNativeBackings() throws {
+        let array = try MLMultiArray(shape: [2, 2], dataType: .float32)
+        let arrayValues = array.dataPointer.assumingMemoryBound(to: Float32.self)
+        arrayValues[0] = 1
+        arrayValues[1] = 2
+        arrayValues[2] = 3
+        arrayValues[3] = 4
+
+        let arrayMap = try #require(RelativeDepthMap(fromMultiArray: array, size: 2))
+        #expect(arrayMap.value(atX: 1, y: 0) == 2)
+        arrayValues[1] = 22
+        #expect(arrayMap.value(atX: 1, y: 0) == 22)
+
+        let buffer = try makeDepthFloat32PixelBuffer(
+            width: 2,
+            height: 2,
+            values: [5, 6, 7, 8]
+        )
+        let bufferMap = try #require(RelativeDepthMap(fromPixelBuffer: buffer))
+        #expect(bufferMap.value(atX: 0, y: 1) == 7)
+
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: Float32.self) {
+            let floatsPerRow = CVPixelBufferGetBytesPerRow(buffer) / MemoryLayout<Float32>.stride
+            base[floatsPerRow] = 77
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+
+        #expect(bufferMap.value(atX: 0, y: 1) == 77)
+    }
+
+    @Test("Depth Anything calibration fits metric scale from LiDAR")
+    func testDepthAnythingCalibrationUsesLiDARDepthAndConfidence() throws {
+        let width = 32
+        let height = 32
+        var relativeValues: [Float] = []
+        relativeValues.reserveCapacity(width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                relativeValues.append(0.25 + Float(x + y) / Float(width + height))
+            }
+        }
+
+        let relative = RelativeDepthMap(width: width, height: height, data: relativeValues)
+        let lidar = try makeDepthFloat32PixelBuffer(
+            width: width,
+            height: height,
+            values: relativeValues.map { 2.0 * $0 + 0.5 }
+        )
+        let confidence = try makeLiDARConfidencePixelBuffer(
+            width: width,
+            height: height,
+            value: 2
+        )
+
+        let calibration = try #require(DepthAnythingProcessor.maximumLikelihoodCalibration(
+            relative: relative,
+            lidarDepthMap: lidar,
+            lidarConfidenceMap: confidence
+        ))
+
+        #expect(abs(calibration.scale - 2.0) < 0.001)
+        #expect(abs(calibration.offset - 0.5) < 0.001)
+    }
+
+    @Test("Depth Anything calibration cache reuses nearby frames")
+    func testDepthAnythingCalibrationCacheReusesNearbyFrames() throws {
+        let width = 32
+        let height = 32
+        var relativeValues: [Float] = []
+        relativeValues.reserveCapacity(width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                relativeValues.append(0.5 + Float(x + y) / Float(width + height))
+            }
+        }
+
+        let relative = RelativeDepthMap(width: width, height: height, data: relativeValues)
+        let lidar = try makeDepthFloat32PixelBuffer(
+            width: width,
+            height: height,
+            values: relativeValues.map { 2.0 * $0 + 0.5 }
+        )
+        let confidence = try makeLiDARConfidencePixelBuffer(
+            width: width,
+            height: height,
+            value: 2
+        )
+        let cache = DepthAnythingCalibrationCache(
+            maxAge: 1.0,
+            maxTranslationMeters: 0.25,
+            maxRotationRadians: 0.25
+        )
+        let pose = matrix_identity_float4x4
+
+        let first = try #require(cache.calibration(
+            relative: relative,
+            lidarDepthMap: lidar,
+            lidarConfidenceMap: confidence,
+            timestamp: 10.0,
+            cameraTransform: pose
+        ))
+
+        let changedRelative = RelativeDepthMap(
+            width: width,
+            height: height,
+            data: relativeValues.map { $0 * 3.0 }
+        )
+        let changedLidar = try makeDepthFloat32PixelBuffer(
+            width: width,
+            height: height,
+            values: relativeValues.map { 1.2 * $0 + 0.4 }
+        )
+
+        let reused = try #require(cache.calibration(
+            relative: changedRelative,
+            lidarDepthMap: changedLidar,
+            lidarConfidenceMap: confidence,
+            timestamp: 10.5,
+            cameraTransform: pose
+        ))
+        #expect(reused.scale == first.scale)
+        #expect(reused.offset == first.offset)
+
+        var movedPose = pose
+        movedPose.columns.3.x = 1.0
+        let recomputed = try #require(cache.calibration(
+            relative: changedRelative,
+            lidarDepthMap: changedLidar,
+            lidarConfidenceMap: confidence,
+            timestamp: 10.6,
+            cameraTransform: movedPose
+        ))
+        #expect(abs(recomputed.scale - first.scale) > 0.1)
     }
 
     @Test("RadioObservation schema covers every radio telemetry channel")
@@ -305,8 +491,13 @@ struct MapEverythingTests {
         #expect(snapshotTopic.messageType == schema.messageType)
         #expect(advertisedIDs.contains(.meshMarkers))
         #expect(advertisedIDs.contains(.meshSnapshot))
-        #expect(schema.messageDefinition.contains("geometry_msgs/Point[] vertices"))
-        #expect(schema.messageDefinition.contains("uint32[] triangle_indices"))
+        #expect(schema.schemaVersion == 2)
+        #expect(!schema.dependencies.contains("geometry_msgs/msg/Point"))
+        #expect(schema.messageDefinition.contains("uint8[] vertex_data"))
+        #expect(schema.messageDefinition.contains("uint8[] index_data"))
+        #expect(schema.fields.contains { $0.name == "vertex_encoding" && $0.type == "string" })
+        #expect(schema.fields.contains { $0.name == "vertex_data" && $0.type == "uint8[]" })
+        #expect(schema.fields.contains { $0.name == "index_data" && $0.type == "uint8[]" })
         #expect(schema.fields.contains { $0.name == "published_payload_bytes" })
         #expect(JSONSerialization.isValidJSONObject(schema.rosMessage))
         _ = try JSONSerialization.data(withJSONObject: schema.rosMessage, options: [])
@@ -339,8 +530,11 @@ struct MapEverythingTests {
             metadata: ["test": "large_mesh_snapshot"]
         )
 
-        let vertices = try #require(message["vertices"] as? [[String: Double]])
-        let indices = try #require(message["triangle_indices"] as? [Int])
+        let vertexCount = try #require(message["vertex_count"] as? Int)
+        let vertexDataText = try #require(message["vertex_data"] as? String)
+        let indexDataText = try #require(message["index_data"] as? String)
+        let vertexData = try #require(Data(base64Encoded: vertexDataText))
+        let indexData = try #require(Data(base64Encoded: indexDataText))
         let encodedBytes = try #require(
             MeshSnapshotMessageBuilder.encodedPublishPayloadByteCount(
                 topic: MeshSnapshotMessageSchema.shared.topic,
@@ -349,11 +543,75 @@ struct MapEverythingTests {
         )
 
         #expect(message["is_truncated"] as? Bool == true)
-        #expect(vertices.count % 3 == 0)
-        #expect(indices.count == vertices.count)
+        #expect(message["schema_version"] as? Int == 2)
+        #expect(message["compression"] as? String == "mesh_snapshot_binary_base64")
+        #expect(message["vertex_encoding"] as? String == "float32_xyz_le_base64")
+        #expect(message["index_encoding"] as? String == "uint32_le_base64")
+        #expect(message["vertex_stride_bytes"] as? Int == 12)
+        #expect(message["index_stride_bytes"] as? Int == 4)
+        #expect(vertexCount % 3 == 0)
+        #expect(vertexData.count == vertexCount * 12)
+        #expect(indexData.count == vertexCount * 4)
+        #expect(message["vertices"] == nil)
+        #expect(message["triangle_indices"] == nil)
         #expect(message["original_vertex_count"] as? Int == trianglePoints.count)
         #expect((message["published_payload_bytes"] as? Int ?? 0) <= maxPayloadBytes)
         #expect(encodedBytes <= maxPayloadBytes)
+        #expect(JSONSerialization.isValidJSONObject(message))
+        _ = try JSONSerialization.data(withJSONObject: message, options: [])
+    }
+
+    @Test("SafeARMesh snapshots pack indexed binary geometry directly")
+    func testMeshSnapshotBuilderPacksSafeARMeshBytesDirectly() throws {
+        var transform = matrix_identity_float4x4
+        transform.columns.3 = SIMD4<Float>(10, 20, 30, 1)
+        let mesh = SafeARMesh(
+            identifier: UUID(),
+            vertices: [
+                SIMD3<Float>(0, 0, 0),
+                SIMD3<Float>(1, 0, 0),
+                SIMD3<Float>(0, 1, 0),
+                SIMD3<Float>(0, 0, 1)
+            ],
+            indices: [0, 1, 2, 0, 2, 3],
+            transform: transform
+        )
+        let header: [String: Any] = [
+            "stamp": ["sec": 1, "nanosec": 2],
+            "frame_id": "map"
+        ]
+
+        let message = MeshSnapshotMessageBuilder.makeSafeMeshMessage(
+            header: header,
+            snapshotID: "safe-mesh-direct",
+            source: "unit_test",
+            frameID: "map",
+            safeMeshes: [mesh],
+            maxTrianglePoints: 6,
+            maxPayloadBytes: 32_000,
+            metadata: ["test": "safe_mesh_direct"]
+        )
+
+        let vertexDataText = try #require(message["vertex_data"] as? String)
+        let indexDataText = try #require(message["index_data"] as? String)
+        let vertexData = try #require(Data(base64Encoded: vertexDataText))
+        let indexData = try #require(Data(base64Encoded: indexDataText))
+
+        #expect(message["vertex_count"] as? Int == 4)
+        #expect(message["triangle_count"] as? Int == 2)
+        #expect(message["original_vertex_count"] as? Int == 4)
+        #expect(message["original_triangle_count"] as? Int == 2)
+        #expect(message["is_truncated"] as? Bool == false)
+        #expect(message["vertices"] == nil)
+        #expect(message["triangle_indices"] == nil)
+        #expect(vertexData.count == 4 * 12)
+        #expect(indexData.count == 6 * 4)
+        #expect(float32(from: vertexData, at: 0) == 10)
+        #expect(float32(from: vertexData, at: 4) == 20)
+        #expect(float32(from: vertexData, at: 8) == 30)
+        #expect(float32(from: vertexData, at: 12) == 11)
+        let decodedIndices: [UInt32] = (0..<6).map { uint32(from: indexData, at: $0 * 4) }
+        #expect(decodedIndices == [0, 1, 2, 0, 2, 3])
         #expect(JSONSerialization.isValidJSONObject(message))
         _ = try JSONSerialization.data(withJSONObject: message, options: [])
     }
@@ -389,150 +647,6 @@ struct MapEverythingTests {
         #expect(snapshot.maxEncodedBytes == 21_336)
         #expect(snapshot.compressionRatio > 1.0)
         #expect(JSONSerialization.isValidJSONObject(snapshot.rosMessage))
-    }
-
-    @Test("Adaptive mapping policy prefers RoomPlan for strong indoor semantics")
-    func testAdaptiveMappingPolicyPrefersRoomPlanIndoors() {
-        let policy = AdaptiveMappingModePolicy()
-        let recommendation = policy.recommendation(
-            for: AdaptiveMappingModeInput(
-                roomPlanAvailable: true,
-                roomPlanObjectCount: 8,
-                indoorRegistrationQuality: 0.92,
-                globalRegistrationQuality: 0.25,
-                gpsHorizontalAccuracyMeters: 42,
-                lidarDepthConfidence: 0.7,
-                depthAnythingAvailable: true
-            )
-        )
-
-        #expect(recommendation.mode == .roomPlanParametric)
-        #expect(recommendation.roomPlanScore > recommendation.outdoorScore)
-        #expect(recommendation.reasons.contains(.roomPlanSemanticsStrong))
-        #expect(recommendation.reasons.contains(.indoorRegistrationStrong))
-        #expect(recommendation.metadata["active_mapping_mode"] == AdaptiveMappingMode.roomPlanParametric.rawValue)
-    }
-
-    @Test("Adaptive mapping policy prefers LiDAR Depth Anything for outdoor context")
-    func testAdaptiveMappingPolicyPrefersOutdoorDepthAnything() {
-        let policy = AdaptiveMappingModePolicy()
-        let recommendation = policy.recommendation(
-            for: AdaptiveMappingModeInput(
-                roomPlanAvailable: true,
-                roomPlanObjectCount: 0,
-                indoorRegistrationQuality: 0.1,
-                globalRegistrationQuality: 0.94,
-                gpsHorizontalAccuracyMeters: 4,
-                lidarDepthConfidence: 0.88,
-                depthAnythingAvailable: true
-            )
-        )
-
-        #expect(recommendation.mode == .lidarDepthAnythingOutdoor)
-        #expect(recommendation.outdoorScore > recommendation.roomPlanScore)
-        #expect(recommendation.reasons.contains(.outdoorGPSStrong))
-        #expect(recommendation.reasons.contains(.depthAnythingAvailable))
-    }
-
-    @Test("Adaptive mapping policy honors operator override")
-    func testAdaptiveMappingPolicyHonorsOperatorOverride() {
-        let policy = AdaptiveMappingModePolicy()
-        let recommendation = policy.recommendation(
-            for: AdaptiveMappingModeInput(
-                roomPlanAvailable: true,
-                roomPlanObjectCount: 10,
-                indoorRegistrationQuality: 1.0,
-                globalRegistrationQuality: 0.1,
-                gpsHorizontalAccuracyMeters: 80,
-                lidarDepthConfidence: 0.3,
-                depthAnythingAvailable: false,
-                operatorOverride: .forceLiDARDepthAnything
-            )
-        )
-
-        #expect(recommendation.mode == .lidarDepthAnythingOutdoor)
-        #expect(recommendation.confidence == 1.0)
-        #expect(recommendation.reasons.first == .operatorForcedLiDARDepthAnything)
-        #expect(recommendation.metadata["adaptive_mapping_operator_override"] == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
-    }
-
-    @Test("Adaptive mapping controller switches active capture mode from policy input")
-    @MainActor
-    func testAdaptiveMappingControllerSwitchesActiveCaptureMode() throws {
-        let suiteName = "AdaptiveMappingControllerTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let controller = AdaptiveMappingModeController(
-            userDefaults: defaults,
-            publishesSessionUpdates: false,
-            roomPlanCaptureSupported: true
-        )
-
-        controller.update(
-            input: AdaptiveMappingModeInput(
-                roomPlanAvailable: true,
-                roomPlanObjectCount: 9,
-                indoorRegistrationQuality: 0.95,
-                globalRegistrationQuality: 0.2,
-                gpsHorizontalAccuracyMeters: 55,
-                lidarDepthConfidence: 0.65,
-                depthAnythingAvailable: true
-            )
-        )
-        #expect(controller.activeMode == .roomPlanParametric)
-        #expect(controller.usesRoomPlanCapture)
-
-        controller.update(
-            input: AdaptiveMappingModeInput(
-                roomPlanAvailable: true,
-                roomPlanObjectCount: 0,
-                indoorRegistrationQuality: 0.05,
-                globalRegistrationQuality: 0.96,
-                gpsHorizontalAccuracyMeters: 4,
-                lidarDepthConfidence: 0.92,
-                depthAnythingAvailable: true
-            )
-        )
-        #expect(controller.activeMode == .lidarDepthAnythingOutdoor)
-        #expect(!controller.usesRoomPlanCapture)
-    }
-
-    @Test("Adaptive mapping controller persists override and emits ROS metadata")
-    @MainActor
-    func testAdaptiveMappingControllerPersistsOverrideAndMetadata() throws {
-        let suiteName = "AdaptiveMappingOverrideTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let controller = AdaptiveMappingModeController(
-            userDefaults: defaults,
-            publishesSessionUpdates: false,
-            roomPlanCaptureSupported: true
-        )
-        controller.setOperatorOverride(.forceLiDARDepthAnything)
-        controller.update(
-            input: AdaptiveMappingModeInput(
-                roomPlanAvailable: true,
-                roomPlanObjectCount: 12,
-                indoorRegistrationQuality: 1.0,
-                globalRegistrationQuality: 0.1,
-                gpsHorizontalAccuracyMeters: 80,
-                lidarDepthConfidence: 0.3,
-                depthAnythingAvailable: false
-            )
-        )
-
-        #expect(defaults.string(forKey: AdaptiveMappingModeController.overrideStorageKey) == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
-        #expect(controller.activeMode == .lidarDepthAnythingOutdoor)
-        #expect(controller.diagnosticValues["adaptive_mapping_operator_override"] == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
-
-        let metadata = controller.sessionMetadata
-        #expect(metadata["active_mapping_mode"] as? String == AdaptiveMappingMode.lidarDepthAnythingOutdoor.rawValue)
-        #expect(metadata["operator_override"] as? String == AdaptiveMappingOperatorOverride.forceLiDARDepthAnything.rawValue)
-        #expect((metadata["reason_codes"] as? [String])?.contains(AdaptiveMappingModeReason.operatorForcedLiDARDepthAnything.rawValue) == true)
-        #expect(JSONSerialization.isValidJSONObject(metadata))
-        _ = try JSONSerialization.data(withJSONObject: metadata, options: [])
     }
 
     @Test("Default geo tile providers expose source policy metadata")
@@ -653,7 +767,11 @@ struct MapEverythingTests {
 
         #expect(allTopics.count == ROS2TopicID.allCases.count)
         #expect(Set(allTopics.map(\.id)) == Set(ROS2TopicID.allCases))
-        #expect(advertisedIDs.isSuperset(of: [.pose, .cameraCompressed, .cameraInfo, .pointCloud, .gpsFix, .gpsMetadata, .satelliteImage, .satelliteTileInfo, .demTile]))
+        #expect(advertisedIDs.isSuperset(of: [.pose, .cameraCompressed, .cameraInfo, .lidarPointCloud, .depthAnythingPointCloud, .depthAnythingCalibration, .gpsFix, .gpsMetadata, .satelliteImage, .satelliteTileInfo, .demTile]))
+        #expect(registry.definition(.lidarPointCloud).topic == "/mapping/pointcloud/lidar")
+        #expect(registry.definition(.depthAnythingPointCloud).topic == "/mapping/pointcloud/depth_anything")
+        #expect(registry.definition(.depthAnythingCalibration).topic == "/mapping/depth_anything/calibration")
+        #expect(registry.definition(.depthAnythingCalibration).messageType == "reconstructor_msgs/msg/DepthAnythingCalibration")
         #expect(allTopics.allSatisfy { $0.topic == "/tf" || $0.topic.hasPrefix("/mapping/") })
         #expect(!advertisedIDs.contains(.odom))
         #expect(!advertisedIDs.contains(.surfels))
@@ -721,6 +839,64 @@ struct MapEverythingTests {
             0.0, 590.0, 240.0, 0.0,
             0.0, 0.0, 1.0, 0.0
         ])
+        #expect(JSONSerialization.isValidJSONObject(msg))
+        _ = try JSONSerialization.data(withJSONObject: msg, options: [])
+    }
+
+    @Test("Colored point-cloud payload uses standard PointCloud2 fields")
+    func testColoredPointCloudPayloadUsesPointCloud2Fields() throws {
+        let header: [String: Any] = [
+            "stamp": ["sec": 10, "nanosec": 20],
+            "frame_id": "map"
+        ]
+        let points = [
+            ColoredPoint(
+                position: SIMD3<Float>(1, 2, 3),
+                color: SIMD3<UInt8>(10, 20, 30)
+            )
+        ]
+
+        let msg = ROS2BridgeClient.makeColoredPointCloudMessage(points: points, header: header)
+        let fields = try #require(msg["fields"] as? [[String: Any]])
+        let fieldNames = Set(fields.compactMap { $0["name"] as? String })
+        let encodedData = try #require(msg["data"] as? String)
+        let decodedData = try #require(Data(base64Encoded: encodedData))
+
+        #expect(msg["point_step"] as? Int == 16)
+        #expect(msg["row_step"] as? Int == 16)
+        #expect(msg["width"] as? Int == 1)
+        #expect(decodedData.count == 16)
+        #expect(fieldNames == Set(["x", "y", "z", "rgb"]))
+        #expect(JSONSerialization.isValidJSONObject(msg))
+        _ = try JSONSerialization.data(withJSONObject: msg, options: [])
+    }
+
+    @Test("Depth Anything calibration payload serializes scale and relative cloud metadata")
+    func testDepthAnythingCalibrationPayloadSerializes() throws {
+        let header: [String: Any] = [
+            "stamp": ["sec": 10, "nanosec": 20],
+            "frame_id": "iphone_camera"
+        ]
+        let calibration = DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 2.5, offset: 0.25)
+
+        let msg = ROS2BridgeClient.makeDepthAnythingCalibrationMessage(
+            calibration: calibration,
+            header: header,
+            relativeDepthSize: CGSize(width: 518, height: 518),
+            imageResolution: CGSize(width: 1920, height: 1440),
+            relativePointCloudTopic: "/mapping/pointcloud/depth_anything",
+            frameID: "iphone_camera"
+        )
+
+        #expect(msg["schema_version"] as? Int == 1)
+        #expect(msg["relative_pointcloud_topic"] as? String == "/mapping/pointcloud/depth_anything")
+        #expect(msg["frame_id"] as? String == "iphone_camera")
+        #expect(msg["relative_depth_width"] as? Int == 518)
+        #expect(msg["relative_depth_height"] as? Int == 518)
+        #expect(msg["scale"] as? Double == 2.5)
+        #expect(msg["offset"] as? Double == 0.25)
+        #expect(msg["equation"] as? String == "metric_depth_m = scale * relative_depth + offset")
+        #expect((msg["metadata_json"] as? String)?.contains("overlay_mesh_uses_calibrated_depth") == true)
         #expect(JSONSerialization.isValidJSONObject(msg))
         _ = try JSONSerialization.data(withJSONObject: msg, options: [])
     }
@@ -841,6 +1017,8 @@ struct MapEverythingTests {
 
     @Test("Geo tile metadata and cache indexing stay stable")
     func testGeoTileMetadataAndCacheIndexing() throws {
+        #expect(GeoTilePublisher.Configuration.default.publishInterval == 60)
+
         let provider = GeoTileProvider.usgs3DEPDEM
         let location = CLLocation(
             coordinate: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
@@ -912,6 +1090,16 @@ struct MapEverythingTests {
         #expect(bounds.north > location.coordinate.latitude)
         #expect(JSONSerialization.isValidJSONObject(tileInfoMessage))
         _ = try JSONSerialization.data(withJSONObject: tileInfoMessage, options: [])
+    }
+
+    @Test("Geo tile topics advertise one-minute publish cadence")
+    func testGeoTileTopicsAdvertiseOneMinuteCadence() {
+        let registry = ROS2TopicRegistry()
+        let expectedRate = 1.0 / 60.0
+
+        #expect(registry.definition(.satelliteImage).defaultRateHz == expectedRate)
+        #expect(registry.definition(.satelliteTileInfo).defaultRateHz == expectedRate)
+        #expect(registry.definition(.demTile).defaultRateHz == expectedRate)
     }
 
     @Test("Publish queue drops oldest publish when capacity is exceeded")
@@ -1053,7 +1241,7 @@ struct MapEverythingTests {
     }
 
     @Test("Local ROS2 bag recorder writes chunked SQLite rosbridge JSON bags")
-    func testLocalROS2BagRecorderWritesChunkedSQLiteBag() throws {
+    func testLocalROS2BagRecorderWritesChunkedSQLiteBag() async throws {
         let fileManager = FileManager.default
         let rootURL = fileManager.temporaryDirectory
             .appendingPathComponent("MapEverythingLocalBag-\(UUID().uuidString)", isDirectory: true)
@@ -1069,6 +1257,7 @@ struct MapEverythingTests {
 
         let firstMessage = makeLocalBagMessage(sequence: 1, payloadSize: 1_100)
         let secondMessage = makeLocalBagMessage(sequence: 2, payloadSize: 1_100)
+        let cameraMessage = makeLocalBagCameraMessage(sequence: 3)
         recorder.recordPublishedTopic(
             topic: "/mapping/status",
             messageType: "diagnostic_msgs/msg/DiagnosticArray",
@@ -1078,6 +1267,11 @@ struct MapEverythingTests {
             topic: "/mapping/status",
             messageType: "diagnostic_msgs/msg/DiagnosticArray",
             msg: secondMessage
+        )
+        recorder.recordPublishedTopic(
+            topic: "/mapping/camera/image/compressed",
+            messageType: "sensor_msgs/msg/CompressedImage",
+            msg: cameraMessage
         )
         recorder.stopAndWait()
 
@@ -1095,14 +1289,22 @@ struct MapEverythingTests {
         let dbFiles = try fileManager.contentsOfDirectory(at: bagDirectory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "db3" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        let sessions = try recorder.listBagSessions()
+        let cachedOnlySessions = try recorder.listBagSessions()
+        let cachedOnlySession = try #require(cachedOnlySessions.first)
+
+        #expect(cachedOnlySession.preview == nil)
+        #expect(!fileManager.fileExists(atPath: bagDirectory.appendingPathComponent(LocalROS2BagSessionPreview.cacheFileName).path))
+        #expect(!fileManager.fileExists(atPath: bagDirectory.appendingPathComponent(LocalROS2BagSessionPreview.thumbnailFileName).path))
+
+        let sessions = try await recorder.listBagSessionsAsync(previewLoadingMode: .scanIfNeeded)
         let listedSession = try #require(sessions.first)
 
-        #expect(dbFiles.count == 2)
+        #expect(dbFiles.count == 3)
         #expect(metadata.contains("storage_identifier: sqlite3"))
         #expect(metadata.contains("serialization_format: 'rosbridge_json'"))
         #expect(metadata.contains("mapeverything_0.db3"))
         #expect(metadata.contains("mapeverything_1.db3"))
+        #expect(metadata.contains("mapeverything_2.db3"))
         #expect(metadata.contains("Messages are stored as rosbridge publish JSON payloads"))
 
         let totalMessages = try dbFiles.reduce(0) { count, url in
@@ -1112,12 +1314,20 @@ struct MapEverythingTests {
             count + (try sqliteInteger(url: url, sql: "SELECT COUNT(*) FROM topics WHERE name = '/mapping/status' AND type = 'diagnostic_msgs/msg/DiagnosticArray' AND serialization_format = 'rosbridge_json'"))
         }
 
-        #expect(totalMessages == 2)
+        #expect(totalMessages == 3)
         #expect(topicCount == 2)
+        #expect(cachedOnlySessions.count == 1)
         #expect(sessions.count == 1)
-        #expect(listedSession.chunkCount == 2)
+        #expect(listedSession.chunkCount == 3)
         #expect(listedSession.files.contains { $0.name == "metadata.yaml" && $0.kind == .metadata })
         #expect(listedSession.files.contains { $0.name == "mapeverything_0.db3" && $0.kind == .sqliteChunk })
+        let preview = try #require(listedSession.preview)
+        #expect(preview.messageCount == 3)
+        #expect(preview.topicNames.contains("/mapping/status"))
+        #expect(preview.topicNames.contains("/mapping/camera/image/compressed"))
+        #expect(preview.thumbnailRelativePath == LocalROS2BagSessionPreview.thumbnailFileName)
+        #expect(fileManager.fileExists(atPath: bagDirectory.appendingPathComponent(LocalROS2BagSessionPreview.cacheFileName).path))
+        #expect(fileManager.fileExists(atPath: bagDirectory.appendingPathComponent(LocalROS2BagSessionPreview.thumbnailFileName).path))
 
         try recorder.deleteBagSession(listedSession)
         #expect(try recorder.listBagSessions().isEmpty)
@@ -1312,6 +1522,41 @@ struct MapEverythingTests {
         ]
     }
 
+    private func makeLocalBagCameraMessage(sequence: Int) -> [String: Any] {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 12, height: 8))
+        let jpegData = renderer.jpegData(withCompressionQuality: 0.8) { context in
+            UIColor.systemRed.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 6, height: 8))
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(x: 6, y: 0, width: 6, height: 8))
+        }
+
+        return [
+            "header": [
+                "stamp": [
+                    "sec": 1_700_000_000 + sequence,
+                    "nanosec": sequence
+                ],
+                "frame_id": "iphone_camera"
+            ],
+            "format": "jpeg",
+            "data": jpegData.base64EncodedString()
+        ]
+    }
+
+    private func uint32(from data: Data, at offset: Int) -> UInt32 {
+        guard offset + 3 < data.count else { return 0 }
+        let value = UInt32(data[offset])
+            | (UInt32(data[offset + 1]) << 8)
+            | (UInt32(data[offset + 2]) << 16)
+            | (UInt32(data[offset + 3]) << 24)
+        return UInt32(littleEndian: value)
+    }
+
+    private func float32(from data: Data, at offset: Int) -> Float32 {
+        Float32(bitPattern: uint32(from: data, at: offset))
+    }
+
     private func offsetCoordinate(
         latitude: Double,
         longitude: Double,
@@ -1415,6 +1660,132 @@ struct MapEverythingTests {
         return Int(sqlite3_column_int64(statement, 0))
     }
 
+    private func makeDepthFloat32PixelBuffer(width: Int, height: Int, values: [Float]) throws -> CVPixelBuffer {
+        guard values.count == width * height else {
+            throw TestPixelBufferError.invalidDataCount
+        }
+
+        var pixelBuffer: CVPixelBuffer?
+        let attributes: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_DepthFloat32,
+            attributes as CFDictionary,
+            &pixelBuffer
+        )
+
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw TestPixelBufferError.creationFailed(status)
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer)?.assumingMemoryBound(to: Float32.self) else {
+            throw TestPixelBufferError.missingBaseAddress
+        }
+
+        let floatsPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer) / MemoryLayout<Float32>.stride
+        for y in 0..<height {
+            for x in 0..<width {
+                base[y * floatsPerRow + x] = values[y * width + x]
+            }
+        }
+
+        return pixelBuffer
+    }
+
+    private func makeLiDARConfidencePixelBuffer(width: Int, height: Int, value: UInt8) throws -> CVPixelBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        let attributes: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_OneComponent8,
+            attributes as CFDictionary,
+            &pixelBuffer
+        )
+
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw TestPixelBufferError.creationFailed(status)
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer)?.assumingMemoryBound(to: UInt8.self) else {
+            throw TestPixelBufferError.missingBaseAddress
+        }
+
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        for y in 0..<height {
+            memset(base + y * bytesPerRow, Int32(value), width)
+        }
+
+        return pixelBuffer
+    }
+
+    private func makeYpCbCrPixelBuffer(
+        width: Int,
+        height: Int,
+        luma: UInt8,
+        cb: UInt8,
+        cr: UInt8
+    ) throws -> CVPixelBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        let attributes: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            attributes as CFDictionary,
+            &pixelBuffer
+        )
+
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw TestPixelBufferError.creationFailed(status)
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        guard let yPlane = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)?.assumingMemoryBound(to: UInt8.self),
+              let cbcrPlane = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)?.assumingMemoryBound(to: UInt8.self)
+        else {
+            throw TestPixelBufferError.missingBaseAddress
+        }
+
+        let yBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let yHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        let yWidth = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        for y in 0..<yHeight {
+            memset(yPlane + y * yBytesPerRow, Int32(luma), yWidth)
+        }
+
+        let cbcrBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+        let cbcrHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1)
+        let cbcrWidth = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1)
+        for y in 0..<cbcrHeight {
+            for x in 0..<cbcrWidth {
+                let offset = y * cbcrBytesPerRow + x * 2
+                cbcrPlane[offset] = cb
+                cbcrPlane[offset + 1] = cr
+            }
+        }
+
+        return pixelBuffer
+    }
+
     private struct TestSQLiteError: LocalizedError {
         let message: String
 
@@ -1429,5 +1800,11 @@ struct MapEverythingTests {
         var errorDescription: String? {
             message
         }
+    }
+
+    private enum TestPixelBufferError: Error {
+        case invalidDataCount
+        case creationFailed(CVReturn)
+        case missingBaseAddress
     }
 }

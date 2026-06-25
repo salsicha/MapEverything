@@ -13,7 +13,7 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
         let locationDistanceFilter: CLLocationDistance
 
         static let `default` = Configuration(
-            publishInterval: 180,
+            publishInterval: 60,
             locationDistanceFilter: 25
         )
     }

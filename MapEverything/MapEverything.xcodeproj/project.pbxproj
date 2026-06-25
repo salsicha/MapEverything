@@ -34,7 +34,6 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
-				MapEverything.entitlements,
 			);
 			target = 6F94A5832FA6AB8500D8CE7E /* MapEverything */;
 		};

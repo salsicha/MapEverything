@@ -32,11 +32,18 @@ Visualization Manager:
         Value: /mapping/gps/fix
     - Class: rviz_default_plugins/PointCloud2
       Enabled: true
+      Name: LiDAR Point Cloud
+      Size (m): 0.02
+      Style: Points
+      Topic:
+        Value: /mapping/pointcloud/lidar
+    - Class: rviz_default_plugins/PointCloud2
+      Enabled: true
       Name: Depth Anything Point Cloud
       Size (m): 0.02
       Style: Points
       Topic:
-        Value: /mapping/pointcloud
+        Value: /mapping/pointcloud/depth_anything
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: Mesh Markers
