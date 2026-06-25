@@ -30,10 +30,11 @@ enum VisualizationMode: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     private static let topControlsHorizontalPadding: CGFloat = 14
+    private static let actionRailTrailingPadding: CGFloat = 28
     private static let topControlsTopPadding: CGFloat = 54
     private static let topControlsGap: CGFloat = 8
     private static let actionRailButtonSize: CGFloat = 56
-    private static let recorderPanelPreferredWidth: CGFloat = 280
+    private static let recorderPanelPreferredWidth: CGFloat = 248
 
     @ObservedObject private var ros2Client = ROS2BridgeClient.shared
     @ObservedObject private var mappingSession = MappingSessionManager.shared
@@ -163,9 +164,12 @@ struct ContentView: View {
 
     private var topControlsOverlay: some View {
         GeometryReader { proxy in
+            let leadingInset = Self.topControlsHorizontalPadding + proxy.safeAreaInsets.leading
+            let trailingInset = Self.actionRailTrailingPadding + proxy.safeAreaInsets.trailing
+            let topInset = Self.topControlsTopPadding
             let availableWidth = max(
                 0,
-                proxy.size.width - (Self.topControlsHorizontalPadding * 2)
+                proxy.size.width - leadingInset - trailingInset
             )
             let recorderWidth = min(
                 Self.recorderPanelPreferredWidth,
@@ -175,19 +179,29 @@ struct ContentView: View {
                 )
             )
 
-            VStack {
-                HStack(alignment: .top, spacing: 0) {
-                    recorderDiagnosticsPanel(width: recorderWidth)
-                        .allowsHitTesting(false)
-                    Spacer(minLength: Self.topControlsGap)
-                    scannerActionRail
-                        .frame(width: Self.actionRailButtonSize, alignment: .topTrailing)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-                Spacer(minLength: 0)
+            ZStack(alignment: .topLeading) {
+                recorderDiagnosticsPanel(width: recorderWidth)
+                    .allowsHitTesting(false)
+                    .padding(.top, topInset)
+                    .padding(.leading, leadingInset)
+                    .frame(
+                        width: proxy.size.width,
+                        height: proxy.size.height,
+                        alignment: .topLeading
+                    )
+
+                scannerActionRail
+                    .frame(width: Self.actionRailButtonSize, alignment: .topTrailing)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.top, topInset)
+                    .padding(.trailing, trailingInset)
+                    .frame(
+                        width: proxy.size.width,
+                        height: proxy.size.height,
+                        alignment: .topTrailing
+                    )
             }
-            .padding(.top, Self.topControlsTopPadding)
-            .padding(.horizontal, Self.topControlsHorizontalPadding)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
     }
 
@@ -293,7 +307,7 @@ struct ContentView: View {
         Image(systemName: systemName)
             .font(.title3.weight(.bold))
             .foregroundColor(foregroundColor)
-            .frame(width: 56, height: 56)
+            .frame(width: Self.actionRailButtonSize, height: Self.actionRailButtonSize)
             .background(backgroundColor ?? Color.clear)
             .background(.ultraThinMaterial)
             .clipShape(Circle())
