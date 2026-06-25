@@ -229,6 +229,16 @@ The helper records the default advertised MapEverything topics, rotates `.db3`
 bag chunks with `--max-bag-size`, and accepts `--include-optional`,
 `--topic /extra/topic`, or `--record-all` for broader capture profiles.
 
+### App Store Publishing
+
+The App Store release plan is tracked in [docs/app-store-publishing-plan.md](docs/app-store-publishing-plan.md). Before a release branch or archive, run:
+
+```bash
+python3 tools/app-store-release-check.py
+```
+
+The checker verifies local release inputs such as `Info.plist` usage strings, portrait iPhone orientation, Wi-Fi entitlement presence, app icon assets, App Store export options, validation docs, and recorder tooling. It also flags App Store Connect tasks that must be completed in the account, including privacy labels, privacy policy URL, screenshots, TestFlight notes, and export-compliance answers.
+
 ---
 
 ### Step-by-Step Remote ROS2 Workstation Configuration

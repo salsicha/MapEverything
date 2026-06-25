@@ -102,17 +102,27 @@
 
 ## P3 - Packaging and Distribution
 
-- [ ] Decide supported distribution channels: local developer builds, signed ad hoc/internal beta builds, TestFlight, App Store, and GitHub release artifacts for ROS2 companion assets.
-- [ ] Audit bundle identifier, signing team, provisioning profiles, capabilities, and entitlements for camera, precise location, Bluetooth, local network, and Wi-Fi info access.
-- [ ] Add a release build/archive checklist for LiDAR-only device testing, simulator-safe tests, physical-device validation, rosbag replay, and rosbridge throughput benchmarking.
-- [ ] Add signed iOS archive/export instructions, including `xcodebuild archive`, export options, version/build number handling, and TestFlight upload steps.
-- [ ] Add App Store Connect metadata checklist for description, screenshots, privacy nutrition labels, export compliance, support URL, and TestFlight beta review notes.
-- [ ] Add a privacy and compliance checklist for `Info.plist` usage strings, Privacy Manifest entries, data-retention language, radio/GPS disclaimers, and third-party geospatial attribution.
-- [ ] Define release artifact layout for app builds, release notes, validation reports, sample RViz config, rosbridge benchmark results, and source-policy/attribution records.
+- [x] Decide supported distribution channels: local developer builds, TestFlight, App Store, and GitHub release artifacts for ROS2 companion assets.
+- [x] Add App Store publishing plan with release phases, account-side gates, TestFlight flow, metadata checklist, privacy/compliance checklist, and release blockers.
+- [x] Add local App Store readiness checker for `Info.plist`, entitlements, assets, export options, docs, signing settings, and release-tool presence.
+- [x] Add App Store Connect export options template for `xcodebuild -exportArchive` uploads.
+- [x] Add a release build/archive checklist for LiDAR-only device testing, simulator-safe tests, physical-device validation, rosbag replay, and rosbridge throughput benchmarking.
+- [x] Add signed iOS archive/export instructions, including `xcodebuild archive`, export options, version/build number handling, and TestFlight upload steps.
+- [x] Add App Store Connect metadata checklist for description, screenshots, privacy nutrition labels, export compliance, support URL, and TestFlight beta review notes.
+- [x] Add a privacy and compliance checklist for `Info.plist` usage strings, Privacy Manifest entries, data-retention language, radio/GPS disclaimers, and third-party geospatial attribution.
+- [x] Define release artifact layout for app builds, release notes, validation reports, sample RViz config, rosbridge benchmark results, and source-policy/attribution records.
+- [ ] Audit App Store Connect app record, bundle identifier ownership, signing team access, provisioning profiles, capabilities, and entitlement approval for camera, precise location, Bluetooth, local network, and Wi-Fi info access.
+- [ ] Decide whether the current iOS deployment target intentionally limits App Store availability to the latest iOS devices.
+- [ ] Create final App Store product metadata: app name, subtitle, category, description, keywords, support URL, privacy policy URL, screenshots, and review notes.
+- [ ] Complete App Store privacy labels and export-compliance answers from the final data-flow audit.
+- [ ] Run a TestFlight internal beta with a LiDAR device, ROS2 recorder workstation, `/mapping/...` rosbag capture, local SQLite bag sharing, and RViz replay.
+- [ ] Run external TestFlight beta review with hardware/setup notes and collect operator feedback.
+- [ ] Archive and upload the App Store candidate build using Xcode Organizer or `tools/app-store-export-options.plist`.
+- [ ] Submit the first App Store version after privacy, compliance, screenshots, validation artifacts, and release blockers are clear.
 - [ ] Package the ROS2 companion package as a versioned source archive with build instructions, supported ROS2 distros, message compatibility notes, and a colcon smoke-test command.
 - [ ] Add GitHub release/tagging process with semantic versioning, changelog generation, migration notes, and rollback instructions for both iOS and ROS2 companion packages.
-- [ ] Document beta operator setup: required hardware, recorder workstation setup, network assumptions, permission prompts, credential configuration, and known platform restrictions.
-- [ ] Add a release-blocker checklist for missing provisioning, failed validation, missing attribution, credential leakage, non-replayable bags, queue instability, or unsupported sensor claims.
+- [x] Document beta operator setup: required hardware, recorder workstation setup, network assumptions, permission prompts, credential configuration, and known platform restrictions.
+- [x] Add a release-blocker checklist for missing provisioning, failed validation, missing attribution, credential leakage, non-replayable bags, queue instability, or unsupported sensor claims.
 
 ## Completed Foundation
 
