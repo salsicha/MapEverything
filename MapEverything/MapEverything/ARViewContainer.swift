@@ -9,10 +9,12 @@ import SwiftUI
 import RealityKit
 import ARKit
 import RoomPlan
+import SceneKit
 
 struct ARViewContainer: UIViewControllerRepresentable {
     @Binding var visualizationMode: VisualizationMode
     @Binding var isScanning: Bool
+    @Binding var stoppedInspectionScene: SCNScene?
     @Binding var appMode: AppMode
     @Binding var measurementText: String
     @Binding var pointCount: Int
@@ -152,6 +154,12 @@ struct ARViewContainer: UIViewControllerRepresentable {
                 self.parent.errorMessage = "Scan limit reached (\(limit) points) to prevent device crash. Please save your scan."
             }
         }
+
+        func didUpdateStoppedInspectionScene(_ scene: SCNScene?) {
+            DispatchQueue.main.async {
+                self.parent.stoppedInspectionScene = scene
+            }
+        }
     }
 }
 
@@ -161,6 +169,7 @@ protocol ARViewControllerDelegate: AnyObject {
     func didUpdateTrackingFeedback(_ text: String)
     func didFailWithError(_ error: Error)
     func didReachScanLimit(limit: Int)
+    func didUpdateStoppedInspectionScene(_ scene: SCNScene?)
 }
 
 class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDelegate, RoomCaptureSessionDelegate {
@@ -183,6 +192,13 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
                     } else {
                         roomCaptureView?.captureSession.stop()
                     }
+                } else if isScanning {
+                    delegate?.didUpdateStoppedInspectionScene(nil)
+                    resumeWorldTrackingSession()
+                } else {
+                    freezeCurrentMeshForInspection()
+                    cancelMeshUpdateTasks()
+                    arView?.session.pause()
                 }
             }
         }
@@ -361,6 +377,82 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
             av.session.run(configuration)
             arView = av
         }
+    }
+
+    private func resumeWorldTrackingSession() {
+        guard let arView else { return }
+
+        if let configuration = arView.session.configuration as? ARWorldTrackingConfiguration {
+            arView.session.run(configuration)
+            return
+        }
+
+        guard ARWorldTrackingConfiguration.isSupported else { return }
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.worldAlignment = .gravityAndHeading
+        configuration.planeDetection = [.horizontal, .vertical]
+        configuration.environmentTexturing = .automatic
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            configuration.sceneReconstruction = .mesh
+        }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
+        arView.session.run(configuration)
+    }
+
+    private func freezeCurrentMeshForInspection() {
+        guard let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
+              !anchors.isEmpty else {
+            delegate?.didUpdateStoppedInspectionScene(nil)
+            return
+        }
+
+        let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
+        delegate?.didUpdateStoppedInspectionScene(makeInspectionScene(from: safeMeshes))
+    }
+
+    private func makeInspectionScene(from safeMeshes: [SafeARMesh]) -> SCNScene? {
+        let scene = SCNScene()
+        var hasGeometry = false
+
+        for mesh in safeMeshes {
+            guard !mesh.vertices.isEmpty, mesh.indices.count >= 3 else { continue }
+
+            let worldVertices = mesh.vertices.map { vertex in
+                let transformed = simd_mul(mesh.transform, SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1))
+                return SCNVector3(transformed.x, transformed.y, transformed.z)
+            }
+
+            let vertexSource = SCNGeometrySource(vertices: worldVertices)
+            let indexData = Data(bytes: mesh.indices, count: mesh.indices.count * MemoryLayout<UInt32>.size)
+            let element = SCNGeometryElement(
+                data: indexData,
+                primitiveType: .triangles,
+                primitiveCount: mesh.indices.count / 3,
+                bytesPerIndex: MemoryLayout<UInt32>.size
+            )
+            let geometry = SCNGeometry(sources: [vertexSource], elements: [element])
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor.systemCyan.withAlphaComponent(0.86)
+            material.emission.contents = UIColor.systemCyan.withAlphaComponent(0.16)
+            material.lightingModel = .constant
+            material.isDoubleSided = true
+            geometry.materials = [material]
+
+            let node = SCNNode(geometry: geometry)
+            scene.rootNode.addChildNode(node)
+            hasGeometry = true
+        }
+
+        return hasGeometry ? scene : nil
+    }
+
+    private func cancelMeshUpdateTasks() {
+        meshUpdateTasks.values.forEach { $0.cancel() }
+        meshUpdateTasks.removeAll()
     }
 
     // MARK: - Data Management
@@ -1302,10 +1394,13 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     }
     
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-        publishMapToROS2IfNeeded(anchors: anchors)
+        if isScanning {
+            publishMapToROS2IfNeeded(anchors: anchors)
+        }
         
         for anchor in anchors {
             if let meshAnchor = anchor as? ARMeshAnchor {
+                guard isScanning else { continue }
                 let desc = MeshGenerator.createDescriptor(from: meshAnchor.geometry)
                 
                 // Create and add the tracking anchor immediately on the main thread
@@ -1353,6 +1448,7 @@ class ARViewController: UIViewController, ARSessionDelegate, RoomCaptureViewDele
     }
     
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        guard isScanning else { return }
         publishMapToROS2IfNeeded(anchors: anchors)
         
         for anchor in anchors {

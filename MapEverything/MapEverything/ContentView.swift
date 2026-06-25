@@ -100,6 +100,7 @@ struct ContentView: View {
     @State private var showClearConfirmation = false
     @State private var showLocalBagBrowser = false
     @State private var hasCameraPermission = false
+    @State private var stoppedInspectionScene: SCNScene?
     private let checksCameraPermission: Bool
 
     init(checksCameraPermission: Bool = true, previewHasCameraPermission: Bool? = nil) {
@@ -127,6 +128,7 @@ struct ContentView: View {
                 ARViewContainer(
                     visualizationMode: $visualizationMode,
                     isScanning: $isScanning,
+                    stoppedInspectionScene: $stoppedInspectionScene,
                     appMode: $appMode,
                     measurementText: $measurementText,
                     pointCount: $pointCount,
@@ -151,6 +153,8 @@ struct ContentView: View {
                     environmentToLoad: $environmentToLoad
                 )
                 .edgesIgnoringSafeArea(.all)
+
+                stoppedMapInspectionOverlay
 
                 VStack {
                     HStack(alignment: .top, spacing: 12) {
@@ -207,6 +211,27 @@ struct ContentView: View {
             startButton
             localBagButton
             shareLocalBagsButton
+        }
+    }
+
+    @ViewBuilder
+    private var stoppedMapInspectionOverlay: some View {
+        if !isScanning, let scene = stoppedInspectionScene {
+            GeometryReader { proxy in
+                TopDownSceneView(scene: scene)
+                    .frame(
+                        width: min(proxy.size.width - 32, 560),
+                        height: min(proxy.size.height * 0.58, 520)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.35), radius: 18, x: 0, y: 8)
+                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.98)))
         }
     }
 
@@ -320,15 +345,17 @@ struct ContentView: View {
 
     private func toggleMapping() {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        isScanning.toggle()
 
         if isScanning {
+            isScanning = false
+            mappingSession.stop()
+        } else {
+            stoppedInspectionScene = nil
+            isScanning = true
             mappingSession.start(
                 recorderURL: ros2WebSocketURL,
                 remoteStreamingEnabled: ros2Enabled
             )
-        } else {
-            mappingSession.stop()
         }
     }
 
