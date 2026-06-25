@@ -7,9 +7,21 @@
 
 import SwiftUI
 import SwiftData
+import UIKit
+
+final class MapEverythingAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        .portrait
+    }
+}
 
 @main
 struct MapEverythingApp: App {
+    @UIApplicationDelegateAdaptor(MapEverythingAppDelegate.self) private var appDelegate
+
     var sharedModelContainer: ModelContainer = {
         let schema = MapEverythingModelSchema.schema
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
