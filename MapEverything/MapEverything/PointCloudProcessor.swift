@@ -455,7 +455,7 @@ struct PointCloudProcessor {
         let depthW = depthMap.width
         let depthH = depthMap.height
 
-        let step = 6 // Denser than LiDAR-only since DA V2 is high-resolution
+        let step = 1
         let table = Self.projectionTable(
             depthWidth: depthW,
             depthHeight: depthH,
@@ -472,7 +472,7 @@ struct PointCloudProcessor {
         depthMap.withReadAccess { depthReader in
             for sample in table.samples {
                 let depth = depthReader.value(atX: sample.depthX, y: sample.depthY)
-                guard depth.isFinite, depth > 0.1 && depth < 8.0 else { continue }
+                guard depth.isFinite, depth > 0.1 else { continue }
 
                 let pointCamera = simd_float4(
                     sample.cameraXFactor * depth,
@@ -517,7 +517,7 @@ struct PointCloudProcessor {
         let depthWidth = relativeDepthMap.width
         let depthHeight = relativeDepthMap.height
 
-        let step = 6
+        let step = 1
         let table = Self.projectionTable(
             depthWidth: depthWidth,
             depthHeight: depthHeight,
@@ -534,8 +534,10 @@ struct PointCloudProcessor {
         relativeDepthMap.withReadAccess { relativeReader in
             for sample in table.samples {
                 let relativeDepth = relativeReader.value(atX: sample.depthX, y: sample.depthY)
-                let depth = calibration.scale * relativeDepth + calibration.offset
-                guard depth.isFinite, depth > 0.1 && depth < 8.0 else { continue }
+                guard let depth = DepthAnythingProcessor.calibratedMetricDepth(
+                    relativeDepth: relativeDepth,
+                    calibration: calibration
+                ) else { continue }
 
                 let pointCamera = simd_float4(
                     sample.cameraXFactor * depth,
@@ -579,7 +581,7 @@ struct PointCloudProcessor {
         let depthWidth = relativeDepthMap.width
         let depthHeight = relativeDepthMap.height
 
-        let step = 6
+        let step = 1
         let table = Self.projectionTable(
             depthWidth: depthWidth,
             depthHeight: depthHeight,
@@ -615,8 +617,9 @@ struct PointCloudProcessor {
         return processed
     }
 
-    /// Generates colored points by fusing Depth Anything relative depth with LiDAR
-    /// directly at each sampled output point, avoiding a full intermediate fused map.
+    /// Generates colored points by calibrating Depth Anything relative depth with LiDAR.
+    /// LiDAR is used to solve the metric calibration only; every valid Depth Anything
+    /// sample is projected from the calibrated monocular depth map.
     func processFusedPointCloud(
         cameraImage pixelBuffer: CVPixelBuffer,
         intrinsics: simd_float3x3,
@@ -666,7 +669,7 @@ struct PointCloudProcessor {
         let depthWidth = relativeDepthMap.width
         let depthHeight = relativeDepthMap.height
 
-        let step = 6
+        let step = 1
         let table = Self.projectionTable(
             depthWidth: depthWidth,
             depthHeight: depthHeight,
@@ -692,7 +695,7 @@ struct PointCloudProcessor {
                     relativeDepth: relativeDepth,
                     lidarDepth: lidarDepth,
                     calibration: calibration
-                ), depth > 0.1, depth < 8.0 else { continue }
+                ) else { continue }
 
                 let pointCamera = simd_float4(
                     sample.cameraXFactor * depth,

@@ -53,8 +53,8 @@ struct MapEverythingTests {
         #expect(downsampled.count == 2)
     }
 
-    @Test("Point cloud processor fuses Depth Anything and LiDAR directly into points")
-    func testPointCloudProcessorDirectFusedDepthPoints() throws {
+    @Test("Point cloud processor calibrates every Depth Anything point with LiDAR")
+    func testPointCloudProcessorCalibratesAllDepthAnythingPoints() throws {
         let width = 32
         let height = 32
         var relativeData: [Float] = []
@@ -89,9 +89,67 @@ struct MapEverythingTests {
             lidarDepthMap: lidarDepthMap
         )
 
-        #expect(points.count == 36)
+        #expect(points.count == width * height)
         #expect(points.allSatisfy { $0.position.z < -1.4 && $0.position.z > -3.5 })
         #expect(points.allSatisfy { $0.color == SIMD3<UInt8>(128, 128, 128) })
+    }
+
+    @Test("Depth Anything point cloud keeps calibrated points beyond LiDAR range")
+    func testDepthAnythingPointCloudKeepsBeyondLiDARRange() throws {
+        let width = 8
+        let height = 8
+        let relativeDepthMap = RelativeDepthMap(
+            width: width,
+            height: height,
+            data: Array(repeating: 6.0, count: width * height)
+        )
+        let cameraImage = try makeYpCbCrPixelBuffer(width: width, height: height, luma: 128, cb: 128, cr: 128)
+
+        var intrinsics = matrix_identity_float3x3
+        intrinsics[0][0] = 6
+        intrinsics[1][1] = 6
+        intrinsics[2][0] = Float(width) / 2
+        intrinsics[2][1] = Float(height) / 2
+
+        let points = PointCloudProcessor().processDepthAnythingPointCloud(
+            cameraImage: cameraImage,
+            intrinsics: intrinsics,
+            imageResolution: CGSize(width: width, height: height),
+            transform: matrix_identity_float4x4,
+            relativeDepthMap: relativeDepthMap,
+            calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 2.0, offset: 0.0)
+        )
+
+        #expect(points.count == width * height)
+        #expect(points.allSatisfy { abs($0.position.z + 12.0) < 0.001 })
+    }
+
+    @Test("Depth Anything mesh snapshot keeps the full calibrated grid")
+    func testDepthAnythingMeshSnapshotKeepsFullGrid() {
+        let width = 4
+        let height = 4
+        let relativeDepthMap = RelativeDepthMap(
+            width: width,
+            height: height,
+            data: Array(repeating: 1.0, count: width * height)
+        )
+
+        var intrinsics = matrix_identity_float3x3
+        intrinsics[0][0] = 4
+        intrinsics[1][1] = 4
+        intrinsics[2][0] = Float(width) / 2
+        intrinsics[2][1] = Float(height) / 2
+
+        let snapshot = MeshGenerator.createDepthAnythingMeshSnapshot(
+            from: relativeDepthMap,
+            calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 2.0, offset: 0.0),
+            intrinsics: intrinsics,
+            imageResolution: CGSize(width: width, height: height),
+            transform: matrix_identity_float4x4
+        )
+
+        #expect(snapshot?.vertices.count == width * height)
+        #expect(snapshot?.indices.count == (width - 1) * (height - 1) * 2 * 3)
     }
 
     @Test("Colored surfel map fuses repeated RGB-D samples")
@@ -871,7 +929,7 @@ struct MapEverythingTests {
         _ = try JSONSerialization.data(withJSONObject: msg, options: [])
     }
 
-    @Test("Depth Anything calibration payload serializes scale and relative cloud metadata")
+    @Test("Depth Anything calibration payload serializes scale and metric cloud metadata")
     func testDepthAnythingCalibrationPayloadSerializes() throws {
         let header: [String: Any] = [
             "stamp": ["sec": 10, "nanosec": 20],
@@ -889,6 +947,7 @@ struct MapEverythingTests {
         )
 
         #expect(msg["schema_version"] as? Int == 1)
+        #expect(msg["metric_pointcloud_topic"] as? String == "/mapping/pointcloud/depth_anything")
         #expect(msg["relative_pointcloud_topic"] as? String == "/mapping/pointcloud/depth_anything")
         #expect(msg["frame_id"] as? String == "iphone_camera")
         #expect(msg["relative_depth_width"] as? Int == 518)
@@ -896,6 +955,8 @@ struct MapEverythingTests {
         #expect(msg["scale"] as? Double == 2.5)
         #expect(msg["offset"] as? Double == 0.25)
         #expect(msg["equation"] as? String == "metric_depth_m = scale * relative_depth + offset")
+        #expect((msg["metadata_json"] as? String)?.contains("pointcloud_coordinate_frame") == true)
+        #expect((msg["metadata_json"] as? String)?.contains("calibration_only") == true)
         #expect((msg["metadata_json"] as? String)?.contains("overlay_mesh_uses_calibrated_depth") == true)
         #expect(JSONSerialization.isValidJSONObject(msg))
         _ = try JSONSerialization.data(withJSONObject: msg, options: [])

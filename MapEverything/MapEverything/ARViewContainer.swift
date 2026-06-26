@@ -153,7 +153,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
     private struct DepthAnythingMappingFrame {
         let calibratedPoints: [ColoredPoint]
-        let relativePoints: [ColoredPoint]
         let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
         let relativeDepthSize: CGSize
         let meshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
@@ -224,6 +223,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var liveDepthMeshEntity: ModelEntity?
     private var liveDepthMeshUpdateTask: Task<Void, Never>?
     private var latestDepthAnythingMeshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
+    private var latestDepthAnythingPointCloud: [ColoredPoint] = []
     private var finalPointCloudArtifactTask: Task<Void, Never>?
     private let depthMeshVisualizationInterval: TimeInterval = 0.5
     private var lastDepthMeshVisualizationTime: TimeInterval = 0
@@ -282,6 +282,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         liveDepthMeshEntity = nil
         liveDepthMeshAnchor = nil
         latestDepthAnythingMeshSnapshot = nil
+        latestDepthAnythingPointCloud = []
         coachingOverlay = nil
         
         let av = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
@@ -399,9 +400,16 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
         liveDepthMeshAnchor = nil
         latestDepthAnythingMeshSnapshot = nil
+        latestDepthAnythingPointCloud = []
     }
 
     private func freezeCurrentMeshForInspection() {
+        if let latestDepthAnythingMeshSnapshot,
+           let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
+            delegate?.didUpdateStoppedInspectionScene(scene)
+            return
+        }
+
         if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
            !anchors.isEmpty {
             let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
@@ -409,12 +417,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 delegate?.didUpdateStoppedInspectionScene(scene)
                 return
             }
-        }
-
-        if let latestDepthAnythingMeshSnapshot,
-           let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
-            delegate?.didUpdateStoppedInspectionScene(scene)
-            return
         }
 
         delegate?.didUpdateStoppedInspectionScene(nil)
@@ -430,11 +432,25 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
 
         finalPointCloudArtifactTask?.cancel()
+        let depthAnythingPoints = latestDepthAnythingPointCloud
         finalPointCloudArtifactTask = Task { [pointManager] in
-            let cleanedPoints = await pointManager.getCleanedPoints()
+            let cleanedPoints = depthAnythingPoints.isEmpty ? await pointManager.getCleanedPoints() : []
             let artifact: LocalPointCloudArtifact?
 
-            if !cleanedPoints.isEmpty {
+            if !depthAnythingPoints.isEmpty {
+                artifact = LocalPointCloudArtifact(
+                    source: "depth_anything_lidar_calibrated_full_resolution",
+                    coordinateFrame: "map",
+                    capturedAt: Date(),
+                    points: depthAnythingPoints.map { point in
+                        LocalPointCloudArtifact.Point(position: point.position, color: point.color)
+                    },
+                    metadata: [
+                        "point_count_source": "latest_full_depthanything_frame",
+                        "lidar_usage": "calibration_only"
+                    ]
+                )
+            } else if !cleanedPoints.isEmpty {
                 artifact = LocalPointCloudArtifact(
                     source: "fused_depth_pointcloud",
                     coordinateFrame: "map",
@@ -471,17 +487,17 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     private func currentFinalOverlayMeshArtifact() -> LocalOverlayMeshArtifact? {
+        if let latestDepthAnythingMeshSnapshot,
+           let artifact = makeFinalOverlayMeshArtifact(from: latestDepthAnythingMeshSnapshot) {
+            return artifact
+        }
+
         if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
            !anchors.isEmpty {
             let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
             if let artifact = makeFinalOverlayMeshArtifact(from: safeMeshes) {
                 return artifact
             }
-        }
-
-        if let latestDepthAnythingMeshSnapshot,
-           let artifact = makeFinalOverlayMeshArtifact(from: latestDepthAnythingMeshSnapshot) {
-            return artifact
         }
 
         return nil
@@ -530,13 +546,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
         from snapshot: MeshGenerator.DepthAnythingMeshSnapshot
     ) -> LocalOverlayMeshArtifact? {
         let artifact = LocalOverlayMeshArtifact(
-            source: "depth_anything_overlay",
+            source: "depth_anything_lidar_calibrated_overlay",
             coordinateFrame: "map",
             capturedAt: Date(),
             vertices: snapshot.vertices,
             indices: snapshot.indices,
             metadata: [
-                "visualization_mode": currentMode.rawValue
+                "visualization_mode": currentMode.rawValue,
+                "lidar_usage": "calibration_only",
+                "point_source": "full_resolution_depthanything"
             ]
         )
         return artifact.isEmpty ? nil : artifact
@@ -709,13 +727,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
             relativeDepthMap: relative,
             calibration: calibration
         )
-        let relativePoints = pointCloudProcessor.processRelativeDepthAnythingPointCloud(
-            cameraImage: cameraImage,
-            intrinsics: intrinsics,
-            imageResolution: imageResolution,
-            relativeDepthMap: relative
-        )
-
         let meshSnapshot = shouldBuildMesh
             ? MeshGenerator.createDepthAnythingMeshSnapshot(
                 from: relative,
@@ -726,10 +737,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
             )
             : nil
 
-        guard !calibratedPoints.isEmpty || !relativePoints.isEmpty || meshSnapshot != nil else { return nil }
+        guard !calibratedPoints.isEmpty || meshSnapshot != nil else { return nil }
         return DepthAnythingMappingFrame(
             calibratedPoints: calibratedPoints,
-            relativePoints: relativePoints,
             calibration: calibration,
             relativeDepthSize: CGSize(width: CGFloat(relative.width), height: CGFloat(relative.height)),
             meshSnapshot: meshSnapshot
@@ -1004,7 +1014,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
             && !isPublishingCameraImage
         let shouldRefreshSurfelVisualization = currentMode == .surfels
             && timestamp - lastSurfelVisualizationTime >= surfelVisualizationInterval
-        let shouldRefreshDepthMeshVisualization = false
+        let shouldRefreshDepthMeshVisualization = currentMode == .solidMesh
+            && timestamp - lastDepthMeshVisualizationTime >= depthMeshVisualizationInterval
 
         if shouldPublishCameraImage {
             lastCameraImagePublishTime = timestamp
@@ -1043,7 +1054,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 mappingFrame = nil
             }
 
-            let depthAnythingPointCloud = mappingFrame?.relativePoints ?? []
+            let depthAnythingPointCloud = mappingFrame?.calibratedPoints ?? []
             let newPoints = mappingFrame?.calibratedPoints ?? []
             let lidarPointCloud: [ColoredPoint]
             if shouldPublishPointCloud {
@@ -1061,15 +1072,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
             }
 
             if shouldPublishPointCloud {
-                // Downsample the network payload to a sparse 10cm grid to prevent saturating the Wi-Fi bandwidth.
+                // Keep the calibrated Depth Anything payload full-resolution; LiDAR stays sparse.
                 let sparseLiDARPoints = self.pointCloudProcessor.voxelGridFilter(points: lidarPointCloud, voxelSize: 0.1)
-                let sparseDepthAnythingPoints = self.pointCloudProcessor.voxelGridFilter(points: depthAnythingPointCloud, voxelSize: 0.1)
+                let fullResolutionDepthAnythingPoints = depthAnythingPointCloud
 
                 if !sparseLiDARPoints.isEmpty {
                     ROS2BridgeClient.shared.publishLiDARPointCloud(sparseLiDARPoints, timestamp: timestamp)
                 }
-                if !sparseDepthAnythingPoints.isEmpty {
-                    ROS2BridgeClient.shared.publishDepthAnythingPointCloud(sparseDepthAnythingPoints, timestamp: timestamp)
+                if !fullResolutionDepthAnythingPoints.isEmpty {
+                    ROS2BridgeClient.shared.publishDepthAnythingPointCloud(fullResolutionDepthAnythingPoints, timestamp: timestamp)
                 }
                 if let mappingFrame {
                     ROS2BridgeClient.shared.publishDepthAnythingCalibration(
@@ -1079,7 +1090,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                         timestamp: timestamp
                     )
                 }
-                if !sparseLiDARPoints.isEmpty || !sparseDepthAnythingPoints.isEmpty || mappingFrame != nil {
+                if !sparseLiDARPoints.isEmpty || !fullResolutionDepthAnythingPoints.isEmpty || mappingFrame != nil {
                     await MainActor.run {
                         self.lastPointCloudPublishTime = timestamp
                     }
@@ -1094,12 +1105,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
             }
 
             if !newPoints.isEmpty {
-                _ = await self.surfelMap.fuse(
-                    points: newPoints,
-                    observerPosition: cameraPosition,
-                    timestamp: timestamp
-                )
+                await MainActor.run {
+                    self.latestDepthAnythingPointCloud = newPoints
+                }
                 if shouldRefreshSurfelVisualization {
+                    _ = await self.surfelMap.fuse(
+                        points: newPoints,
+                        observerPosition: cameraPosition,
+                        timestamp: timestamp
+                    )
                     let surfelSnapshot = await self.surfelMap.snapshot(maxCount: self.maxDisplayedSurfels)
                     let previewSurfels = Array(surfelSnapshot.prefix(self.maxDisplayedSurfels))
                     await MainActor.run {
@@ -1107,7 +1121,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                         self.updateLiveSurfelVisualization(with: previewSurfels)
                     }
                 }
-                let count = await self.pointManager.addAndFilter(newPoints: newPoints)
+                let count = newPoints.count
                 
                 await MainActor.run {
                     self.delegate?.didUpdatePointCount(count)

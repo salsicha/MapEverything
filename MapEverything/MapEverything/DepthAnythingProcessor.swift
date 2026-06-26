@@ -132,11 +132,9 @@ final class DepthAnythingProcessor {
         _ = inferRelativeDepth(from: pixelBuffer)
     }
 
-    /// Fuses a Depth Anything relative depth map with LiDAR using a maximum-likelihood
-    /// estimate. First calibrates monocular relative depth into metric depth using
-    /// weighted least squares on valid LiDAR samples, then performs per-pixel
-    /// inverse-variance fusion where LiDAR exists. This keeps LiDAR dominant at short
-    /// range while preserving calibrated monocular depth outside the LiDAR return range.
+    /// Calibrates a Depth Anything relative depth map into metric depth using LiDAR.
+    /// LiDAR samples are used only to estimate the affine metric transform; every
+    /// valid Depth Anything pixel is then kept on the calibrated monocular surface.
     func fuseMaximumLikelihood(
         relative: RelativeDepthMap,
         lidarDepthMap: CVPixelBuffer,
@@ -181,11 +179,9 @@ final class DepthAnythingProcessor {
 
                     let normalizedX = Float(x) / Float(max(relative.width - 1, 1))
                     let lidarX = min(lidarW - 1, max(0, Int(normalizedX * Float(max(lidarW - 1, 1)))))
-                    let lidarDepth = base[lidarY * floatsPerRow + lidarX]
-
                     if let depth = Self.maximumLikelihoodMetricDepth(
                         relativeDepth: relativeDepth,
-                        lidarDepth: lidarDepth,
+                        lidarDepth: base[lidarY * floatsPerRow + lidarX],
                         calibration: calibration
                     ) {
                         fusedData[y * relative.width + x] = depth
@@ -236,25 +232,18 @@ final class DepthAnythingProcessor {
         lidarDepth: Float,
         calibration: MaximumLikelihoodCalibration
     ) -> Float? {
+        calibratedMetricDepth(relativeDepth: relativeDepth, calibration: calibration)
+    }
+
+    static func calibratedMetricDepth(
+        relativeDepth: Float,
+        calibration: MaximumLikelihoodCalibration
+    ) -> Float? {
         guard relativeDepth.isFinite, relativeDepth > 0 else { return nil }
 
         let monocularDepth = calibration.scale * relativeDepth + calibration.offset
-        guard monocularDepth.isFinite, monocularDepth > 0.1, monocularDepth < 20.0 else { return nil }
-
-        guard isValidLiDARDepth(lidarDepth) else {
-            return monocularDepth
-        }
-
-        let lidarSigma = lidarStandardDeviation(depth: lidarDepth)
-        let monocularSigma = monocularStandardDeviation(depth: monocularDepth)
-        let lidarPrecision = 1.0 / (lidarSigma * lidarSigma)
-        let monocularPrecision = 1.0 / (monocularSigma * monocularSigma)
-        let fusedDepth = (
-            lidarDepth * lidarPrecision + monocularDepth * monocularPrecision
-        ) / (lidarPrecision + monocularPrecision)
-
-        guard fusedDepth.isFinite, fusedDepth > 0 else { return nil }
-        return fusedDepth
+        guard monocularDepth.isFinite, monocularDepth > 0.1 else { return nil }
+        return monocularDepth
     }
 
     /// Fuses a Depth Anything relative depth map with the sparse LiDAR depth from an ARFrame

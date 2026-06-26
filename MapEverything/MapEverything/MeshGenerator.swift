@@ -24,11 +24,11 @@ enum MeshGenerator {
         let maximumTriangleCount: Int
 
         static let overlay = DepthAnythingMeshConfiguration(
-            step: 12,
+            step: 1,
             minimumDepth: 0.1,
-            maximumDepth: 8.0,
+            maximumDepth: .greatestFiniteMagnitude,
             maximumDepthDiscontinuity: 0.45,
-            maximumTriangleCount: 8_000
+            maximumTriangleCount: 600_000
         )
     }
 
@@ -146,8 +146,10 @@ enum MeshGenerator {
             for (rowIndex, y) in rows.enumerated() {
                 for (columnIndex, x) in columns.enumerated() {
                     let relativeDepth = reader.value(atX: x, y: y)
-                    let depth = calibration.scale * relativeDepth + calibration.offset
-                    guard depth.isFinite,
+                    guard let depth = DepthAnythingProcessor.calibratedMetricDepth(
+                        relativeDepth: relativeDepth,
+                        calibration: calibration
+                    ),
                           depth >= configuration.minimumDepth,
                           depth <= configuration.maximumDepth else {
                         continue

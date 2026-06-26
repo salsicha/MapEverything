@@ -765,7 +765,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishDepthAnythingPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
-        publishPointCloud(points, topicID: .depthAnythingPointCloud, frameID: FrameID.iphoneCamera, timestamp: timestamp)
+        publishPointCloud(points, topicID: .depthAnythingPointCloud, frameID: FrameID.map, timestamp: timestamp)
     }
 
     func publishDepthAnythingCalibration(
@@ -842,10 +842,11 @@ class ROS2BridgeClient: ObservableObject {
         frameID: String
     ) -> [String: Any] {
         let metadata: [String: Any] = [
-            "relative_pointcloud_coordinate_frame": "camera",
-            "relative_pointcloud_semantics": "x_y_z_are_camera_ray_coordinates_scaled_by_raw_depthanything_relative_depth",
-            "metric_reconstruction": "metric_depth_m = scale * relative_depth + offset; recompute camera ray coordinates with the same intrinsics before transforming to map",
+            "pointcloud_coordinate_frame": "map",
+            "pointcloud_semantics": "x_y_z_are_metric_map_coordinates_projected_from_full_depthanything_depth",
+            "metric_reconstruction": "metric_depth_m = scale * relative_depth + offset; every valid Depth Anything pixel is projected with that metric depth",
             "uses_lidar_for_scale_calibration": true,
+            "lidar_usage": "calibration_only",
             "overlay_mesh_uses_calibrated_depth": true
         ]
 
@@ -862,6 +863,7 @@ class ROS2BridgeClient: ObservableObject {
             "header": header,
             "schema_version": 1,
             "source": "depth_anything_v2_lidar_calibrated",
+            "metric_pointcloud_topic": relativePointCloudTopic,
             "relative_pointcloud_topic": relativePointCloudTopic,
             "overlay_mesh_source": "calibrated_depthanything_grid",
             "frame_id": frameID,
