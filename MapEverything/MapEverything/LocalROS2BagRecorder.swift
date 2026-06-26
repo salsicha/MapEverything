@@ -6,6 +6,7 @@
 import Foundation
 import Combine
 import SQLite3
+import simd
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -33,6 +34,87 @@ struct LocalROS2BagRecorderConfiguration: Equatable {
             isEnabled: userDefaults.bool(forKey: enabledStorageKey),
             maxChunkBytes: clampedChunkSizeMB * 1_048_576
         )
+    }
+}
+
+struct LocalOverlayMeshArtifact {
+    static let objFileName = "final_overlay_mesh.obj"
+    static let metadataFileName = "final_overlay_mesh.json"
+
+    let source: String
+    let coordinateFrame: String
+    let capturedAt: Date
+    let vertices: [SIMD3<Float>]
+    let indices: [UInt32]
+    let metadata: [String: String]
+
+    var triangleCount: Int {
+        validTriangles.count
+    }
+
+    var isEmpty: Bool {
+        vertices.isEmpty || triangleCount == 0
+    }
+
+    func objString() -> String {
+        var lines: [String] = [
+            "# MapEverything final overlay mesh",
+            "# source: \(source)",
+            "# coordinate_frame: \(coordinateFrame)",
+            "# captured_at: \(ISO8601DateFormatter().string(from: capturedAt))",
+            "# vertex_count: \(vertices.count)",
+            "# triangle_count: \(triangleCount)",
+            "o final_overlay_mesh"
+        ]
+
+        lines.reserveCapacity(lines.count + vertices.count + validTriangles.count)
+        for vertex in vertices {
+            lines.append("v \(Self.format(vertex.x)) \(Self.format(vertex.y)) \(Self.format(vertex.z))")
+        }
+
+        for triangle in validTriangles {
+            lines.append("f \(triangle.0 + 1) \(triangle.1 + 1) \(triangle.2 + 1)")
+        }
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    func metadataData() throws -> Data {
+        var payload: [String: Any] = [
+            "schema_version": 1,
+            "obj_file": Self.objFileName,
+            "source": source,
+            "coordinate_frame": coordinateFrame,
+            "captured_at": ISO8601DateFormatter().string(from: capturedAt),
+            "vertex_count": vertices.count,
+            "triangle_count": triangleCount
+        ]
+        if !metadata.isEmpty {
+            payload["metadata"] = metadata
+        }
+
+        return try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    private var validTriangles: [(Int, Int, Int)] {
+        var triangles: [(Int, Int, Int)] = []
+        triangles.reserveCapacity(indices.count / 3)
+        for index in stride(from: 0, to: indices.count - (indices.count % 3), by: 3) {
+            let a = Int(indices[index])
+            let b = Int(indices[index + 1])
+            let c = Int(indices[index + 2])
+            guard a >= 0, b >= 0, c >= 0,
+                  a < vertices.count,
+                  b < vertices.count,
+                  c < vertices.count else { continue }
+            triangles.append((a, b, c))
+        }
+        return triangles
+    }
+
+    private static func format(_ value: Float) -> String {
+        let finiteValue = value.isFinite ? value : 0
+        return String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), Double(finiteValue))
     }
 }
 
@@ -120,12 +202,16 @@ struct LocalROS2BagFile: Identifiable, Hashable {
     enum Kind: String {
         case metadata
         case sqliteChunk
+        case overlayMesh
+        case overlayMeshMetadata
         case other
 
         var displayName: String {
             switch self {
             case .metadata: return "Metadata"
             case .sqliteChunk: return "SQLite Chunk"
+            case .overlayMesh: return "Overlay Mesh"
+            case .overlayMeshMetadata: return "Overlay Mesh Metadata"
             case .other: return "File"
             }
         }
@@ -134,6 +220,8 @@ struct LocalROS2BagFile: Identifiable, Hashable {
             switch self {
             case .metadata: return "doc.text"
             case .sqliteChunk: return "cylinder.split.1x2"
+            case .overlayMesh: return "cube.transparent"
+            case .overlayMeshMetadata: return "curlybraces.square"
             case .other: return "doc"
             }
         }
@@ -528,6 +616,25 @@ final class LocalROS2BagRecorder: ObservableObject {
         }
     }
 
+    func recordFinalOverlayMesh(_ artifact: LocalOverlayMeshArtifact) {
+        guard !artifact.isEmpty else { return }
+
+        queue.async {
+            guard self.acceptsRecords,
+                  self.configuration.isEnabled,
+                  let bagDirectoryURL = self.bagDirectoryURL else { return }
+
+            do {
+                let objURL = bagDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.objFileName)
+                let metadataURL = bagDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.metadataFileName)
+                try artifact.objString().write(to: objURL, atomically: true, encoding: .utf8)
+                try artifact.metadataData().write(to: metadataURL, options: [.atomic])
+            } catch {
+                self.recordFailure("Failed to write final overlay mesh: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func storageRootURL() throws -> URL {
         if let baseDirectoryURL {
             return baseDirectoryURL
@@ -548,7 +655,10 @@ final class LocalROS2BagRecorder: ObservableObject {
             options: [.skipsHiddenFiles]
         )
         .filter { url in
-            url.pathExtension == "db3" || url.lastPathComponent == "metadata.yaml"
+            url.pathExtension == "db3"
+                || url.lastPathComponent == "metadata.yaml"
+                || url.lastPathComponent == LocalOverlayMeshArtifact.objFileName
+                || url.lastPathComponent == LocalOverlayMeshArtifact.metadataFileName
         }
         .sorted { lhs, rhs in
             lhs.lastPathComponent < rhs.lastPathComponent
@@ -561,6 +671,10 @@ final class LocalROS2BagRecorder: ObservableObject {
                 kind = .metadata
             } else if url.pathExtension == "db3" {
                 kind = .sqliteChunk
+            } else if url.lastPathComponent == LocalOverlayMeshArtifact.objFileName {
+                kind = .overlayMesh
+            } else if url.lastPathComponent == LocalOverlayMeshArtifact.metadataFileName {
+                kind = .overlayMeshMetadata
             } else {
                 kind = .other
             }

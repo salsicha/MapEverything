@@ -1547,6 +1547,54 @@ struct MapEverythingTests {
         #expect(try recorder.listBagSessions().isEmpty)
     }
 
+    @Test("Local ROS2 bag recorder writes final overlay mesh artifacts")
+    func testLocalROS2BagRecorderWritesFinalOverlayMeshArtifact() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("MapEverythingLocalBagMesh-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: rootURL) }
+
+        let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
+        recorder.start(
+            sessionID: UUID(),
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+        )
+        recorder.recordFinalOverlayMesh(
+            LocalOverlayMeshArtifact(
+                source: "unit_test",
+                coordinateFrame: "map",
+                capturedAt: Date(timeIntervalSince1970: 1_700_000_050),
+                vertices: [
+                    SIMD3<Float>(0, 0, 0),
+                    SIMD3<Float>(1, 0, 0),
+                    SIMD3<Float>(0, 1, 0)
+                ],
+                indices: [0, 1, 2],
+                metadata: ["visualization_mode": "Solid Mesh"]
+            )
+        )
+        recorder.stopAndWait()
+
+        let session = try #require(try recorder.listBagSessions().first)
+        #expect(session.files.contains { $0.name == LocalOverlayMeshArtifact.objFileName && $0.kind == .overlayMesh })
+        #expect(session.files.contains { $0.name == LocalOverlayMeshArtifact.metadataFileName && $0.kind == .overlayMeshMetadata })
+
+        let objURL = session.directoryURL.appendingPathComponent(LocalOverlayMeshArtifact.objFileName)
+        let obj = try String(contentsOf: objURL, encoding: .utf8)
+        #expect(obj.contains("# source: unit_test"))
+        #expect(obj.contains("v 1.000000 0.000000 0.000000"))
+        #expect(obj.contains("f 1 2 3"))
+
+        let metadataURL = session.directoryURL.appendingPathComponent(LocalOverlayMeshArtifact.metadataFileName)
+        let metadataData = try Data(contentsOf: metadataURL)
+        let metadata = try #require(JSONSerialization.jsonObject(with: metadataData) as? [String: Any])
+        #expect(metadata["source"] as? String == "unit_test")
+        #expect(metadata["coordinate_frame"] as? String == "map")
+        #expect(metadata["vertex_count"] as? Int == 3)
+        #expect(metadata["triangle_count"] as? Int == 1)
+    }
+
     @Test("Local ROS2 bag recorder flushes pending SQLite batches")
     func testLocalROS2BagRecorderFlushesPendingSQLiteBatches() throws {
         let fileManager = FileManager.default

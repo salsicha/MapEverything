@@ -390,20 +390,83 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     private func freezeCurrentMeshForInspection() {
-        guard let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
-              !anchors.isEmpty else {
-            if let latestDepthAnythingMeshSnapshot,
-               let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
+        if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
+           !anchors.isEmpty {
+            let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
+            if let artifact = makeFinalOverlayMeshArtifact(from: safeMeshes) {
+                LocalROS2BagRecorder.shared.recordFinalOverlayMesh(artifact)
+            }
+            if let scene = makeInspectionScene(from: safeMeshes) {
                 delegate?.didUpdateStoppedInspectionScene(scene)
                 return
             }
+        }
 
-            delegate?.didUpdateStoppedInspectionScene(nil)
+        if let latestDepthAnythingMeshSnapshot,
+           let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
+            if let artifact = makeFinalOverlayMeshArtifact(from: latestDepthAnythingMeshSnapshot) {
+                LocalROS2BagRecorder.shared.recordFinalOverlayMesh(artifact)
+            }
+            delegate?.didUpdateStoppedInspectionScene(scene)
             return
         }
 
-        let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
-        delegate?.didUpdateStoppedInspectionScene(makeInspectionScene(from: safeMeshes))
+        delegate?.didUpdateStoppedInspectionScene(nil)
+    }
+
+    private func makeFinalOverlayMeshArtifact(from safeMeshes: [SafeARMesh]) -> LocalOverlayMeshArtifact? {
+        var vertices: [SIMD3<Float>] = []
+        var indices: [UInt32] = []
+
+        for mesh in safeMeshes {
+            guard !mesh.vertices.isEmpty, mesh.indices.count >= 3 else { continue }
+            let vertexOffset = vertices.count
+            guard vertexOffset <= Int(UInt32.max) else { break }
+
+            vertices.reserveCapacity(vertices.count + mesh.vertices.count)
+            for vertex in mesh.vertices {
+                let transformed = simd_mul(mesh.transform, SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1))
+                vertices.append(SIMD3<Float>(transformed.x, transformed.y, transformed.z))
+            }
+
+            indices.reserveCapacity(indices.count + mesh.indices.count)
+            for index in mesh.indices {
+                let localIndex = Int(index)
+                guard localIndex >= 0, localIndex < mesh.vertices.count else { continue }
+                let combinedIndex = vertexOffset + localIndex
+                guard combinedIndex <= Int(UInt32.max) else { continue }
+                indices.append(UInt32(combinedIndex))
+            }
+        }
+
+        let artifact = LocalOverlayMeshArtifact(
+            source: "arkit_scene_reconstruction",
+            coordinateFrame: "map",
+            capturedAt: Date(),
+            vertices: vertices,
+            indices: indices,
+            metadata: [
+                "visualization_mode": currentMode.rawValue,
+                "mesh_count": "\(safeMeshes.count)"
+            ]
+        )
+        return artifact.isEmpty ? nil : artifact
+    }
+
+    private func makeFinalOverlayMeshArtifact(
+        from snapshot: MeshGenerator.DepthAnythingMeshSnapshot
+    ) -> LocalOverlayMeshArtifact? {
+        let artifact = LocalOverlayMeshArtifact(
+            source: "depth_anything_overlay",
+            coordinateFrame: "map",
+            capturedAt: Date(),
+            vertices: snapshot.vertices,
+            indices: snapshot.indices,
+            metadata: [
+                "visualization_mode": currentMode.rawValue
+            ]
+        )
+        return artifact.isEmpty ? nil : artifact
     }
 
     private func makeInspectionScene(from safeMeshes: [SafeARMesh]) -> SCNScene? {
