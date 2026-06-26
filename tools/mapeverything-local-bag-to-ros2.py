@@ -358,17 +358,27 @@ def decode_rosbridge_payload(record: BagRecord) -> tuple[str, dict[str, Any]]:
 def create_topic_metadata(name: str, message_type: str, qos: str) -> Any:
     from rosbag2_py import TopicMetadata
 
-    kwargs = {
+    base_kwargs = {
         "name": name,
         "type": message_type,
         "serialization_format": NATIVE_FORMAT,
-        "offered_qos_profiles": qos,
     }
-    try:
-        return TopicMetadata(**kwargs)
-    except TypeError:
-        kwargs["id"] = 0
-        return TopicMetadata(**kwargs)
+    candidates = [
+        {**base_kwargs, "offered_qos_profiles": qos},
+        {"id": 0, **base_kwargs, "offered_qos_profiles": qos},
+        {**base_kwargs, "offered_qos_profiles": []},
+        {"id": 0, **base_kwargs, "offered_qos_profiles": []},
+    ]
+
+    last_error: TypeError | None = None
+    for kwargs in candidates:
+        try:
+            return TopicMetadata(**kwargs)
+        except TypeError as exc:
+            last_error = exc
+
+    assert last_error is not None
+    raise last_error
 
 
 def open_writer(output: Path, storage_id: str) -> Any:
