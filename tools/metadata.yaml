@@ -1,0 +1,41 @@
+rosbag2_bagfile_information:
+  version: 8
+  storage_identifier: sqlite3
+  duration:
+    nanoseconds: 22201536894
+  starting_time:
+    nanoseconds_since_epoch: 1782427879837023973
+  message_count: 186
+  topics_with_message_count:
+    - topic_metadata:
+        name: '/mapping/depth_anything/calibration'
+        type: 'reconstructor_msgs/msg/DepthAnythingCalibration'
+        serialization_format: 'rosbridge_json'
+        offered_qos_profiles: ''
+      message_count: 37
+    - topic_metadata:
+        name: '/mapping/pointcloud/depth_anything'
+        type: 'sensor_msgs/msg/PointCloud2'
+        serialization_format: 'rosbridge_json'
+        offered_qos_profiles: ''
+      message_count: 37
+    - topic_metadata:
+        name: '/mapping/pointcloud/lidar'
+        type: 'sensor_msgs/msg/PointCloud2'
+        serialization_format: 'rosbridge_json'
+        offered_qos_profiles: ''
+      message_count: 112
+  compression_format: ''
+  compression_mode: ''
+  relative_file_paths:
+    - 'mapeverything_0.db3'
+  files:
+    - path: 'mapeverything_0.db3'
+      starting_time:
+        nanoseconds_since_epoch: 1782427879837023973
+      duration:
+        nanoseconds: 22201536894
+      message_count: 186
+  custom_data:
+    mapeverything.serialization_format: 'rosbridge_json'
+    mapeverything.serialization_note: 'Messages are stored as rosbridge publish JSON payloads, not native ROS2 CDR bytes.'
