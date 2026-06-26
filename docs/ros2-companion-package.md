@@ -1,29 +1,29 @@
 # ROS2 Companion Package
 
-MapEverything publishes several custom message types under `reconstructor_msgs`.
-The package lives in `ros2/reconstructor_msgs` and can be copied or symlinked
+MapEverything publishes several custom message types under `mapeverything_msgs`.
+The package lives in `ros2/mapeverything_msgs` and can be copied or symlinked
 into a normal ROS2 colcon workspace on the recorder machine.
 
 ## Build the Messages
 
 ```bash
 mkdir -p ~/mapeverything_ws/src
-cp -R ros2/reconstructor_msgs ~/mapeverything_ws/src/
+cp -R ros2/mapeverything_msgs ~/mapeverything_ws/src/
 cd ~/mapeverything_ws
 rosdep install --from-paths src --ignore-src -r -y
-colcon build --packages-select reconstructor_msgs
+colcon build --packages-select mapeverything_msgs
 source install/setup.bash
-ros2 interface show reconstructor_msgs/msg/RadioObservation
+ros2 interface show mapeverything_msgs/msg/RadioObservation
 ```
 
 If you prefer to keep the package linked to this repository, replace the `cp`
-step with a symlink from `~/mapeverything_ws/src/reconstructor_msgs` to
-`<repo>/ros2/reconstructor_msgs`.
+step with a symlink from `~/mapeverything_ws/src/mapeverything_msgs` to
+`<repo>/ros2/mapeverything_msgs`.
 
 ## rosbridge Setup
 
 Install and launch rosbridge after sourcing the workspace that contains
-`reconstructor_msgs`:
+`mapeverything_msgs`:
 
 ```bash
 sudo apt-get update
@@ -70,9 +70,9 @@ Useful inspection commands:
 ros2 topic echo /mapping/satellite/tile_info
 ros2 topic echo /mapping/dem/tile
 ros2 topic echo /mapping/depth_anything/calibration
-ros2 interface show reconstructor_msgs/msg/GeoTileInfo
-ros2 interface show reconstructor_msgs/msg/GeoRasterTile
-ros2 interface show reconstructor_msgs/msg/DepthAnythingCalibration
+ros2 interface show mapeverything_msgs/msg/GeoTileInfo
+ros2 interface show mapeverything_msgs/msg/GeoRasterTile
+ros2 interface show mapeverything_msgs/msg/DepthAnythingCalibration
 ```
 
 ## RViz Sample

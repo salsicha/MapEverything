@@ -52,14 +52,14 @@ PROFILES = [
     TopicProfile(
         name="depth-anything-calibration",
         topic="/mapping/depth_anything/calibration",
-        message_type="reconstructor_msgs/msg/DepthAnythingCalibration",
+        message_type="mapeverything_msgs/msg/DepthAnythingCalibration",
         rate_hz=5,
         raw_payload_bytes=1_024,
     ),
     TopicProfile(
         name="mesh",
         topic="/mapping/mesh_snapshot",
-        message_type="reconstructor_msgs/msg/MeshSnapshot",
+        message_type="mapeverything_msgs/msg/MeshSnapshot",
         rate_hz=0.5,
         raw_payload_bytes=512_000,
     ),
@@ -73,7 +73,7 @@ PROFILES = [
     TopicProfile(
         name="dem",
         topic="/mapping/dem/tile",
-        message_type="reconstructor_msgs/msg/GeoRasterTile",
+        message_type="mapeverything_msgs/msg/GeoRasterTile",
         rate_hz=1 / 60,
         raw_payload_bytes=262_144,
     ),

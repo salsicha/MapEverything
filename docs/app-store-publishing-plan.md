@@ -131,7 +131,7 @@ Keep each candidate release directory or GitHub release organized with:
 - Physical-device validation report.
 - Rosbridge throughput benchmark JSON.
 - Rosbag replay notes and representative bag metadata.
-- ROS2 companion package source archive from `ros2/reconstructor_msgs`.
+- ROS2 companion package source archive from `ros2/mapeverything_msgs`.
 - RViz config from `ros2/rviz/mapeverything.rviz`.
 - Geospatial attribution/source-policy records.
 - Known issues and rollback notes.

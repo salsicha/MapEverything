@@ -26,8 +26,8 @@ struct RadioObservationMessageField: Identifiable, Codable, Hashable {
 final class RadioObservationMessageSchema {
     static let shared = RadioObservationMessageSchema()
 
-    let messageType = "reconstructor_msgs/msg/RadioObservation"
-    let packageName = "reconstructor_msgs"
+    let messageType = "mapeverything_msgs/msg/RadioObservation"
+    let packageName = "mapeverything_msgs"
     let messageName = "RadioObservation"
     let topic = "/mapping/radio"
     let schemaVersion = 1

@@ -2,7 +2,7 @@
 """Convert MapEverything local rosbridge_json SQLite bags to native ROS 2 bags.
 
 Run this inside a sourced ROS 2 workspace that can import rosbag2_py, rclpy,
-and any message packages present in the bag, including reconstructor_msgs.
+and any message packages present in the bag, including mapeverything_msgs.
 Dry-run inspection only needs the Python standard library.
 """
 
@@ -23,6 +23,10 @@ from typing import Any, Iterable
 
 MAPEVERYTHING_FORMAT = "rosbridge_json"
 NATIVE_FORMAT = "cdr"
+LEGACY_TOPIC_ROOT = "/reconstructor"
+MAPEVERYTHING_TOPIC_ROOT = "/mapping"
+LEGACY_MESSAGE_PACKAGE = "reconstructor_msgs"
+MAPEVERYTHING_MESSAGE_PACKAGE = "mapeverything_msgs"
 
 
 @dataclass(frozen=True)
@@ -87,7 +91,7 @@ class MessageHydrator:
         except ImportError as exc:
             raise BagConversionError(
                 "Unable to import rosidl_runtime_py. Source your ROS 2 setup.bash "
-                "and the workspace containing reconstructor_msgs before converting."
+                "and the workspace containing mapeverything_msgs before converting."
             ) from exc
 
         self.get_message = get_message
@@ -153,8 +157,24 @@ class MessageHydrator:
 def normalize_message_type(message_type: str) -> str:
     parts = message_type.split("/")
     if len(parts) == 2:
-        return f"{parts[0]}/msg/{parts[1]}"
+        message_type = f"{parts[0]}/msg/{parts[1]}"
+    return rewrite_legacy_message_type(message_type)
+
+
+def rewrite_legacy_message_type(message_type: str) -> str:
+    if message_type == LEGACY_MESSAGE_PACKAGE:
+        return MAPEVERYTHING_MESSAGE_PACKAGE
+    if message_type.startswith(f"{LEGACY_MESSAGE_PACKAGE}/"):
+        return f"{MAPEVERYTHING_MESSAGE_PACKAGE}/{message_type.split('/', 1)[1]}"
     return message_type
+
+
+def rewrite_legacy_topic_name(topic_name: str) -> str:
+    if topic_name == LEGACY_TOPIC_ROOT:
+        return MAPEVERYTHING_TOPIC_ROOT
+    if topic_name.startswith(f"{LEGACY_TOPIC_ROOT}/"):
+        return f"{MAPEVERYTHING_TOPIC_ROOT}/{topic_name.removeprefix(f'{LEGACY_TOPIC_ROOT}/')}"
+    return topic_name
 
 
 def nested_message_type(field_type: str) -> str | None:
@@ -229,7 +249,7 @@ def parse_type_overrides(values: list[str]) -> dict[str, str]:
         if "=" not in item:
             raise BagConversionError(f"Invalid --type override {item!r}; expected TOPIC=TYPE")
         topic, message_type = item.split("=", 1)
-        overrides[topic.strip()] = message_type.strip()
+        overrides[rewrite_legacy_topic_name(topic.strip())] = normalize_message_type(message_type.strip())
     return overrides
 
 
@@ -284,8 +304,9 @@ def inspect_topics(db_files: Iterable[Path], type_overrides: dict[str, str]) -> 
             for name, message_type, qos in connection.execute(
                 "SELECT name, type, offered_qos_profiles FROM topics ORDER BY name"
             ):
-                final_type = type_overrides.get(str(name), str(message_type))
-                topics[str(name)] = TopicDefinition(str(name), final_type, str(qos or ""))
+                topic_name = rewrite_legacy_topic_name(str(name))
+                final_type = type_overrides.get(topic_name, normalize_message_type(str(message_type)))
+                topics[topic_name] = TopicDefinition(topic_name, final_type, str(qos or ""))
     return topics
 
 
@@ -327,7 +348,7 @@ def decode_rosbridge_payload(record: BagRecord) -> tuple[str, dict[str, Any]]:
             f"{record.source}:{record.row_id} has unsupported rosbridge op {payload.get('op')!r}"
         )
 
-    topic = str(payload.get("topic") or record.topic)
+    topic = rewrite_legacy_topic_name(str(payload.get("topic") or record.topic))
     message = payload.get("msg")
     if not isinstance(message, dict):
         raise BagConversionError(f"{record.source}:{record.row_id} payload has no object msg")
@@ -386,6 +407,7 @@ def convert(
         ) from exc
 
     topics = inspect_topics(db_files, type_overrides)
+    topic_filter = {rewrite_legacy_topic_name(topic) for topic in topic_filter}
     if topic_filter:
         topics = {name: topic for name, topic in topics.items() if name in topic_filter}
 
@@ -429,7 +451,7 @@ def convert(
 
     written = 0
     for record in iter_records(db_files):
-        topic_name = record.topic
+        topic_name = rewrite_legacy_topic_name(record.topic)
         if topic_filter and topic_name not in topic_filter:
             continue
         if topic_name not in created_topics:
@@ -543,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
         type_overrides = parse_type_overrides(args.type)
         db_files = discover_db_files(inputs)
         topics, message_count = summarize(db_files, type_overrides)
-        selected_topics = set(args.topic)
+        selected_topics = {rewrite_legacy_topic_name(topic) for topic in args.topic}
 
         print(f"Input chunks: {len(db_files)}")
         for db_file in db_files:

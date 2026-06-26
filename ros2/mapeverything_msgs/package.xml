@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>reconstructor_msgs</name>
+  <name>mapeverything_msgs</name>
   <version>0.1.0</version>
   <description>Custom ROS2 message definitions emitted by MapEverything.</description>
   <maintainer email="maintainers@example.com">MapEverything maintainers</maintainer>

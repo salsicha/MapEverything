@@ -36,7 +36,7 @@ Core positioning:
 | P1 | Georeferenced satellite imagery | `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info` | Provider abstraction required; check cache and recording rights before choosing a provider. |
 | P1 | DEM/elevation tiles | `/mapping/dem/tile` | Provider abstraction required; preserve CRS, vertical datum, resolution, and attribution. |
 | P1 | Publish queue and reconnect buffer | all topics | Prevent high-rate streams from overwhelming rosbridge or losing critical state during disconnects. |
-| P1 | Companion ROS2 message package | `reconstructor_msgs/*` | Needed for radio observations, geotile metadata, DEM rasters, mesh snapshots, and session metadata. |
+| P1 | Companion ROS2 message package | `mapeverything_msgs/*` | Needed for radio observations, geotile metadata, DEM rasters, mesh snapshots, and session metadata. |
 | P2 | RViz and rosbag tooling | sample launch/config files | Provide a reproducible recorder-side workflow. |
 
 ## Sensor Streams
@@ -79,12 +79,12 @@ Core positioning:
 | `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | Existing, report publish status and metrics. |
 | `/mapping/pointcloud` | `sensor_msgs/msg/PointCloud2` | Existing, add backpressure and metrics. |
 | `/mapping/mesh_markers` | `visualization_msgs/msg/MarkerArray` | Existing map topic can evolve into this. |
-| `/mapping/radio` | `reconstructor_msgs/msg/RadioObservation` | Add custom message. |
+| `/mapping/radio` | `mapeverything_msgs/msg/RadioObservation` | Add custom message. |
 | `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | Add. |
-| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | Add custom message. |
-| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | Add custom message. |
+| `/mapping/satellite/tile_info` | `mapeverything_msgs/msg/GeoTileInfo` | Add custom message. |
+| `/mapping/dem/tile` | `mapeverything_msgs/msg/GeoRasterTile` | Add custom message. |
 | `/mapping/status` | `diagnostic_msgs/msg/DiagnosticArray` | Add. |
-| `/mapping/session` | `reconstructor_msgs/msg/MappingSession` | Add custom message. |
+| `/mapping/session` | `mapeverything_msgs/msg/MappingSession` | Add custom message. |
 
 ## Implementation Priorities
 

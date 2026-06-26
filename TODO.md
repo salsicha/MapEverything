@@ -29,7 +29,7 @@
 - [x] Add Network.framework path diagnostics for interface type, constrained state, expensive state, and reachability.
 - [x] Add endpoint latency and throughput probes against the ROS2 recorder.
 - [x] Add CoreBluetooth scanning for configured BLE beacon RSSI.
-- [x] Define `reconstructor_msgs/RadioObservation`.
+- [x] Define `mapeverything_msgs/RadioObservation`.
 - [x] Publish radio observations on `/mapping/radio`.
 - [x] Document iOS restrictions: no broad Wi-Fi scans and no reliable public cellular RSSI/RSRP stream.
 
@@ -44,22 +44,22 @@
 - [x] Add tile fetch by current GPS location, radius, zoom, and bounding box.
 - [x] Add local tile cache with provider, layer, CRS, zoom, tile coordinate, timestamp, attribution, and license metadata.
 - [x] Publish satellite imagery as `sensor_msgs/CompressedImage`.
-- [x] Define and publish `reconstructor_msgs/GeoTileInfo` for satellite georeferencing metadata.
-- [x] Define and publish `reconstructor_msgs/GeoRasterTile` for DEM payloads.
+- [x] Define and publish `mapeverything_msgs/GeoTileInfo` for satellite georeferencing metadata.
+- [x] Define and publish `mapeverything_msgs/GeoRasterTile` for DEM payloads.
 - [x] Publish device latitude, longitude, altitude, and tile pixel coordinates with satellite and DEM tiles.
 - [x] Add offline behavior for unavailable network or provider errors.
 
 ## P1 - Mesh, Point Cloud, and Camera Publishing
 
 - [x] Add mesh publishing fallback through `visualization_msgs/MarkerArray`.
-- [x] Define `reconstructor_msgs/MeshSnapshot` for structured mesh recording.
+- [x] Define `mapeverything_msgs/MeshSnapshot` for structured mesh recording.
 - [x] Add colored surfel fusion, PLY export, and ROS `PointCloud2` publication.
 - [x] Add compression and payload-size metrics for camera and point-cloud streams.
 - [x] Add stress tests for large mesh snapshots and long-running point-cloud sessions.
 
 ## P2 - Companion ROS2 Package
 
-- [x] Create a `reconstructor_msgs` ROS2 package for custom message definitions.
+- [x] Create a `mapeverything_msgs` ROS2 package for custom message definitions.
 - [x] Add `MappingSession.msg`.
 - [x] Add `GPSMetadata.msg`.
 - [x] Add `RadioObservation.msg`.

@@ -96,15 +96,15 @@ The current ROS topic namespace is `/mapping`.
 
 Transport decision: MapEverything continues to use `rosbridge_suite` over WebSocket in this build. A native binary bridge is not enabled until there is a maintained iOS ROS2/DDS client or companion ROS2 binary receiver and a throughput benchmark showing rosbridge is insufficient.
 
-The companion ROS2 custom message package lives in [ros2/reconstructor_msgs](ros2/reconstructor_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
+The companion ROS2 custom message package lives in [ros2/mapeverything_msgs](ros2/mapeverything_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
 
 Local SQLite bag storage is controlled by the **Save Local** button and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The **Share Local Bags** button opens a browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. The browser caches per-session preview metadata and camera thumbnails in hidden sidecar files so repeated scans of saved bags stay quick. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
 
-Use [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) to convert shared local chunks into a native ROS2 bag. Run it from a sourced ROS2 workspace that can import `rosbag2_py`, `rclpy`, and `reconstructor_msgs`:
+Use [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) to convert shared local chunks into a native ROS2 bag. Run it from a sourced ROS2 workspace that can import `rosbag2_py`, `rclpy`, and `mapeverything_msgs`:
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon build --packages-select reconstructor_msgs
+colcon build --packages-select mapeverything_msgs
 source install/setup.bash
 python3 tools/mapeverything-local-bag-to-ros2.py ROS2Bags/<session> --output converted/<session>_native
 ros2 bag info converted/<session>_native
@@ -125,7 +125,7 @@ Network path diagnostics use `NWPathMonitor` to report reachability, active and 
 
 Recorder endpoint probes use a bounded disposable rosbridge WebSocket connection to measure ping/pong round-trip latency and a short upload write-rate probe on `/mapping/probe/throughput`. Results are published through session metadata and `/mapping/status`; the probe measures application-path recorder health rather than sustained bidirectional network bandwidth.
 
-The app publishes `reconstructor_msgs/RadioObservation` messages on `/mapping/radio` for fresh radio samples and includes the schema in `/mapping/session` metadata. It covers current Wi-Fi, BLE advertisements, Network.framework path state, recorder endpoint probes, and optional external adapters; unset numeric fields use `0.0` for rosbridge JSON compatibility, unset strings are empty, unset arrays are empty, and channel-specific details go in `metadata_json`.
+The app publishes `mapeverything_msgs/RadioObservation` messages on `/mapping/radio` for fresh radio samples and includes the schema in `/mapping/session` metadata. It covers current Wi-Fi, BLE advertisements, Network.framework path state, recorder endpoint probes, and optional external adapters; unset numeric fields use `0.0` for rosbridge JSON compatibility, unset strings are empty, unset arrays are empty, and channel-specific details go in `metadata_json`.
 
 iOS does not expose broad Wi-Fi access-point scan results or a dependable public cellular RSSI/RSRP/RSRQ/SINR stream to normal apps. MapEverything publishes these platform restrictions in `/mapping/session` as `radio_platform_restrictions`; use external adapters, network equipment APIs, SDRs, or companion ROS2 nodes for those survey channels.
 
@@ -138,20 +138,20 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/mapping/odom` | `nav_msgs/msg/Odometry` | opt-in | Odometry-style pose for robotics consumers. |
 | `/mapping/imu` | `sensor_msgs/msg/Imu` | opt-in | High-fidelity IMU data containing orientation quaternions, angular velocities, and linear accelerations (including gravity). |
 | `/mapping/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
-| `/mapping/gps/metadata` | `reconstructor_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
+| `/mapping/gps/metadata` | `mapeverything_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
 | `/mapping/pointcloud/lidar` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | ARKit LiDAR-only colored point-cloud payloads downsampled to a sparse 10cm grid. |
 | `/mapping/pointcloud/depth_anything` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Relative Depth Anything colored point-cloud payloads in `iphone_camera`, downsampled to a sparse grid. Coordinates are not metric. |
-| `/mapping/depth_anything/calibration` | `reconstructor_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Scale/offset calibration used by the live overlay mesh: `metric_depth_m = scale * relative_depth + offset`. |
+| `/mapping/depth_anything/calibration` | `mapeverything_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Scale/offset calibration used by the live overlay mesh: `metric_depth_m = scale * relative_depth + offset`. |
 | `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | JPEG-compressed native ARKit camera image stream for visual loop closure and recorder context. |
 | `/mapping/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | 2 Hz | Same-timestamp camera intrinsics for the compressed image stream. |
 | `/mapping/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits reconstructed triangular mesh markers (`TRIANGLE_LIST`) for instant Rviz2 display when mesh publishing is enabled. |
-| `/mapping/mesh_snapshot` | `reconstructor_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with base64 packed little-endian vertex/index bytes plus truncation and payload-size metadata. |
-| `/mapping/radio` | `reconstructor_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
-| `/mapping/indoor_localization` | `reconstructor_msgs/msg/IndoorLocalization` | ~1 Hz | Indoor-aware Core Location sample with floor, heading, and registration quality metadata. |
+| `/mapping/mesh_snapshot` | `mapeverything_msgs/msg/MeshSnapshot` | ~0.5 Hz | Structured triangle-list mesh snapshot for rosbag recording, with base64 packed little-endian vertex/index bytes plus truncation and payload-size metadata. |
+| `/mapping/radio` | `mapeverything_msgs/msg/RadioObservation` | up to 2 Hz | Publishes fresh Wi-Fi, BLE beacon, network path, and recorder endpoint probe observations. |
+| `/mapping/indoor_localization` | `mapeverything_msgs/msg/IndoorLocalization` | ~1 Hz | Indoor-aware Core Location sample with floor, heading, and registration quality metadata. |
 | `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | 1/min | Compressed satellite imagery tile payload. |
-| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | 1/min | Satellite imagery provider, bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the tile. |
-| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | 1/min | DEM raster payload with bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the raster tile. |
-| `/mapping/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, recorder configuration, and local bag status. |
+| `/mapping/satellite/tile_info` | `mapeverything_msgs/msg/GeoTileInfo` | 1/min | Satellite imagery provider, bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the tile. |
+| `/mapping/dem/tile` | `mapeverything_msgs/msg/GeoRasterTile` | 1/min | DEM raster payload with bounds, CRS, attribution, source policy, and the device's pixel coordinate inside the raster tile. |
+| `/mapping/session` | `mapeverything_msgs/msg/MappingSession` | on change | Session lifecycle, enabled streams, advertised topics, schemas, recorder configuration, and local bag status. |
 | `/mapping/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, bridge, queue, radio, GPS, geotile, and recorder health diagnostics. |
 
 The default advertised topic set is `/mapping/pose`, `/mapping/camera/image/compressed`, `/mapping/camera/camera_info`, `/mapping/pointcloud/lidar`, `/mapping/pointcloud/depth_anything`, `/mapping/depth_anything/calibration`, `/mapping/gps/fix`, `/mapping/gps/metadata`, `/mapping/satellite/image/compressed`, `/mapping/satellite/tile_info`, and `/mapping/dem/tile`. Optional odometry, TF, mesh, IMU, radio, session, and diagnostics streams can still be re-enabled in custom profiles.
@@ -198,14 +198,14 @@ The checker verifies local release inputs such as `Info.plist` usage strings, po
 
 #### Step 1: Build the Custom Message Package
 
-Build [ros2/reconstructor_msgs](ros2/reconstructor_msgs) in a colcon workspace before launching rosbridge:
+Build [ros2/mapeverything_msgs](ros2/mapeverything_msgs) in a colcon workspace before launching rosbridge:
 
 ```bash
 mkdir -p ~/mapeverything_ws/src
-cp -R ros2/reconstructor_msgs ~/mapeverything_ws/src/
+cp -R ros2/mapeverything_msgs ~/mapeverything_ws/src/
 cd ~/mapeverything_ws
 rosdep install --from-paths src --ignore-src -r -y
-colcon build --packages-select reconstructor_msgs
+colcon build --packages-select mapeverything_msgs
 source install/setup.bash
 ```
 

@@ -145,7 +145,7 @@ final class ROS2TopicRegistry {
             id: .depthAnythingCalibration,
             stream: .pointCloud,
             topic: "/mapping/depth_anything/calibration",
-            messageType: "reconstructor_msgs/msg/DepthAnythingCalibration",
+            messageType: "mapeverything_msgs/msg/DepthAnythingCalibration",
             defaultRateHz: 5,
             isImplemented: true
         ),
@@ -217,7 +217,7 @@ final class ROS2TopicRegistry {
             id: .gpsMetadata,
             stream: .gps,
             topic: "/mapping/gps/metadata",
-            messageType: "reconstructor_msgs/msg/GPSMetadata",
+            messageType: "mapeverything_msgs/msg/GPSMetadata",
             defaultRateHz: 1,
             isImplemented: true
         ),
@@ -241,7 +241,7 @@ final class ROS2TopicRegistry {
             id: .session,
             stream: .session,
             topic: "/mapping/session",
-            messageType: "reconstructor_msgs/msg/MappingSession",
+            messageType: "mapeverything_msgs/msg/MappingSession",
             defaultRateHz: nil,
             isImplemented: true
         ),
@@ -249,7 +249,7 @@ final class ROS2TopicRegistry {
             id: .radio,
             stream: .radio,
             topic: "/mapping/radio",
-            messageType: "reconstructor_msgs/msg/RadioObservation",
+            messageType: "mapeverything_msgs/msg/RadioObservation",
             defaultRateHz: 2,
             isImplemented: true
         ),
@@ -257,7 +257,7 @@ final class ROS2TopicRegistry {
             id: .indoorLocalization,
             stream: .indoorLocalization,
             topic: "/mapping/indoor_localization",
-            messageType: "reconstructor_msgs/msg/IndoorLocalization",
+            messageType: "mapeverything_msgs/msg/IndoorLocalization",
             defaultRateHz: 1,
             isImplemented: true
         ),
@@ -273,7 +273,7 @@ final class ROS2TopicRegistry {
             id: .satelliteTileInfo,
             stream: .satelliteImagery,
             topic: "/mapping/satellite/tile_info",
-            messageType: "reconstructor_msgs/msg/GeoTileInfo",
+            messageType: "mapeverything_msgs/msg/GeoTileInfo",
             defaultRateHz: 1.0 / 60.0,
             isImplemented: true
         ),
@@ -281,7 +281,7 @@ final class ROS2TopicRegistry {
             id: .demTile,
             stream: .dem,
             topic: "/mapping/dem/tile",
-            messageType: "reconstructor_msgs/msg/GeoRasterTile",
+            messageType: "mapeverything_msgs/msg/GeoRasterTile",
             defaultRateHz: 1.0 / 60.0,
             isImplemented: true
         )

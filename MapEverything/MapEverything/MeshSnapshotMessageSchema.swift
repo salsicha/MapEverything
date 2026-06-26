@@ -27,8 +27,8 @@ struct MeshSnapshotMessageField: Identifiable, Codable, Hashable {
 final class MeshSnapshotMessageSchema {
     static let shared = MeshSnapshotMessageSchema()
 
-    let messageType = "reconstructor_msgs/msg/MeshSnapshot"
-    let packageName = "reconstructor_msgs"
+    let messageType = "mapeverything_msgs/msg/MeshSnapshot"
+    let packageName = "mapeverything_msgs"
     let messageName = "MeshSnapshot"
     let topic = "/mapping/mesh_snapshot"
     let schemaVersion = 2

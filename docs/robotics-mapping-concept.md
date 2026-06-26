@@ -44,7 +44,7 @@ This differs from room-scanning apps because the primary output is not a floorpl
 - Keep colored surfel reconstruction as an internal/export path rather than a ROS topic.
 - Publish reconstructed AR mesh as either:
   - `visualization_msgs/MarkerArray` for RViz compatibility.
-  - A custom `reconstructor_msgs/MeshSnapshot` for structured recording if a custom message package is installed.
+  - A custom `mapeverything_msgs/MeshSnapshot` for structured recording if a custom message package is installed.
 - Add mesh snapshot cadence controls separate from point-cloud cadence.
 - Persist mesh snapshots locally for retry if the ROS2 bridge disconnects.
 
@@ -82,7 +82,7 @@ Restricted or external-data targets:
 Recommended ROS output:
 
 - Standard diagnostics on `/mapping/status`.
-- Custom `reconstructor_msgs/RadioObservation` for Wi-Fi, BLE, network probes, and external radio adapters.
+- Custom `mapeverything_msgs/RadioObservation` for Wi-Fi, BLE, network probes, and external radio adapters.
 - Optional `sensor_msgs/PointCloud2` heatmap projection where each point stores signal fields.
 
 ### Satellite Imagery
@@ -104,7 +104,7 @@ Provider requirements:
 Recommended output:
 
 - `sensor_msgs/CompressedImage` for the raster tile.
-- Custom `reconstructor_msgs/GeoTileInfo` with bounding box, CRS, zoom, resolution, provider, attribution, and device pixel coordinates.
+- Custom `mapeverything_msgs/GeoTileInfo` with bounding box, CRS, zoom, resolution, provider, attribution, and device pixel coordinates.
 - Optional `nav_msgs/OccupancyGrid` only for derived costmap-like layers, not raw imagery.
 
 ### DEM and Elevation Maps
@@ -126,7 +126,7 @@ Provider requirements:
 
 Recommended output:
 
-- Custom `reconstructor_msgs/GeoRasterTile` for DEM payloads and metadata.
+- Custom `mapeverything_msgs/GeoRasterTile` for DEM payloads and metadata.
 - Optional `grid_map_msgs/GridMap` if the recorder stack uses `grid_map`.
 - Derived `sensor_msgs/PointCloud2` terrain surface for RViz visualization.
 
@@ -142,18 +142,18 @@ Recommended output:
 | `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | Camera frames for context, replay, and loop closure without saturating the iPhone. |
 | `/mapping/pointcloud/lidar` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Downsampled ARKit LiDAR-only colored point cloud. |
 | `/mapping/pointcloud/depth_anything` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Downsampled relative Depth Anything colored point cloud in `iphone_camera`. |
-| `/mapping/depth_anything/calibration` | `reconstructor_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Scale/offset calibration used by the live overlay mesh. |
+| `/mapping/depth_anything/calibration` | `mapeverything_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Scale/offset calibration used by the live overlay mesh. |
 | `/mapping/map` | `visualization_msgs/msg/MarkerArray` | 0.2-2 Hz | RViz-friendly mesh and semantic objects. |
-| `/mapping/radio` | `reconstructor_msgs/msg/RadioObservation` | 0.5-5 Hz | Wi-Fi, BLE, link, or external radio measurements. |
+| `/mapping/radio` | `mapeverything_msgs/msg/RadioObservation` | 0.5-5 Hz | Wi-Fi, BLE, link, or external radio measurements. |
 | `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | 1/min | Satellite imagery tile payloads. |
-| `/mapping/satellite/tile_info` | `reconstructor_msgs/msg/GeoTileInfo` | 1/min | Satellite imagery georeference metadata and device pixel coordinates. |
-| `/mapping/dem/tile` | `reconstructor_msgs/msg/GeoRasterTile` | 1/min | DEM/elevation raster payloads and device pixel coordinates. |
+| `/mapping/satellite/tile_info` | `mapeverything_msgs/msg/GeoTileInfo` | 1/min | Satellite imagery georeference metadata and device pixel coordinates. |
+| `/mapping/dem/tile` | `mapeverything_msgs/msg/GeoRasterTile` | 1/min | DEM/elevation raster payloads and device pixel coordinates. |
 | `/mapping/status` | `diagnostic_msgs/msg/DiagnosticArray` | 1 Hz | App, sensor, permission, bridge, and recorder health. |
-| `/mapping/session` | `reconstructor_msgs/msg/MappingSession` | on change | Session metadata and configuration. |
+| `/mapping/session` | `mapeverything_msgs/msg/MappingSession` | on change | Session metadata and configuration. |
 
 ## Custom ROS Message Package
 
-The companion `reconstructor_msgs` package lives at `ros2/reconstructor_msgs`.
+The companion `mapeverything_msgs` package lives at `ros2/mapeverything_msgs`.
 Build it in the recorder colcon workspace before launching rosbridge, rosbag2,
 or RViz. Setup details are in `docs/ros2-companion-package.md`.
 

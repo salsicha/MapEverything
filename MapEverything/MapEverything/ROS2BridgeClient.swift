@@ -95,7 +95,7 @@ class ROS2BridgeClient: ObservableObject {
     private let streamPayloadMetrics = StreamPayloadMetricsStore.shared
     private let localBagRecorder = LocalROS2BagRecorder.shared
     private let localSampleBufferConfiguration = LocalSampleBufferConfiguration.default
-    private let localSampleBufferQueue = DispatchQueue(label: "com.reconstructor.localSampleBuffer", qos: .utility)
+    private let localSampleBufferQueue = DispatchQueue(label: "com.mapeverything.localSampleBuffer", qos: .utility)
     private var diagnosticsTimer: DispatchSourceTimer?
     private var reconnectWorkItem: DispatchWorkItem?
     private lazy var publishQueue: PublishQueue = {
@@ -1890,7 +1890,7 @@ class ROS2BridgeClient: ObservableObject {
         if motionManager.isDeviceMotionAvailable {
             let imuTopic = topicRegistry.topic(.imu)
             motionManager.deviceMotionUpdateInterval = 0.01 // 100Hz for high-fidelity ROS2 sensor fusion
-            motionQueue.name = "com.reconstructor.imuQueue"
+            motionQueue.name = "com.mapeverything.imuQueue"
             motionQueue.qualityOfService = .userInitiated
             motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] data, error in
                 guard let self = self, let data = data, self.isConnected else { return }

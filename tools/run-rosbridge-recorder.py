@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run rosbridge and record MapEverything topics into chunked ROS 2 bags.
 
-Run this from a sourced ROS 2 workspace that includes `reconstructor_msgs`, or
+Run this from a sourced ROS 2 workspace that includes `mapeverything_msgs`, or
 pass `--setup ~/mapeverything_ws/install/setup.bash`.
 """
 

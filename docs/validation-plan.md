@@ -111,7 +111,7 @@ Pass criteria:
 
 - RViz fixed frame `map` resolves pose, GPS, point cloud, satellite imagery, and DEM metadata without missing message definitions.
 - Replaying the bag preserves timing closely enough that point cloud, pose, GPS, and geotile context remain aligned.
-- The replay machine can inspect `reconstructor_msgs` fields with `ros2 interface show` and `ros2 topic echo`.
+- The replay machine can inspect `mapeverything_msgs` fields with `ros2 interface show` and `ros2 topic echo`.
 
 ## Long Session, Thermal, and Poor-Network Validation
 

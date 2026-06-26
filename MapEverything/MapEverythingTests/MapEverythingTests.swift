@@ -416,7 +416,7 @@ struct MapEverythingTests {
         let fieldNames = Set(schema.fields.map(\.name))
         let catalogChannelIDs = RadioTelemetryChannelID.allCases.map(\.rawValue).sorted()
 
-        #expect(schema.messageType == "reconstructor_msgs/msg/RadioObservation")
+        #expect(schema.messageType == "mapeverything_msgs/msg/RadioObservation")
         #expect(schema.topic == "/mapping/radio")
         #expect(schema.schemaVersion == 1)
         #expect(schema.unsetNumericValue == "0.0")
@@ -771,7 +771,7 @@ struct MapEverythingTests {
         #expect(registry.definition(.lidarPointCloud).topic == "/mapping/pointcloud/lidar")
         #expect(registry.definition(.depthAnythingPointCloud).topic == "/mapping/pointcloud/depth_anything")
         #expect(registry.definition(.depthAnythingCalibration).topic == "/mapping/depth_anything/calibration")
-        #expect(registry.definition(.depthAnythingCalibration).messageType == "reconstructor_msgs/msg/DepthAnythingCalibration")
+        #expect(registry.definition(.depthAnythingCalibration).messageType == "mapeverything_msgs/msg/DepthAnythingCalibration")
         #expect(allTopics.allSatisfy { $0.topic == "/tf" || $0.topic.hasPrefix("/mapping/") })
         #expect(!advertisedIDs.contains(.odom))
         #expect(!advertisedIDs.contains(.surfels))

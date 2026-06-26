@@ -96,7 +96,7 @@ final class PublishQueue {
         var attempts: Int
     }
 
-    private let queue = DispatchQueue(label: "com.reconstructor.publishQueue", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.mapeverything.publishQueue", qos: .userInitiated)
     private let configuration: Configuration
     private let sendHandler: SendHandler
 
