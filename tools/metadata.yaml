@@ -2,29 +2,53 @@ rosbag2_bagfile_information:
   version: 8
   storage_identifier: sqlite3
   duration:
-    nanoseconds: 28135417700
+    nanoseconds: 24118122817
   starting_time:
-    nanoseconds_since_epoch: 1782435323171926736
-  message_count: 234
+    nanoseconds_since_epoch: 1782439503905805110
+  message_count: 1720
   topics_with_message_count:
+    - topic_metadata:
+        name: '/mapping/camera/camera_info'
+        type: 'sensor_msgs/msg/CameraInfo'
+        serialization_format: 'rosbridge_json'
+        offered_qos_profiles: ''
+      message_count: 39
+    - topic_metadata:
+        name: '/mapping/camera/image/compressed'
+        type: 'sensor_msgs/msg/CompressedImage'
+        serialization_format: 'rosbridge_json'
+        offered_qos_profiles: ''
+      message_count: 39
+    - topic_metadata:
+        name: '/mapping/dem/tile'
+        type: 'mapeverything_msgs/msg/GeoRasterTile'
+        serialization_format: 'rosbridge_json'
+        offered_qos_profiles: ''
+      message_count: 1
     - topic_metadata:
         name: '/mapping/depth_anything/calibration'
         type: 'mapeverything_msgs/msg/DepthAnythingCalibration'
         serialization_format: 'rosbridge_json'
         offered_qos_profiles: ''
-      message_count: 47
+      message_count: 39
     - topic_metadata:
         name: '/mapping/pointcloud/depth_anything'
         type: 'sensor_msgs/msg/PointCloud2'
         serialization_format: 'rosbridge_json'
         offered_qos_profiles: ''
-      message_count: 47
+      message_count: 39
     - topic_metadata:
         name: '/mapping/pointcloud/lidar'
         type: 'sensor_msgs/msg/PointCloud2'
         serialization_format: 'rosbridge_json'
         offered_qos_profiles: ''
-      message_count: 140
+      message_count: 116
+    - topic_metadata:
+        name: '/mapping/pose'
+        type: 'geometry_msgs/msg/PoseStamped'
+        serialization_format: 'rosbridge_json'
+        offered_qos_profiles: ''
+      message_count: 1447
   compression_format: ''
   compression_mode: ''
   relative_file_paths:
@@ -32,10 +56,10 @@ rosbag2_bagfile_information:
   files:
     - path: 'mapeverything_0.db3'
       starting_time:
-        nanoseconds_since_epoch: 1782435323171926736
+        nanoseconds_since_epoch: 1782439503905805110
       duration:
-        nanoseconds: 28135417700
-      message_count: 234
+        nanoseconds: 24118122817
+      message_count: 1720
   custom_data:
     mapeverything.serialization_format: 'rosbridge_json'
     mapeverything.serialization_note: 'Messages are stored as rosbridge publish JSON payloads, not native ROS2 CDR bytes.'
