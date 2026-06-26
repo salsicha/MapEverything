@@ -516,6 +516,7 @@ struct ContentView: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 
         if isScanning {
+            NotificationCenter.default.post(name: .mapEverythingWillStopMapping, object: nil)
             isScanning = false
             mappingSession.stop()
         } else {

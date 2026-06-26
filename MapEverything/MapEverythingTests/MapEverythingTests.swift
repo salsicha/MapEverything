@@ -1560,6 +1560,9 @@ struct MapEverythingTests {
             sessionID: UUID(),
             configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
         )
+        let targetDirectoryURL = try #require(recorder.currentArtifactDirectoryURL)
+        recorder.stopAndWait()
+
         recorder.recordFinalOverlayMesh(
             LocalOverlayMeshArtifact(
                 source: "unit_test",
@@ -1572,13 +1575,31 @@ struct MapEverythingTests {
                 ],
                 indices: [0, 1, 2],
                 metadata: ["visualization_mode": "Solid Mesh"]
-            )
+            ),
+            in: targetDirectoryURL
         )
-        recorder.stopAndWait()
+        recorder.recordFinalPointCloud(
+            LocalPointCloudArtifact(
+                source: "unit_test_points",
+                coordinateFrame: "map",
+                capturedAt: Date(timeIntervalSince1970: 1_700_000_051),
+                points: [
+                    LocalPointCloudArtifact.Point(
+                        position: SIMD3<Float>(0.25, 0.5, 0.75),
+                        color: SIMD3<UInt8>(10, 20, 30)
+                    )
+                ],
+                metadata: ["point_count_source": "unit_test"]
+            ),
+            in: targetDirectoryURL
+        )
+        recorder.flushAndWait()
 
         let session = try #require(try recorder.listBagSessions().first)
         #expect(session.files.contains { $0.name == LocalOverlayMeshArtifact.objFileName && $0.kind == .overlayMesh })
         #expect(session.files.contains { $0.name == LocalOverlayMeshArtifact.metadataFileName && $0.kind == .overlayMeshMetadata })
+        #expect(session.files.contains { $0.name == LocalPointCloudArtifact.plyFileName && $0.kind == .pointCloud })
+        #expect(session.files.contains { $0.name == LocalPointCloudArtifact.metadataFileName && $0.kind == .pointCloudMetadata })
 
         let objURL = session.directoryURL.appendingPathComponent(LocalOverlayMeshArtifact.objFileName)
         let obj = try String(contentsOf: objURL, encoding: .utf8)
@@ -1593,6 +1614,17 @@ struct MapEverythingTests {
         #expect(metadata["coordinate_frame"] as? String == "map")
         #expect(metadata["vertex_count"] as? Int == 3)
         #expect(metadata["triangle_count"] as? Int == 1)
+
+        let plyURL = session.directoryURL.appendingPathComponent(LocalPointCloudArtifact.plyFileName)
+        let ply = try String(contentsOf: plyURL, encoding: .utf8)
+        #expect(ply.contains("element vertex 1"))
+        #expect(ply.contains("0.250000 0.500000 0.750000 10 20 30"))
+
+        let pointMetadataURL = session.directoryURL.appendingPathComponent(LocalPointCloudArtifact.metadataFileName)
+        let pointMetadataData = try Data(contentsOf: pointMetadataURL)
+        let pointMetadata = try #require(JSONSerialization.jsonObject(with: pointMetadataData) as? [String: Any])
+        #expect(pointMetadata["source"] as? String == "unit_test_points")
+        #expect(pointMetadata["point_count"] as? Int == 1)
     }
 
     @Test("Local ROS2 bag recorder flushes pending SQLite batches")

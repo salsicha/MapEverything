@@ -10,6 +10,10 @@ import RealityKit
 import ARKit
 import SceneKit
 
+extension Notification.Name {
+    static let mapEverythingWillStopMapping = Notification.Name("mapEverythingWillStopMapping")
+}
+
 struct MeshRebuildThrottle {
     let minimumInterval: TimeInterval
     private var lastScheduledAt: [UUID: TimeInterval] = [:]
@@ -166,6 +170,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     depthAnythingCalibrationCache.reset()
                     resumeWorldTrackingSession()
                 } else {
+                    saveFinalRecordingArtifacts()
                     depthAnythingCalibrationCache.reset()
                     freezeCurrentMeshForInspection()
                     cancelMeshUpdateTasks()
@@ -219,6 +224,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var liveDepthMeshEntity: ModelEntity?
     private var liveDepthMeshUpdateTask: Task<Void, Never>?
     private var latestDepthAnythingMeshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
+    private var finalPointCloudArtifactTask: Task<Void, Never>?
     private let depthMeshVisualizationInterval: TimeInterval = 0.5
     private var lastDepthMeshVisualizationTime: TimeInterval = 0
     private var coachingOverlay: ARCoachingOverlayView?
@@ -229,6 +235,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         preloadDepthAnythingIfNeeded()
         
         NotificationCenter.default.addObserver(self, selector: #selector(thermalStateChanged), name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleWillStopMapping), name: .mapEverythingWillStopMapping, object: nil)
     }
     
     @objc private func thermalStateChanged() {
@@ -251,8 +258,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
     
     deinit {
         depthAnythingPreloadTask?.cancel()
+        finalPointCloudArtifactTask?.cancel()
         arView?.session.pause()
         NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleWillStopMapping() {
+        saveFinalRecordingArtifacts()
     }
     
     private func setupViews() {
@@ -393,9 +405,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
            !anchors.isEmpty {
             let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
-            if let artifact = makeFinalOverlayMeshArtifact(from: safeMeshes) {
-                LocalROS2BagRecorder.shared.recordFinalOverlayMesh(artifact)
-            }
             if let scene = makeInspectionScene(from: safeMeshes) {
                 delegate?.didUpdateStoppedInspectionScene(scene)
                 return
@@ -404,14 +413,78 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         if let latestDepthAnythingMeshSnapshot,
            let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
-            if let artifact = makeFinalOverlayMeshArtifact(from: latestDepthAnythingMeshSnapshot) {
-                LocalROS2BagRecorder.shared.recordFinalOverlayMesh(artifact)
-            }
             delegate?.didUpdateStoppedInspectionScene(scene)
             return
         }
 
         delegate?.didUpdateStoppedInspectionScene(nil)
+    }
+
+    private func saveFinalRecordingArtifacts() {
+        let recorder = LocalROS2BagRecorder.shared
+        guard let targetDirectoryURL = recorder.currentArtifactDirectoryURL else { return }
+
+        let meshArtifact = currentFinalOverlayMeshArtifact()
+        if let meshArtifact {
+            recorder.recordFinalOverlayMesh(meshArtifact, in: targetDirectoryURL)
+        }
+
+        finalPointCloudArtifactTask?.cancel()
+        finalPointCloudArtifactTask = Task { [pointManager] in
+            let cleanedPoints = await pointManager.getCleanedPoints()
+            let artifact: LocalPointCloudArtifact?
+
+            if !cleanedPoints.isEmpty {
+                artifact = LocalPointCloudArtifact(
+                    source: "fused_depth_pointcloud",
+                    coordinateFrame: "map",
+                    capturedAt: Date(),
+                    points: cleanedPoints.map { point in
+                        LocalPointCloudArtifact.Point(position: point.position, color: point.color)
+                    },
+                    metadata: [
+                        "point_count_source": "point_manager"
+                    ]
+                )
+            } else if let meshArtifact {
+                artifact = LocalPointCloudArtifact(
+                    source: "\(meshArtifact.source)_vertices",
+                    coordinateFrame: meshArtifact.coordinateFrame,
+                    capturedAt: meshArtifact.capturedAt,
+                    points: meshArtifact.vertices.map { vertex in
+                        LocalPointCloudArtifact.Point(
+                            position: vertex,
+                            color: SIMD3<UInt8>(255, 255, 255)
+                        )
+                    },
+                    metadata: [
+                        "point_count_source": "overlay_mesh_vertices"
+                    ]
+                )
+            } else {
+                artifact = nil
+            }
+
+            guard !Task.isCancelled, let artifact else { return }
+            recorder.recordFinalPointCloud(artifact, in: targetDirectoryURL)
+        }
+    }
+
+    private func currentFinalOverlayMeshArtifact() -> LocalOverlayMeshArtifact? {
+        if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
+           !anchors.isEmpty {
+            let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
+            if let artifact = makeFinalOverlayMeshArtifact(from: safeMeshes) {
+                return artifact
+            }
+        }
+
+        if let latestDepthAnythingMeshSnapshot,
+           let artifact = makeFinalOverlayMeshArtifact(from: latestDepthAnythingMeshSnapshot) {
+            return artifact
+        }
+
+        return nil
     }
 
     private func makeFinalOverlayMeshArtifact(from safeMeshes: [SafeARMesh]) -> LocalOverlayMeshArtifact? {

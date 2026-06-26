@@ -118,6 +118,80 @@ struct LocalOverlayMeshArtifact {
     }
 }
 
+struct LocalPointCloudArtifact {
+    static let plyFileName = "final_pointcloud.ply"
+    static let metadataFileName = "final_pointcloud.json"
+
+    struct Point {
+        let position: SIMD3<Float>
+        let color: SIMD3<UInt8>
+    }
+
+    let source: String
+    let coordinateFrame: String
+    let capturedAt: Date
+    let points: [Point]
+    let metadata: [String: String]
+
+    var isEmpty: Bool {
+        points.isEmpty
+    }
+
+    func plyString() -> String {
+        var lines: [String] = [
+            "ply",
+            "format ascii 1.0",
+            "comment MapEverything final point cloud",
+            "comment source: \(source)",
+            "comment coordinate_frame: \(coordinateFrame)",
+            "comment captured_at: \(ISO8601DateFormatter().string(from: capturedAt))",
+            "element vertex \(points.count)",
+            "property float x",
+            "property float y",
+            "property float z",
+            "property uchar red",
+            "property uchar green",
+            "property uchar blue",
+            "end_header"
+        ]
+
+        lines.reserveCapacity(lines.count + points.count)
+        for point in points {
+            lines.append([
+                Self.format(point.position.x),
+                Self.format(point.position.y),
+                Self.format(point.position.z),
+                "\(point.color.x)",
+                "\(point.color.y)",
+                "\(point.color.z)"
+            ].joined(separator: " "))
+        }
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    func metadataData() throws -> Data {
+        var payload: [String: Any] = [
+            "schema_version": 1,
+            "ply_file": Self.plyFileName,
+            "source": source,
+            "coordinate_frame": coordinateFrame,
+            "captured_at": ISO8601DateFormatter().string(from: capturedAt),
+            "point_count": points.count
+        ]
+        if !metadata.isEmpty {
+            payload["metadata"] = metadata
+        }
+
+        return try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    private static func format(_ value: Float) -> String {
+        let finiteValue = value.isFinite ? value : 0
+        return String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), Double(finiteValue))
+    }
+}
+
 struct LocalROS2BagRecorderStats: Equatable {
     let isEnabled: Bool
     let isRecording: Bool
@@ -204,6 +278,8 @@ struct LocalROS2BagFile: Identifiable, Hashable {
         case sqliteChunk
         case overlayMesh
         case overlayMeshMetadata
+        case pointCloud
+        case pointCloudMetadata
         case other
 
         var displayName: String {
@@ -212,6 +288,8 @@ struct LocalROS2BagFile: Identifiable, Hashable {
             case .sqliteChunk: return "SQLite Chunk"
             case .overlayMesh: return "Overlay Mesh"
             case .overlayMeshMetadata: return "Overlay Mesh Metadata"
+            case .pointCloud: return "Point Cloud"
+            case .pointCloudMetadata: return "Point Cloud Metadata"
             case .other: return "File"
             }
         }
@@ -222,6 +300,8 @@ struct LocalROS2BagFile: Identifiable, Hashable {
             case .sqliteChunk: return "cylinder.split.1x2"
             case .overlayMesh: return "cube.transparent"
             case .overlayMeshMetadata: return "curlybraces.square"
+            case .pointCloud: return "point.3.connected.trianglepath.dotted"
+            case .pointCloudMetadata: return "curlybraces.square"
             case .other: return "doc"
             }
         }
@@ -439,6 +519,12 @@ final class LocalROS2BagRecorder: ObservableObject {
         }
     }
 
+    var currentArtifactDirectoryURL: URL? {
+        queue.sync {
+            configuration.isEnabled ? bagDirectoryURL : nil
+        }
+    }
+
     func start(sessionID: UUID?, configuration: LocalROS2BagRecorderConfiguration = .load()) {
         queue.sync {
             self.acceptsRecords = false
@@ -616,21 +702,38 @@ final class LocalROS2BagRecorder: ObservableObject {
         }
     }
 
-    func recordFinalOverlayMesh(_ artifact: LocalOverlayMeshArtifact) {
+    func recordFinalOverlayMesh(_ artifact: LocalOverlayMeshArtifact, in directoryURL: URL? = nil) {
         guard !artifact.isEmpty else { return }
 
         queue.async {
-            guard self.acceptsRecords,
-                  self.configuration.isEnabled,
-                  let bagDirectoryURL = self.bagDirectoryURL else { return }
+            guard self.configuration.isEnabled,
+                  let targetDirectoryURL = directoryURL ?? self.bagDirectoryURL else { return }
 
             do {
-                let objURL = bagDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.objFileName)
-                let metadataURL = bagDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.metadataFileName)
+                let objURL = targetDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.objFileName)
+                let metadataURL = targetDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.metadataFileName)
                 try artifact.objString().write(to: objURL, atomically: true, encoding: .utf8)
                 try artifact.metadataData().write(to: metadataURL, options: [.atomic])
             } catch {
                 self.recordFailure("Failed to write final overlay mesh: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func recordFinalPointCloud(_ artifact: LocalPointCloudArtifact, in directoryURL: URL? = nil) {
+        guard !artifact.isEmpty else { return }
+
+        queue.async {
+            guard self.configuration.isEnabled,
+                  let targetDirectoryURL = directoryURL ?? self.bagDirectoryURL else { return }
+
+            do {
+                let plyURL = targetDirectoryURL.appendingPathComponent(LocalPointCloudArtifact.plyFileName)
+                let metadataURL = targetDirectoryURL.appendingPathComponent(LocalPointCloudArtifact.metadataFileName)
+                try artifact.plyString().write(to: plyURL, atomically: true, encoding: .utf8)
+                try artifact.metadataData().write(to: metadataURL, options: [.atomic])
+            } catch {
+                self.recordFailure("Failed to write final point cloud: \(error.localizedDescription)")
             }
         }
     }
@@ -659,6 +762,8 @@ final class LocalROS2BagRecorder: ObservableObject {
                 || url.lastPathComponent == "metadata.yaml"
                 || url.lastPathComponent == LocalOverlayMeshArtifact.objFileName
                 || url.lastPathComponent == LocalOverlayMeshArtifact.metadataFileName
+                || url.lastPathComponent == LocalPointCloudArtifact.plyFileName
+                || url.lastPathComponent == LocalPointCloudArtifact.metadataFileName
         }
         .sorted { lhs, rhs in
             lhs.lastPathComponent < rhs.lastPathComponent
@@ -675,6 +780,10 @@ final class LocalROS2BagRecorder: ObservableObject {
                 kind = .overlayMesh
             } else if url.lastPathComponent == LocalOverlayMeshArtifact.metadataFileName {
                 kind = .overlayMeshMetadata
+            } else if url.lastPathComponent == LocalPointCloudArtifact.plyFileName {
+                kind = .pointCloud
+            } else if url.lastPathComponent == LocalPointCloudArtifact.metadataFileName {
+                kind = .pointCloudMetadata
             } else {
                 kind = .other
             }
