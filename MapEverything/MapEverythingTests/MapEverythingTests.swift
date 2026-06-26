@@ -1282,6 +1282,178 @@ struct MapEverythingTests {
         #expect(configuration.chunkSizeMB == LocalROS2BagRecorderConfiguration.defaultChunkSizeMB)
     }
 
+    @Test("Enabled ROS topics record to local SQLite bag while bridge is disconnected")
+    func testPublishersRecordLocalBagWhileDisconnected() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("MapEverythingLocalBagAllTopics-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: rootURL) }
+
+        let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
+        recorder.start(
+            sessionID: UUID(),
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+        )
+
+        let registry = ROS2TopicRegistry(
+            enabledStreams: [
+                .pose,
+                .odometry,
+                .tf,
+                .camera,
+                .pointCloud,
+                .mesh,
+                .gps,
+                .radio,
+                .indoorLocalization,
+                .satelliteImagery,
+                .dem,
+                .diagnostics,
+                .session
+            ]
+        )
+        let bridge = ROS2BridgeClient(topicRegistry: registry, localBagRecorder: recorder)
+        var transform = matrix_identity_float4x4
+        transform.columns.3 = SIMD4<Float>(1.25, -0.5, 2.0, 1.0)
+        let timestamp: TimeInterval = 12.5
+        let location = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903),
+            altitude: 1609,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 8,
+            timestamp: Date(timeIntervalSince1970: 1_700_000_030)
+        )
+        let satellitePayload = try makeTestGeoTilePayload(
+            provider: .defaultSatellite,
+            location: location,
+            date: Date(timeIntervalSince1970: 1_700_000_040),
+            data: Data([0xFF, 0xD8, 0xFF])
+        )
+        let demPayload = try makeTestGeoTilePayload(
+            provider: .usgs3DEPDEM,
+            location: location,
+            date: Date(timeIntervalSince1970: 1_700_000_040),
+            data: Data([1, 2, 3, 4])
+        )
+
+        bridge.publishPose(transform, timestamp: timestamp)
+        bridge.publishOdometry(transform, timestamp: timestamp)
+        bridge.publishTF(transform, timestamp: timestamp)
+        bridge.publishImage(
+            pixelBuffer: try makeBGRA8PixelBuffer(width: 4, height: 4),
+            intrinsics: matrix_identity_float3x3,
+            imageResolution: CGSize(width: 4, height: 4),
+            timestamp: timestamp
+        )
+        bridge.publishLiDARPointCloud(
+            [ColoredPoint(position: SIMD3<Float>(0, 0, 1), color: SIMD3<UInt8>(255, 0, 0))],
+            timestamp: timestamp
+        )
+        bridge.publishDepthAnythingPointCloud(
+            [ColoredPoint(position: SIMD3<Float>(0.1, 0, 1), color: SIMD3<UInt8>(0, 255, 0))],
+            timestamp: timestamp
+        )
+        bridge.publishDepthAnythingCalibration(
+            DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 1.0, offset: 0.0),
+            relativeDepthSize: CGSize(width: 4, height: 4),
+            imageResolution: CGSize(width: 4, height: 4),
+            timestamp: timestamp
+        )
+        bridge.publishMap(
+            safeMeshes: [
+                SafeARMesh(
+                    identifier: UUID(),
+                    vertices: [
+                        SIMD3<Float>(0, 0, 0),
+                        SIMD3<Float>(1, 0, 0),
+                        SIMD3<Float>(0, 1, 0)
+                    ],
+                    indices: [0, 1, 2],
+                    transform: matrix_identity_float4x4
+                )
+            ],
+            timestamp: timestamp
+        )
+        bridge.publishSatelliteTile(satellitePayload, timestamp: timestamp)
+        bridge.publishGeoTileInfo(satellitePayload, timestamp: timestamp)
+        bridge.publishDEMTile(demPayload, timestamp: timestamp)
+        bridge.publishNavSatFix(location, timestamp: timestamp)
+        bridge.publishGPSMetadata(location)
+        bridge.publishIndoorLocalization(
+            IndoorLocalizationSample(
+                location: location,
+                heading: nil,
+                indoorRegistrationQuality: 1.0,
+                globalRegistrationQuality: 1.0,
+                indoorQualityLabel: "excellent",
+                globalQualityLabel: "excellent",
+                timestamp: Date(timeIntervalSince1970: 1_700_000_041)
+            ),
+            timestamp: timestamp
+        )
+        bridge.publishRadioObservation(makeRadioObservation(timestamp: 1_700_000_042, sourceID: "local-bag-radio"))
+        bridge.publishSessionMetadata(
+            MappingSessionSnapshot(
+                event: "started",
+                sessionID: UUID(),
+                state: "Active",
+                recorderURL: "ws://127.0.0.1:9090",
+                enabledStreams: registry.advertisedTopics().map(\.stream.rawValue).sorted(),
+                startedAt: Date(timeIntervalSince1970: 1_700_000_043),
+                endedAt: nil,
+                lastError: nil
+            ),
+            timestamp: timestamp
+        )
+        bridge.publishDiagnostics()
+        recorder.flushAndWait()
+
+        let bagDirectory = try #require(
+            try fileManager.contentsOfDirectory(
+                at: rootURL,
+                includingPropertiesForKeys: [.isDirectoryKey]
+            ).first { url in
+                (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }
+        )
+        let chunkURL = bagDirectory.appendingPathComponent("mapeverything_0.db3")
+        let expectedTopics: [(name: String, type: String)] = [
+            ("/mapping/pose", "geometry_msgs/msg/PoseStamped"),
+            ("/mapping/odom", "nav_msgs/msg/Odometry"),
+            ("/tf", "tf2_msgs/msg/TFMessage"),
+            ("/mapping/camera/image/compressed", "sensor_msgs/msg/CompressedImage"),
+            ("/mapping/camera/camera_info", "sensor_msgs/msg/CameraInfo"),
+            ("/mapping/pointcloud/lidar", "sensor_msgs/msg/PointCloud2"),
+            ("/mapping/pointcloud/depth_anything", "sensor_msgs/msg/PointCloud2"),
+            ("/mapping/depth_anything/calibration", "mapeverything_msgs/msg/DepthAnythingCalibration"),
+            ("/mapping/map", "visualization_msgs/msg/MarkerArray"),
+            ("/mapping/mesh_snapshot", "mapeverything_msgs/msg/MeshSnapshot"),
+            ("/mapping/satellite/image/compressed", "sensor_msgs/msg/CompressedImage"),
+            ("/mapping/satellite/tile_info", "mapeverything_msgs/msg/GeoTileInfo"),
+            ("/mapping/dem/tile", "mapeverything_msgs/msg/GeoRasterTile"),
+            ("/mapping/gps/fix", "sensor_msgs/msg/NavSatFix"),
+            ("/mapping/gps/metadata", "mapeverything_msgs/msg/GPSMetadata"),
+            ("/mapping/indoor_localization", "mapeverything_msgs/msg/IndoorLocalization"),
+            ("/mapping/radio", "mapeverything_msgs/msg/RadioObservation"),
+            ("/mapping/session", "mapeverything_msgs/msg/MappingSession"),
+            ("/mapping/status", "diagnostic_msgs/msg/DiagnosticArray")
+        ]
+
+        for expectedTopic in expectedTopics {
+            #expect(try sqliteInteger(
+                url: chunkURL,
+                sql: "SELECT COUNT(*) FROM topics WHERE name = '\(expectedTopic.name)' AND type = '\(expectedTopic.type)'"
+            ) == 1)
+            #expect(try sqliteInteger(
+                url: chunkURL,
+                sql: "SELECT COUNT(*) FROM messages JOIN topics ON topics.id = messages.topic_id WHERE topics.name = '\(expectedTopic.name)'"
+            ) >= 1)
+        }
+
+        recorder.stopAndWait()
+    }
+
     @Test("Local ROS2 bag recorder writes chunked SQLite rosbridge JSON bags")
     func testLocalROS2BagRecorderWritesChunkedSQLiteBag() async throws {
         let fileManager = FileManager.default
@@ -1584,6 +1756,45 @@ struct MapEverythingTests {
             "format": "jpeg",
             "data": jpegData.base64EncodedString()
         ]
+    }
+
+    private func makeBGRA8PixelBuffer(width: Int, height: Int) throws -> CVPixelBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        let attributes: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            attributes as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw TestPixelBufferError.creationFailed(status)
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            throw TestPixelBufferError.missingBaseAddress
+        }
+
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let buffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+        for y in 0..<height {
+            for x in 0..<width {
+                let offset = y * bytesPerRow + x * 4
+                buffer[offset] = UInt8((x * 63) % 255)
+                buffer[offset + 1] = UInt8((y * 63) % 255)
+                buffer[offset + 2] = 128
+                buffer[offset + 3] = 255
+            }
+        }
+
+        return pixelBuffer
     }
 
     private func uint32(from data: Data, at offset: Int) -> UInt32 {

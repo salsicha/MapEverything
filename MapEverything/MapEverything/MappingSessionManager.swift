@@ -207,6 +207,7 @@ final class MappingSessionManager: ObservableObject {
         } else {
             bridge.disconnect()
         }
+        bridge.refreshSessionPublishers()
         if enabledStreams.contains(.satelliteImagery) || enabledStreams.contains(.dem) {
             geoTilePublisher.start()
         }
@@ -239,6 +240,7 @@ final class MappingSessionManager: ObservableObject {
         radioObservationPublisher.stop()
         bridge.disconnect(after: 0.25)
         localBagRecorder.stop()
+        bridge.stopSessionPublishers()
     }
 
     func restart(recorderURL: String? = nil, remoteStreamingEnabled: Bool? = nil) {
@@ -249,9 +251,11 @@ final class MappingSessionManager: ObservableObject {
     func refreshLocalBagRecording() {
         if isActive {
             localBagRecorder.start(sessionID: sessionID)
+            bridge.refreshSessionPublishers()
             publishSessionMetadata(event: "local_bag_recording_updated")
         } else {
             localBagRecorder.stop()
+            bridge.refreshSessionPublishers()
         }
     }
 
@@ -262,6 +266,9 @@ final class MappingSessionManager: ObservableObject {
             enabledStreams.remove(stream)
         }
         ROS2TopicRegistry.shared.setStream(stream, isEnabled: isEnabled)
+        if isActive {
+            bridge.refreshSessionPublishers()
+        }
         publishSessionMetadata(event: "streams_updated")
     }
 

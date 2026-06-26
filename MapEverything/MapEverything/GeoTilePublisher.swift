@@ -130,7 +130,7 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
 
     private func publishTilesIfAvailable() async {
         guard !isPublishing else { return }
-        guard bridge.isConnected else { return }
+        guard bridge.hasActivePublishTarget else { return }
         guard let location = latestLocation else { return }
 
         let providerCandidateGroups = providerCandidateGroups(for: location)

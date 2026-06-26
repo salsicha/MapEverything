@@ -90,10 +90,10 @@ class ROS2BridgeClient: ObservableObject {
     private let ciContext = CIContext() // Reuse context to avoid massive CPU/GPU overhead
     private let motionQueue = OperationQueue()
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) // Reuse to prevent allocation per frame
-    private let topicRegistry = ROS2TopicRegistry.shared
+    private let topicRegistry: ROS2TopicRegistry
     private let meshSnapshotConfiguration = MeshSnapshotPublishConfiguration.default
     private let streamPayloadMetrics = StreamPayloadMetricsStore.shared
-    private let localBagRecorder = LocalROS2BagRecorder.shared
+    private let localBagRecorder: LocalROS2BagRecorder
     private let localSampleBufferConfiguration = LocalSampleBufferConfiguration.default
     private let localSampleBufferQueue = DispatchQueue(label: "com.mapeverything.localSampleBuffer", qos: .utility)
     private var diagnosticsTimer: DispatchSourceTimer?
@@ -128,6 +128,18 @@ class ROS2BridgeClient: ObservableObject {
         maxPointCloudSamples: LocalSampleBufferConfiguration.default.maxPointCloudSamples,
         maxMeshSamples: LocalSampleBufferConfiguration.default.maxMeshSamples
     )
+
+    init(
+        topicRegistry: ROS2TopicRegistry = .shared,
+        localBagRecorder: LocalROS2BagRecorder = .shared
+    ) {
+        self.topicRegistry = topicRegistry
+        self.localBagRecorder = localBagRecorder
+    }
+
+    var hasActivePublishTarget: Bool {
+        isConnected || localBagRecorder.isAcceptingRecords
+    }
     
     func connect(to url: String) {
         currentURL = url
@@ -148,14 +160,12 @@ class ROS2BridgeClient: ObservableObject {
         
         advertiseTopics()
         flushBufferedLocalSamples()
-        startDiagnostics()
-        startIMU()
+        refreshSessionPublishers()
         listenForDisconnection()
     }
     
     func disconnect(after delay: TimeInterval = 0) {
-        stopDiagnostics()
-        motionManager.stopDeviceMotionUpdates()
+        stopSessionPublishers()
 
         let closeConnection = { [weak self] in
             guard let self else { return }
@@ -208,13 +218,12 @@ class ROS2BridgeClient: ObservableObject {
         DispatchQueue.main.async {
             guard self.isConnected || self.webSocket != nil else { return }
             print("ROS2 Bridge connection unavailable: \(error.localizedDescription)")
-            self.stopDiagnostics()
-            self.motionManager.stopDeviceMotionUpdates()
             self.publishQueue.discardPending()
             self.lastOdometrySample = nil
             self.webSocket?.cancel(with: .goingAway, reason: nil)
             self.webSocket = nil
             self.isConnected = false
+            self.refreshSessionPublishers()
             self.attemptReconnect()
         }
     }
@@ -226,8 +235,8 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     private func startDiagnostics() {
-        stopDiagnostics()
-        guard topicRegistry.isStreamEnabled(.diagnostics) else { return }
+        guard diagnosticsTimer == nil else { return }
+        guard topicRegistry.isStreamEnabled(.diagnostics), hasActivePublishTarget else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
@@ -242,6 +251,25 @@ class ROS2BridgeClient: ObservableObject {
         diagnosticsTimer?.cancel()
         diagnosticsTimer = nil
     }
+
+    func refreshSessionPublishers() {
+        if topicRegistry.isStreamEnabled(.diagnostics), hasActivePublishTarget {
+            startDiagnostics()
+        } else {
+            stopDiagnostics()
+        }
+
+        if topicRegistry.isStreamEnabled(.imu), hasActivePublishTarget {
+            startIMU()
+        } else {
+            stopIMU()
+        }
+    }
+
+    func stopSessionPublishers() {
+        stopDiagnostics()
+        stopIMU()
+    }
     
     private func send(op: String, topic: String, type: String? = nil, msg: [String: Any]? = nil) {
         var payload: [String: Any] = ["op": op, "topic": topic]
@@ -254,7 +282,9 @@ class ROS2BridgeClient: ObservableObject {
             recordLocalBagPublish(topic: topic, msg: msg, encodedData: data)
         }
 
-        publishQueue.enqueueEncodedPayload(data, op: op, topic: topic)
+        if isConnected {
+            publishQueue.enqueueEncodedPayload(data, op: op, topic: topic)
+        }
     }
 
     private func publishOrBufferLocalSample(
@@ -484,7 +514,7 @@ class ROS2BridgeClient: ObservableObject {
     // MARK: - Publishers
     
     func publishPose(_ transform: simd_float4x4, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.pose) else { return }
+        guard topicRegistry.isStreamEnabled(.pose), hasActivePublishTarget else { return }
         let pos = transform.columns.3
         let quat = simd_quatf(transform)
         
@@ -499,7 +529,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishOdometry(_ transform: simd_float4x4, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.odometry) else { return }
+        guard topicRegistry.isStreamEnabled(.odometry), hasActivePublishTarget else { return }
 
         let position = SIMD3<Float>(
             transform.columns.3.x,
@@ -554,7 +584,7 @@ class ROS2BridgeClient: ObservableObject {
     }
     
     func publishTF(_ transform: simd_float4x4, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.tf) else { return }
+        guard topicRegistry.isStreamEnabled(.tf), hasActivePublishTarget else { return }
         let pos = transform.columns.3
         let quat = simd_quatf(transform)
 
@@ -700,7 +730,7 @@ class ROS2BridgeClient: ObservableObject {
         imageResolution: CGSize,
         timestamp: TimeInterval
     ) {
-        guard isConnected, topicRegistry.isStreamEnabled(.camera) else { return }
+        guard topicRegistry.isStreamEnabled(.camera), hasActivePublishTarget else { return }
 
         let header = createHeader(frameId: FrameID.iphoneCamera, timestamp: timestamp)
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
@@ -744,7 +774,7 @@ class ROS2BridgeClient: ObservableObject {
         imageResolution: CGSize,
         timestamp: TimeInterval
     ) {
-        guard topicRegistry.isStreamEnabled(.pointCloud) else { return }
+        guard topicRegistry.isStreamEnabled(.pointCloud), hasActivePublishTarget else { return }
 
         let topic = topicRegistry.topic(.depthAnythingCalibration)
         let msg = Self.makeDepthAnythingCalibrationMessage(
@@ -780,7 +810,7 @@ class ROS2BridgeClient: ObservableObject {
         frameID: String,
         timestamp: TimeInterval
     ) {
-        guard topicRegistry.isStreamEnabled(.pointCloud), !points.isEmpty else { return }
+        guard topicRegistry.isStreamEnabled(.pointCloud), hasActivePublishTarget, !points.isEmpty else { return }
 
         let topic = topicRegistry.topic(topicID)
         let msg = Self.makeColoredPointCloudMessage(
@@ -954,7 +984,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishMap(safeMeshes: [SafeARMesh], timestamp: TimeInterval) {
-        guard topicRegistry.isStreamEnabled(.mesh), !safeMeshes.isEmpty else { return }
+        guard topicRegistry.isStreamEnabled(.mesh), hasActivePublishTarget, !safeMeshes.isEmpty else { return }
 
         var markers: [[String: Any]] = []
         var trianglePointsIncluded = 0
@@ -1184,7 +1214,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishSatelliteTile(_ tile: GeoTilePayload, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.satelliteImagery) else { return }
+        guard topicRegistry.isStreamEnabled(.satelliteImagery), hasActivePublishTarget else { return }
 
         let msg: [String: Any] = [
             "header": createHeader(frameId: "earth", timestamp: timestamp),
@@ -1196,21 +1226,21 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishGeoTileInfo(_ tile: GeoTilePayload, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.satelliteImagery) else { return }
+        guard topicRegistry.isStreamEnabled(.satelliteImagery), hasActivePublishTarget else { return }
 
         let msg = createGeoTileInfoMessage(tile, timestamp: timestamp)
         send(op: "publish", topic: topicRegistry.topic(.satelliteTileInfo), msg: msg)
     }
 
     func publishDEMTile(_ tile: GeoTilePayload, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.dem) else { return }
+        guard topicRegistry.isStreamEnabled(.dem), hasActivePublishTarget else { return }
 
         let msg = createGeoRasterTileMessage(tile, timestamp: timestamp)
         send(op: "publish", topic: topicRegistry.topic(.demTile), msg: msg)
     }
 
     func publishNavSatFix(_ location: CLLocation, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.gps) else { return }
+        guard topicRegistry.isStreamEnabled(.gps), hasActivePublishTarget else { return }
 
         let latitude = finiteROSNumber(location.coordinate.latitude, fallback: 0)
         let longitude = finiteROSNumber(location.coordinate.longitude, fallback: 0)
@@ -1254,7 +1284,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishGPSMetadata(_ location: CLLocation) {
-        guard isConnected, topicRegistry.isStreamEnabled(.gps) else { return }
+        guard topicRegistry.isStreamEnabled(.gps), hasActivePublishTarget else { return }
 
         let sourceInformation = location.sourceInformation
         let hasHorizontalAccuracy = location.horizontalAccuracy.isFinite && location.horizontalAccuracy >= 0
@@ -1308,7 +1338,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishIndoorLocalization(_ sample: IndoorLocalizationSample, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.indoorLocalization) else { return }
+        guard topicRegistry.isStreamEnabled(.indoorLocalization), hasActivePublishTarget else { return }
 
         let location = sample.location
         let heading = sample.heading
@@ -1353,7 +1383,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishRadioObservation(_ observation: RadioObservationMessage) {
-        guard isConnected, topicRegistry.isStreamEnabled(.radio) else { return }
+        guard topicRegistry.isStreamEnabled(.radio), hasActivePublishTarget else { return }
 
         var msg = observation.fields
         msg["header"] = createHeader(frameId: observation.frameID, date: observation.timestamp)
@@ -1418,7 +1448,7 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishSessionMetadata(_ snapshot: MappingSessionSnapshot, timestamp: TimeInterval) {
-        guard isConnected, topicRegistry.isStreamEnabled(.session) else { return }
+        guard topicRegistry.isStreamEnabled(.session), hasActivePublishTarget else { return }
 
         let queueStats = publishQueueStats
         let transportProfile = ROS2BridgeTransportProfile.current
@@ -1494,8 +1524,8 @@ class ROS2BridgeClient: ObservableObject {
         return ISO8601DateFormatter().string(from: date)
     }
 
-    private func publishDiagnostics() {
-        guard isConnected, topicRegistry.isStreamEnabled(.diagnostics) else { return }
+    func publishDiagnostics() {
+        guard topicRegistry.isStreamEnabled(.diagnostics), hasActivePublishTarget else { return }
 
         let queueStats = publishQueueStats
         let localBufferStats = localSampleBufferStats
@@ -1887,35 +1917,42 @@ class ROS2BridgeClient: ObservableObject {
     }
     
     private func startIMU() {
-        if motionManager.isDeviceMotionAvailable {
-            let imuTopic = topicRegistry.topic(.imu)
-            motionManager.deviceMotionUpdateInterval = 0.01 // 100Hz for high-fidelity ROS2 sensor fusion
-            motionQueue.name = "com.mapeverything.imuQueue"
-            motionQueue.qualityOfService = .userInitiated
-            motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] data, error in
-                guard let self = self, let data = data, self.isConnected else { return }
-                
-                let msg: [String: Any] = [
-                    "header": self.createHeader(frameId: "iphone_camera", timestamp: data.timestamp),
-                    "orientation": [
-                        "x": data.attitude.quaternion.x,
-                        "y": data.attitude.quaternion.y,
-                        "z": data.attitude.quaternion.z,
-                        "w": data.attitude.quaternion.w
-                    ],
-                    "angular_velocity": [
-                        "x": data.rotationRate.x,
-                        "y": data.rotationRate.y,
-                        "z": data.rotationRate.z
-                    ],
-                    "linear_acceleration": [
-                        "x": (data.userAcceleration.x + data.gravity.x) * 9.81, // ROS expects m/s^2 including gravity
-                        "y": (data.userAcceleration.y + data.gravity.y) * 9.81,
-                        "z": (data.userAcceleration.z + data.gravity.z) * 9.81
-                    ]
+        guard topicRegistry.isStreamEnabled(.imu), hasActivePublishTarget else { return }
+        guard motionManager.isDeviceMotionAvailable, !motionManager.isDeviceMotionActive else { return }
+        let imuTopic = topicRegistry.topic(.imu)
+        motionManager.deviceMotionUpdateInterval = 0.01 // 100Hz for high-fidelity ROS2 sensor fusion
+        motionQueue.name = "com.mapeverything.imuQueue"
+        motionQueue.qualityOfService = .userInitiated
+        motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] data, error in
+            guard let self = self,
+                  let data = data,
+                  self.hasActivePublishTarget,
+                  self.topicRegistry.isStreamEnabled(.imu) else { return }
+
+            let msg: [String: Any] = [
+                "header": self.createHeader(frameId: "iphone_camera", timestamp: data.timestamp),
+                "orientation": [
+                    "x": data.attitude.quaternion.x,
+                    "y": data.attitude.quaternion.y,
+                    "z": data.attitude.quaternion.z,
+                    "w": data.attitude.quaternion.w
+                ],
+                "angular_velocity": [
+                    "x": data.rotationRate.x,
+                    "y": data.rotationRate.y,
+                    "z": data.rotationRate.z
+                ],
+                "linear_acceleration": [
+                    "x": (data.userAcceleration.x + data.gravity.x) * 9.81, // ROS expects m/s^2 including gravity
+                    "y": (data.userAcceleration.y + data.gravity.y) * 9.81,
+                    "z": (data.userAcceleration.z + data.gravity.z) * 9.81
                 ]
-                self.send(op: "publish", topic: imuTopic, msg: msg)
-            }
+            ]
+            self.send(op: "publish", topic: imuTopic, msg: msg)
         }
+    }
+
+    private func stopIMU() {
+        motionManager.stopDeviceMotionUpdates()
     }
 }

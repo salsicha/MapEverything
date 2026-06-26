@@ -822,12 +822,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
         guard isScanning else { return }
 
         MapGeoreferencer.shared.updateMapPose(frame.camera.transform, timestamp: frame.timestamp)
-        
-        if ROS2BridgeClient.shared.isConnected {
-            ROS2BridgeClient.shared.publishPose(frame.camera.transform, timestamp: frame.timestamp)
-            ROS2BridgeClient.shared.publishOdometry(frame.camera.transform, timestamp: frame.timestamp)
-            ROS2BridgeClient.shared.publishTF(frame.camera.transform, timestamp: frame.timestamp)
-        }
+
+        let bridge = ROS2BridgeClient.shared
+        bridge.publishPose(frame.camera.transform, timestamp: frame.timestamp)
+        bridge.publishOdometry(frame.camera.transform, timestamp: frame.timestamp)
+        bridge.publishTF(frame.camera.transform, timestamp: frame.timestamp)
         
         // Only accumulate visual mapping data when spatial tracking is highly accurate to prevent garbage data.
         guard case .normal = frame.camera.trackingState else { return }
@@ -857,16 +856,21 @@ class ARViewController: UIViewController, ARSessionDelegate {
         )
         let topicRegistry = ROS2TopicRegistry.shared
         let shouldUseDepthAnythingDepth = shouldUseDepthAnythingMappingDepth()
-        let shouldPublishPointCloud = topicRegistry.isStreamEnabled(.pointCloud)
+        let pointCloudStreamEnabled = topicRegistry.isStreamEnabled(.pointCloud)
+        let cameraStreamEnabled = topicRegistry.isStreamEnabled(.camera)
+        let hasPublishTarget = (pointCloudStreamEnabled || cameraStreamEnabled) && bridge.hasActivePublishTarget
+        let shouldPublishPointCloud = pointCloudStreamEnabled
+            && hasPublishTarget
             && timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
-        let shouldPublishCameraImage = topicRegistry.isStreamEnabled(.camera)
+        let shouldPublishCameraImage = cameraStreamEnabled
+            && hasPublishTarget
             && timestamp - lastCameraImagePublishTime >= cameraImagePublishInterval
             && !isPublishingCameraImage
         let shouldRefreshSurfelVisualization = currentMode == .surfels
             && timestamp - lastSurfelVisualizationTime >= surfelVisualizationInterval
         let shouldRefreshDepthMeshVisualization = false
 
-        if shouldPublishCameraImage, ROS2BridgeClient.shared.isConnected {
+        if shouldPublishCameraImage {
             lastCameraImagePublishTime = timestamp
             isPublishingCameraImage = true
             Task.detached(priority: .utility) { [weak self, cameraImage, intrinsics, imageResolution, timestamp] in
@@ -997,6 +1001,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     
     private func publishMapToROS2IfNeeded(anchors: [ARAnchor]) {
         guard ROS2TopicRegistry.shared.isStreamEnabled(.mesh) else { return }
+        guard ROS2BridgeClient.shared.hasActivePublishTarget else { return }
         
         let currentTime = Date().timeIntervalSince1970
         if currentTime - lastMapPublishTime > meshSnapshotPublishConfiguration.publishInterval {

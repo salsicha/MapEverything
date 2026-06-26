@@ -345,6 +345,12 @@ final class LocalROS2BagRecorder: ObservableObject {
         return "Local SQLite rosbag recording disabled"
     }
 
+    var isAcceptingRecords: Bool {
+        queue.sync {
+            acceptsRecords && configuration.isEnabled && database != nil
+        }
+    }
+
     func start(sessionID: UUID?, configuration: LocalROS2BagRecorderConfiguration = .load()) {
         queue.sync {
             self.acceptsRecords = false

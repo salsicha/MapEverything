@@ -268,7 +268,7 @@ final class RadioObservationPublisher {
         guard isRunning, ROS2TopicRegistry.shared.isStreamEnabled(.radio) else { return }
 
         let observations = currentObservations()
-        guard bridge.isConnected else {
+        guard bridge.hasActivePublishTarget else {
             transientBuffer.enqueue(
                 contentsOf: observations.filter { !publishedObservationKeys.contains($0.deduplicationKey) }
             )
@@ -286,7 +286,7 @@ final class RadioObservationPublisher {
     }
 
     private func flushBufferedObservations() {
-        guard bridge.isConnected else { return }
+        guard bridge.hasActivePublishTarget else { return }
 
         for observation in transientBuffer.flush() {
             guard publishedObservationKeys.insert(observation.deduplicationKey).inserted else {

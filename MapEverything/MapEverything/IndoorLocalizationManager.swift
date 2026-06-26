@@ -189,7 +189,7 @@ final class IndoorLocalizationManager: NSObject, ObservableObject, CLLocationMan
 
     private func publishIfNeeded() {
         guard isRunning,
-              bridge.isConnected,
+              bridge.hasActivePublishTarget,
               let location = latestLocation else { return }
 
         let now = Date()
