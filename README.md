@@ -1,5 +1,9 @@
 # MapEverything: ROS2 Robotics Mapping Payload
 
+<p align="center">
+  <img src="MapEverything/MapEverything/Assets.xcassets/MapEverythingLogo.imageset/MapEverythingLogo.png" alt="MapEverything logo" width="180">
+</p>
+
 ![iOS](https://img.shields.io/badge/iOS-17.0+-blue.svg?style=for-the-badge&logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange.svg?style=for-the-badge&logo=swift)
 ![ARKit](https://img.shields.io/badge/ARKit-LiDAR-black.svg?style=for-the-badge&logo=arkit)
