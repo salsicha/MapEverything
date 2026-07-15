@@ -5,6 +5,7 @@
 
 import Foundation
 import Combine
+import SwiftData
 
 enum MappingSensorStream: String, CaseIterable, Identifiable, Codable, Hashable {
     case pose
@@ -95,6 +96,7 @@ final class MappingSessionManager: ObservableObject {
     private let recorderEndpointProbeManager: RecorderEndpointProbeManager
     private let radioObservationPublisher: RadioObservationPublisher
     private let localBagRecorder: LocalROS2BagRecorder
+    private var sessionHistoryStore: MappingSessionHistoryStore?
 
     var isActive: Bool {
         state == .active
@@ -158,6 +160,10 @@ final class MappingSessionManager: ObservableObject {
         self.recorderURL = recorderURL
         self.remoteStreamingEnabled = remoteStreamingEnabled
         self.enabledStreams = enabledStreams ?? Self.loadPersistedStreams() ?? Self.defaultStreams
+    }
+
+    func attachSessionHistory(context: ModelContext) {
+        sessionHistoryStore = MappingSessionHistoryStore(context: context)
     }
 
     func configure(
@@ -225,12 +231,14 @@ final class MappingSessionManager: ObservableObject {
         }
         state = .active
         publishSessionMetadata(event: "started")
+        recordSessionHistory(event: "started")
     }
 
     func stop() {
         endedAt = Date()
         state = .idle
         publishSessionMetadata(event: "stopped")
+        recordSessionHistory(event: "stopped")
         geoTilePublisher.stop()
         indoorLocalizationManager.stop()
         currentWiFiTelemetryManager.stop()
@@ -334,12 +342,11 @@ final class MappingSessionManager: ObservableObject {
         lastError = message
         state = .failed(message)
         publishSessionMetadata(event: "failed")
+        recordSessionHistory(event: "failed")
     }
 
-    private func publishSessionMetadata(event: String) {
-        guard ROS2TopicRegistry.shared.isStreamEnabled(.session) else { return }
-
-        let snapshot = MappingSessionSnapshot(
+    private func makeSnapshot(event: String) -> MappingSessionSnapshot {
+        MappingSessionSnapshot(
             event: event,
             sessionID: sessionID,
             state: state.label,
@@ -349,8 +356,20 @@ final class MappingSessionManager: ObservableObject {
             endedAt: endedAt,
             lastError: lastError
         )
+    }
 
-        bridge.publishSessionMetadata(snapshot, timestamp: ProcessInfo.processInfo.systemUptime)
+    private func publishSessionMetadata(event: String) {
+        guard ROS2TopicRegistry.shared.isStreamEnabled(.session) else { return }
+
+        bridge.publishSessionMetadata(makeSnapshot(event: event), timestamp: ProcessInfo.processInfo.systemUptime)
+    }
+
+    private func recordSessionHistory(event: String) {
+        sessionHistoryStore?.record(
+            makeSnapshot(event: event),
+            metadataJSON: jsonString(sessionMetadata),
+            sessionDirectoryPath: localBagRecorder.stats.bagDirectoryURL?.path
+        )
     }
 
     func publishSessionUpdate(event: String) {
