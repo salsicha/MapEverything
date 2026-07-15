@@ -50,19 +50,32 @@ class BagConversionError(RuntimeError):
     pass
 
 
+def chunk_read_error(path: Path, exc: sqlite3.Error) -> BagConversionError:
+    return BagConversionError(
+        f"Cannot read chunk {path}: {exc}. If the recording app crashed mid-commit, "
+        f"a hot rollback journal ({path.name}-journal) next to the chunk is the "
+        "likely cause; read-only access cannot recover it. Open the database once "
+        "in read-write mode with sqlite3 to let it replay the journal; this tool "
+        "only opens chunks read-only and will not modify the input itself."
+    )
+
+
 class ChunkReader:
     def __init__(self, path: Path, index: int) -> None:
         self.path = path
         self.index = index
-        self.connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        self.cursor = self.connection.execute(
-            """
-            SELECT messages.timestamp, messages.id, topics.name, topics.type, messages.data
-            FROM messages
-            JOIN topics ON topics.id = messages.topic_id
-            ORDER BY messages.timestamp ASC, messages.id ASC
-            """
-        )
+        try:
+            self.connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            self.cursor = self.connection.execute(
+                """
+                SELECT messages.timestamp, messages.id, topics.name, topics.type, messages.data
+                FROM messages
+                JOIN topics ON topics.id = messages.topic_id
+                ORDER BY messages.timestamp ASC, messages.id ASC
+                """
+            )
+        except sqlite3.DatabaseError as exc:
+            raise chunk_read_error(path, exc) from exc
 
     def next_record(self) -> BagRecord | None:
         row = self.cursor.fetchone()
@@ -300,13 +313,16 @@ def db_files_from_metadata(directory: Path) -> Iterable[Path]:
 def inspect_topics(db_files: Iterable[Path], type_overrides: dict[str, str]) -> dict[str, TopicDefinition]:
     topics: dict[str, TopicDefinition] = {}
     for db_file in db_files:
-        with sqlite3.connect(f"file:{db_file}?mode=ro", uri=True) as connection:
-            for name, message_type, qos in connection.execute(
-                "SELECT name, type, offered_qos_profiles FROM topics ORDER BY name"
-            ):
-                topic_name = rewrite_legacy_topic_name(str(name))
-                final_type = type_overrides.get(topic_name, normalize_message_type(str(message_type)))
-                topics[topic_name] = TopicDefinition(topic_name, final_type, str(qos or ""))
+        try:
+            with sqlite3.connect(f"file:{db_file}?mode=ro", uri=True) as connection:
+                for name, message_type, qos in connection.execute(
+                    "SELECT name, type, offered_qos_profiles FROM topics ORDER BY name"
+                ):
+                    topic_name = rewrite_legacy_topic_name(str(name))
+                    final_type = type_overrides.get(topic_name, normalize_message_type(str(message_type)))
+                    topics[topic_name] = TopicDefinition(topic_name, final_type, str(qos or ""))
+        except sqlite3.DatabaseError as exc:
+            raise chunk_read_error(db_file, exc) from exc
     return topics
 
 
@@ -467,14 +483,14 @@ def convert(
         if topic_name not in created_topics:
             continue
 
-        topic_name, message_dict = decode_rosbridge_payload(record)
-        if topic_filter and topic_name not in topic_filter:
-            continue
-        topic = topics.get(topic_name)
-        if topic is None or topic_name not in created_topics:
-            continue
-
         try:
+            topic_name, message_dict = decode_rosbridge_payload(record)
+            if topic_filter and topic_name not in topic_filter:
+                continue
+            topic = topics.get(topic_name)
+            if topic is None or topic_name not in created_topics:
+                continue
+
             message = hydrator.build(topic.message_type, message_dict)
             writer.write(topic_name, serialize_message(message), record.timestamp)
             written += 1
@@ -497,8 +513,11 @@ def summarize(db_files: list[Path], type_overrides: dict[str, str]) -> tuple[dic
     topics = inspect_topics(db_files, type_overrides)
     message_count = 0
     for db_file in db_files:
-        with sqlite3.connect(f"file:{db_file}?mode=ro", uri=True) as connection:
-            message_count += int(connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+        try:
+            with sqlite3.connect(f"file:{db_file}?mode=ro", uri=True) as connection:
+                message_count += int(connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+        except sqlite3.DatabaseError as exc:
+            raise chunk_read_error(db_file, exc) from exc
     return topics, message_count
 
 

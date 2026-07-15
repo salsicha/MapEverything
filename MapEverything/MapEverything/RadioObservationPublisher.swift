@@ -100,6 +100,12 @@ struct RadioObservationMessage {
     }
 
     nonisolated private static func sanitizedJSONValue(_ value: Any) -> Any {
+        // Boolean NSNumbers must be detected before the numeric casts below,
+        // because `as Double` matches every NSNumber including CFBoolean.
+        if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+            return number.boolValue
+        }
+
         switch value {
         case let value as [String: Any]:
             return value.reduce(into: [String: Any]()) { result, entry in
@@ -121,9 +127,6 @@ struct RadioObservationMessage {
             let doubleValue = Double(value)
             return doubleValue.isFinite ? doubleValue : 0.0
         case let value as NSNumber:
-            if CFGetTypeID(value) == CFBooleanGetTypeID() {
-                return value.boolValue
-            }
             return value.doubleValue.isFinite ? value : 0.0
         case let value as String:
             return value
@@ -204,10 +207,13 @@ final class RadioObservationPublisher {
     private let recorderEndpointProbeManager: RecorderEndpointProbeManager
     private let configuration: Configuration
 
+    private let maxPublishedObservationKeys = 4_096
+
     private var isRunning = false
     private var sessionID = ""
     private var publishTimer: DispatchSourceTimer?
     private var publishedObservationKeys = Set<String>()
+    private var orderedPublishedObservationKeys: [String] = []
     private var transientBuffer: RadioObservationTransientBuffer
 
     init(
@@ -232,6 +238,7 @@ final class RadioObservationPublisher {
     func start(sessionID: UUID?) {
         self.sessionID = sessionID?.uuidString ?? ""
         publishedObservationKeys.removeAll()
+        orderedPublishedObservationKeys.removeAll()
         transientBuffer.removeAll()
 
         guard !isRunning else {
@@ -249,6 +256,7 @@ final class RadioObservationPublisher {
         publishTimer?.cancel()
         publishTimer = nil
         publishedObservationKeys.removeAll()
+        orderedPublishedObservationKeys.removeAll()
         transientBuffer.removeAll()
     }
 
@@ -278,7 +286,7 @@ final class RadioObservationPublisher {
         flushBufferedObservations()
 
         for observation in observations {
-            guard publishedObservationKeys.insert(observation.deduplicationKey).inserted else {
+            guard markObservationPublished(observation.deduplicationKey) else {
                 continue
             }
             bridge.publishRadioObservation(observation)
@@ -289,11 +297,21 @@ final class RadioObservationPublisher {
         guard bridge.hasActivePublishTarget else { return }
 
         for observation in transientBuffer.flush() {
-            guard publishedObservationKeys.insert(observation.deduplicationKey).inserted else {
+            guard markObservationPublished(observation.deduplicationKey) else {
                 continue
             }
             bridge.publishRadioObservation(observation)
         }
+    }
+
+    private func markObservationPublished(_ key: String) -> Bool {
+        guard publishedObservationKeys.insert(key).inserted else { return false }
+
+        orderedPublishedObservationKeys.append(key)
+        while orderedPublishedObservationKeys.count > maxPublishedObservationKeys {
+            publishedObservationKeys.remove(orderedPublishedObservationKeys.removeFirst())
+        }
+        return true
     }
 
     private func currentObservations() -> [RadioObservationMessage] {

@@ -41,7 +41,7 @@ final class BLEBeaconTelemetryManager: NSObject, ObservableObject, CBCentralMana
 
         static func load(from userDefaults: UserDefaults = .standard) -> Configuration {
             let serviceUUIDs = configuredStrings(forKey: serviceUUIDsKey, userDefaults: userDefaults)
-                .map { CBUUID(string: $0) }
+                .compactMap(validatedServiceUUID)
             let peripheralIDs = Set(
                 configuredStrings(forKey: peripheralIDsKey, userDefaults: userDefaults)
                     .compactMap { UUID(uuidString: $0) }
@@ -70,6 +70,18 @@ final class BLEBeaconTelemetryManager: NSObject, ObservableObject, CBCentralMana
 
         var peripheralIDStrings: [String] {
             peripheralIDs.map(\.uuidString).sorted()
+        }
+
+        // CBUUID(string:) raises an NSException on malformed input, so only valid
+        // 16-bit, 32-bit, or 128-bit forms may reach it.
+        private static func validatedServiceUUID(_ string: String) -> CBUUID? {
+            if string.count == 4 || string.count == 8 {
+                let hexadecimalCharacters = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+                let isHexadecimal = string.unicodeScalars.allSatisfy { hexadecimalCharacters.contains($0) }
+                return isHexadecimal ? CBUUID(string: string) : nil
+            }
+            guard UUID(uuidString: string) != nil else { return nil }
+            return CBUUID(string: string)
         }
 
         private static func configuredStrings(forKey key: String, userDefaults: UserDefaults) -> [String] {
@@ -304,7 +316,13 @@ final class BLEBeaconTelemetryManager: NSObject, ObservableObject, CBCentralMana
             return
         }
 
-        let serviceFilter = configuration.serviceUUIDs.isEmpty ? nil : configuration.serviceUUIDs
+        // Scanning with a service filter suppresses discovery of peripherals that
+        // only match the peripheral-ID or local-name filters, so it is passed only
+        // when service UUIDs are the sole configured filter kind.
+        let serviceUUIDsAreOnlyFilter = !configuration.serviceUUIDs.isEmpty
+            && configuration.peripheralIDs.isEmpty
+            && configuration.localNamePrefixes.isEmpty
+        let serviceFilter = serviceUUIDsAreOnlyFilter ? configuration.serviceUUIDs : nil
         centralManager.scanForPeripherals(
             withServices: serviceFilter,
             options: [

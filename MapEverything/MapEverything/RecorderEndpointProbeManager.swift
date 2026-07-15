@@ -32,7 +32,7 @@ struct RecorderEndpointProbeSample: Equatable {
     }
 }
 
-final class RecorderEndpointProbeManager: ObservableObject {
+final class RecorderEndpointProbeManager: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     struct Configuration {
         let probeInterval: TimeInterval
         let timeout: TimeInterval
@@ -65,6 +65,7 @@ final class RecorderEndpointProbeManager: ObservableObject {
 
     init(configuration: Configuration = .default) {
         self.configuration = configuration
+        super.init()
     }
 
     var sessionMetadata: [String: Any] {
@@ -192,14 +193,32 @@ final class RecorderEndpointProbeManager: ObservableObject {
         isProbeInFlight = true
 
         let task = URLSession.shared.webSocketTask(with: URLRequest(url: url))
+        task.delegate = self
         activeTask = task
-
-        let pingStartedAt = ProcessInfo.processInfo.systemUptime
         task.resume()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + configuration.timeout) { [weak self] in
             self?.failProbeIfActive(probeID, message: "Recorder endpoint probe timed out.")
         }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocolName: String?
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  let probeID = self.activeProbeID,
+                  webSocketTask === self.activeTask else { return }
+            self.sendPing(task: webSocketTask, probeID: probeID)
+        }
+    }
+
+    // The ping is deferred until the socket is confirmed open so the round trip
+    // time excludes TCP, TLS, and WebSocket handshake latency.
+    private func sendPing(task: URLSessionWebSocketTask, probeID: UUID) {
+        let pingStartedAt = ProcessInfo.processInfo.systemUptime
 
         task.sendPing { [weak self] error in
             DispatchQueue.main.async {
@@ -390,7 +409,7 @@ final class RecorderEndpointProbeManager: ObservableObject {
     private func failureSample(_ message: String) -> RecorderEndpointProbeSample {
         RecorderEndpointProbeSample(
             recorderURL: recorderURL,
-            roundTripTimeMilliseconds: -1,
+            roundTripTimeMilliseconds: 0,
             throughputBytesPerSecond: 0,
             throughputPayloadBytes: configuration.throughputPayloadBytes,
             throughputMessageCount: configuration.throughputMessageCount,

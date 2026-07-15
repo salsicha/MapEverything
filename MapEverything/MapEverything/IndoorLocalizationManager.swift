@@ -107,8 +107,10 @@ final class IndoorLocalizationManager: NSObject, ObservableObject, CLLocationMan
 
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
-            requestTemporaryFullAccuracyIfNeeded()
-            startLocationUpdates()
+            if isRunning {
+                requestTemporaryFullAccuracyIfNeeded()
+                startLocationUpdates()
+            }
         case .denied, .restricted:
             lastError = "Location permission is required for indoor and global registration."
         case .notDetermined:

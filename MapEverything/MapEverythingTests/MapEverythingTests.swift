@@ -1729,6 +1729,61 @@ struct MapEverythingTests {
         recorder.stopAndWait()
     }
 
+    @Test("Local ROS2 bag recorder keeps recording after an unencodable message")
+    func testLocalROS2BagRecorderSurvivesEncodingFailure() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("MapEverythingLocalBagFailure-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: rootURL) }
+
+        let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
+        recorder.start(
+            sessionID: UUID(),
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+        )
+
+        recorder.recordPublishedTopic(
+            topic: "/mapping/status",
+            messageType: "diagnostic_msgs/msg/DiagnosticArray",
+            msg: ["value": Double.nan]
+        )
+        recorder.recordPublishedTopic(
+            topic: "/mapping/status",
+            messageType: "diagnostic_msgs/msg/DiagnosticArray",
+            msg: makeLocalBagMessage(sequence: 1, payloadSize: 128)
+        )
+        recorder.flushAndWait()
+
+        #expect(recorder.isAcceptingRecords)
+
+        let bagDirectory = try #require(
+            try fileManager.contentsOfDirectory(
+                at: rootURL,
+                includingPropertiesForKeys: [.isDirectoryKey]
+            ).first { url in
+                (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }
+        )
+        let chunkURL = bagDirectory.appendingPathComponent("mapeverything_0.db3")
+        #expect(try sqliteInteger(url: chunkURL, sql: "SELECT COUNT(*) FROM messages") == 1)
+
+        recorder.stopAndWait()
+    }
+
+    @Test("Header stamp conversion rejects out-of-range values instead of trapping")
+    func testLocalBagTimestampOverflowReturnsNil() {
+        let overflowing: [String: Any] = [
+            "header": ["stamp": ["sec": Int64.max / 2, "nanosec": 0]]
+        ]
+        #expect(LocalROS2BagRecorder.timestampNanoseconds(from: overflowing) == nil)
+
+        let valid: [String: Any] = [
+            "header": ["stamp": ["sec": 1_700_000_000, "nanosec": 500]]
+        ]
+        #expect(LocalROS2BagRecorder.timestampNanoseconds(from: valid) == 1_700_000_000_000_000_500)
+    }
+
     @Test("Expanded SwiftData schema stores mapping session records")
     @MainActor
     func testMappingPersistenceModels() throws {

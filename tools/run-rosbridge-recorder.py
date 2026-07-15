@@ -104,6 +104,10 @@ def send_signal(pid: int, sig: signal.Signals) -> None:
         return
 
 
+def raise_keyboard_interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
+
+
 def command_with_setup(command: Sequence[str], setup: Path | None) -> list[str]:
     if setup is None:
         return list(command)
@@ -330,6 +334,7 @@ def run(args: argparse.Namespace) -> int:
     if args.output.exists():
         raise RecorderError(f"Output bag directory already exists: {args.output}")
 
+    signal.signal(signal.SIGTERM, raise_keyboard_interrupt)
     processes: list[ManagedProcess] = []
     try:
         bridge.start()
@@ -348,10 +353,10 @@ def run(args: argparse.Namespace) -> int:
                 code = process.poll()
                 if code is not None:
                     print(f"[mapeverything] {process.name} exited with code {code}")
-                    return code if code > 0 else 0
+                    return 128 - code if code < 0 else code
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\n[mapeverything] Ctrl-C received; finalizing recorder.")
+        print("\n[mapeverything] shutdown signal received; finalizing recorder.")
         return 0
     finally:
         for process in reversed(processes):

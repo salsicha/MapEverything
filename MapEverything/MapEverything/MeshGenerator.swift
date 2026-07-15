@@ -49,8 +49,14 @@ enum MeshGenerator {
         positions.reserveCapacity(geometry.vertices.count)
         
         for i in 0..<geometry.vertices.count {
+            // Vertices are packed 12-byte xyz triples; SIMD3<Float> is 16 bytes,
+            // so load each component instead of binding the whole vector.
             let pointer = verticesPointer.advanced(by: verticesByteOffset + (i * verticesByteStride))
-            let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+            let vertex = SIMD3<Float>(
+                pointer.loadUnaligned(fromByteOffset: 0, as: Float.self),
+                pointer.loadUnaligned(fromByteOffset: 4, as: Float.self),
+                pointer.loadUnaligned(fromByteOffset: 8, as: Float.self)
+            )
             positions.append(vertex)
         }
         desc.positions = MeshBuffers.Positions(positions)
@@ -279,7 +285,11 @@ enum MeshGenerator {
             vertices.reserveCapacity(geometry.vertices.count)
             for i in 0..<geometry.vertices.count {
                 let ptr = vPointer.advanced(by: vOffset + (i * vStride))
-                vertices.append(ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee)
+                vertices.append(SIMD3<Float>(
+                    ptr.loadUnaligned(fromByteOffset: 0, as: Float.self),
+                    ptr.loadUnaligned(fromByteOffset: 4, as: Float.self),
+                    ptr.loadUnaligned(fromByteOffset: 8, as: Float.self)
+                ))
             }
             
             let fPointer = geometry.faces.buffer.contents()

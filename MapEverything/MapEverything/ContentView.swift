@@ -404,6 +404,19 @@ struct ContentView: View {
                     }
                 }
             }
+
+            HStack(spacing: 8) {
+                Text("Streams")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(MappingSensorStream.allCases) { stream in
+                            streamChip(stream)
+                        }
+                    }
+                }
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -421,6 +434,29 @@ struct ContentView: View {
 
     private var publishedTopicDefinitions: [ROS2TopicDefinition] {
         ROS2TopicRegistry.shared.advertisedTopics()
+    }
+
+    private func streamChip(_ stream: MappingSensorStream) -> some View {
+        let isEnabled = mappingSession.isStreamEnabled(stream)
+        return Button {
+            mappingSession.setStream(stream, isEnabled: !isEnabled)
+        } label: {
+            Text(stream.displayName)
+                .font(.caption2)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .foregroundColor(isEnabled ? .green : .secondary)
+                .background(Color.black.opacity(0.18))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(isEnabled ? Color.green.opacity(0.5) : Color.white.opacity(0.14), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(stream.displayName) stream")
+        .accessibilityValue(isEnabled ? "enabled" : "disabled")
     }
 
     private func topicChip(_ definition: ROS2TopicDefinition) -> some View {
@@ -523,11 +559,15 @@ struct ContentView: View {
             guard shouldMountARView, !isPreparingMapper else { return }
             commitROSBridgeHostInput(reconnectIfActive: false)
             stoppedInspectionScene = nil
-            isScanning = true
             mappingSession.start(
                 recorderURL: ros2WebSocketURL,
                 remoteStreamingEnabled: ros2Enabled
             )
+            if mappingSession.isActive {
+                isScanning = true
+            } else {
+                errorMessage = mappingSession.lastError ?? "Failed to start mapping session."
+            }
         }
     }
 

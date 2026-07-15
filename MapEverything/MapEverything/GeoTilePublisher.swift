@@ -31,6 +31,9 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
     private let topicRegistry: ROS2TopicRegistry
     private let providers: [GeoTileProvider]
 
+    // Guards latestLocation and isPublishing, which are accessed from the main
+    // thread and from cooperative-pool publish tasks.
+    private let stateLock = NSLock()
     private var latestLocation: CLLocation?
     private var publishTask: Task<Void, Never>?
     private var isPublishing = false
@@ -78,7 +81,9 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
-            manager.startUpdatingLocation()
+            if isRunning {
+                manager.startUpdatingLocation()
+            }
         case .denied, .restricted:
             lastError = "Location permission is required to fetch localized satellite and DEM tiles."
         case .notDetermined:
@@ -90,7 +95,9 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last else { return }
-        latestLocation = location
+        stateLock.withLock {
+            latestLocation = location
+        }
 
         if isRunning, lastPublishedAt == nil {
             Task(priority: .background) { [weak self] in
@@ -129,15 +136,20 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
     }
 
     private func publishTilesIfAvailable() async {
-        guard !isPublishing else { return }
+        let claimedLocation: CLLocation? = stateLock.withLock { () -> CLLocation? in
+            guard !isPublishing, let latestLocation else { return nil }
+            isPublishing = true
+            return latestLocation
+        }
+        guard let location = claimedLocation else { return }
+        defer {
+            stateLock.withLock { isPublishing = false }
+        }
+
         guard bridge.hasActivePublishTarget else { return }
-        guard let location = latestLocation else { return }
 
         let providerCandidateGroups = providerCandidateGroups(for: location)
         guard !providerCandidateGroups.isEmpty else { return }
-
-        isPublishing = true
-        defer { isPublishing = false }
 
         let now = Date()
         for providerCandidates in providerCandidateGroups {

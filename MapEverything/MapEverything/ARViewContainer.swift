@@ -201,6 +201,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private let surfelVisualizationInterval: TimeInterval = 0.5
     private var lastSurfelVisualizationTime: TimeInterval = 0
     private var isProcessingFrame = false
+    private var cumulativePointCount = 0
     var maxPointLimit: Int = 2_000_000
     var boundingBoxSize: Float = 20.0
     var voxelSize: Float = 0.05 {
@@ -320,6 +321,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
         guard let arView else { return }
         guard let configuration = makeWorldTrackingConfiguration() else { return }
         depthAnythingCalibrationCache.reset()
+        cumulativePointCount = 0
+        Task { await pointManager.clear() }
         clearLiveMeshEntities()
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         updateVisualizationMode(currentMode)
@@ -954,6 +957,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         switch mode {
         case .solidMesh:
             arView?.debugOptions.insert(.showSceneUnderstanding)
+            liveDepthMeshAnchor?.isEnabled = true
         case .surfels:
             liveSurfelAnchor?.isEnabled = true
         case .wireframe:
@@ -1057,7 +1061,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
             let depthAnythingPointCloud = mappingFrame?.calibratedPoints ?? []
             let newPoints = mappingFrame?.calibratedPoints ?? []
             let lidarPointCloud: [ColoredPoint]
-            if shouldPublishPointCloud {
+            if shouldPublishPointCloud || newPoints.isEmpty {
                 lidarPointCloud = autoreleasepool {
                     self.pointCloudProcessor.processPointCloud(
                         depthMap: lidarDepthMap,
@@ -1097,6 +1101,19 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 }
             }
 
+            if !lidarPointCloud.isEmpty {
+                // The scan limit bounds accumulated unique voxels, not the
+                // per-frame counts of transient Depth Anything clouds.
+                let voxelTotal = await self.pointManager.addAndFilter(newPoints: lidarPointCloud)
+                await MainActor.run {
+                    self.cumulativePointCount = voxelTotal
+                    self.delegate?.didUpdatePointCount(voxelTotal)
+                    if voxelTotal >= self.maxPointLimit {
+                        self.delegate?.didReachScanLimit(limit: self.maxPointLimit)
+                    }
+                }
+            }
+
             if let meshSnapshot = mappingFrame?.meshSnapshot {
                 await MainActor.run {
                     self.lastDepthMeshVisualizationTime = timestamp
@@ -1121,13 +1138,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                         self.updateLiveSurfelVisualization(with: previewSurfels)
                     }
                 }
-                let count = newPoints.count
-                
                 await MainActor.run {
-                    self.delegate?.didUpdatePointCount(count)
-                    if count >= self.maxPointLimit {
-                        self.delegate?.didReachScanLimit(limit: self.maxPointLimit)
-                    }
                     self.isProcessingFrame = false
                 }
             } else {

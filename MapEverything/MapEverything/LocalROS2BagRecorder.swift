@@ -457,6 +457,7 @@ final class LocalROS2BagRecorder: ObservableObject {
     private static let writeBatchMaxMessages = 32
     private static let writeBatchMaxBytes = 1_048_576
     private static let writeBatchFlushDelay: TimeInterval = 0.25
+    private static let maxConsecutiveFlushFailures = 3
     private static let insertMessageSQL = "INSERT INTO messages(id, topic_id, timestamp, data) VALUES (?, ?, ?, ?)"
 
     private let queue = DispatchQueue(label: "com.mapeverything.localROS2BagRecorder", qos: .utility)
@@ -482,6 +483,11 @@ final class LocalROS2BagRecorder: ObservableObject {
     private var lastError: String?
     private var lastErrorAt: Date?
     private var acceptsRecords = false
+    // Lock-guarded mirror of (acceptsRecords && isEnabled && database != nil)
+    // so publisher threads can check acceptance without hopping onto the queue.
+    private let acceptanceFlagLock = NSLock()
+    private var acceptingRecordsFlag = false
+    private var consecutiveFlushFailures = 0
     private var pendingWrites: [PendingWrite] = []
     private var pendingWriteBytes = 0
     private var pendingFlushWorkItem: DispatchWorkItem?
@@ -514,9 +520,12 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     var isAcceptingRecords: Bool {
-        queue.sync {
-            acceptsRecords && configuration.isEnabled && database != nil
-        }
+        acceptanceFlagLock.withLock { acceptingRecordsFlag }
+    }
+
+    private func refreshAcceptanceFlag() {
+        let value = acceptsRecords && configuration.isEnabled && database != nil
+        acceptanceFlagLock.withLock { acceptingRecordsFlag = value }
     }
 
     var currentArtifactDirectoryURL: URL? {
@@ -527,6 +536,7 @@ final class LocalROS2BagRecorder: ObservableObject {
 
     func start(sessionID: UUID?, configuration: LocalROS2BagRecorderConfiguration = .load()) {
         queue.sync {
+            defer { self.refreshAcceptanceFlag() }
             self.acceptsRecords = false
             self.closeCurrentBag(writeMetadata: true)
             self.configuration = configuration
@@ -534,6 +544,7 @@ final class LocalROS2BagRecorder: ObservableObject {
             self.stoppedAt = nil
             self.lastError = nil
             self.lastErrorAt = nil
+            self.consecutiveFlushFailures = 0
 
             guard configuration.isEnabled else {
                 self.publishStats(isRecording: false)
@@ -563,6 +574,7 @@ final class LocalROS2BagRecorder: ObservableObject {
     func stop() {
         queue.async {
             self.acceptsRecords = false
+            self.refreshAcceptanceFlag()
             self.stoppedAt = Date()
             self.closeCurrentBag(writeMetadata: true)
             self.publishStats(isRecording: false)
@@ -572,6 +584,7 @@ final class LocalROS2BagRecorder: ObservableObject {
     func stopAndWait() {
         queue.sync {
             self.acceptsRecords = false
+            self.refreshAcceptanceFlag()
             self.stoppedAt = Date()
             self.closeCurrentBag(writeMetadata: true)
             self.publishStats(isRecording: false)
@@ -583,7 +596,7 @@ final class LocalROS2BagRecorder: ObservableObject {
             do {
                 try self.flushPendingWrites(publishStatsAfterFlush: true)
             } catch {
-                self.recordFailure("Failed to flush local rosbag: \(error.localizedDescription)")
+                self.recordTransientFailure("Failed to flush local rosbag: \(error.localizedDescription)")
             }
         }
     }
@@ -661,7 +674,7 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     func recordPublishedTopic(topic: String, messageType: String, msg: [String: Any]) {
-        guard acceptsRecords else { return }
+        guard isAcceptingRecords else { return }
 
         let payload: [String: Any] = [
             "op": "publish",
@@ -697,7 +710,7 @@ final class LocalROS2BagRecorder: ObservableObject {
                     )
                 )
             } catch {
-                self.recordFailure("Failed to record \(topic): \(error.localizedDescription)")
+                self.recordTransientFailure("Failed to record \(topic): \(error.localizedDescription)")
             }
         }
     }
@@ -715,7 +728,7 @@ final class LocalROS2BagRecorder: ObservableObject {
                 try artifact.objString().write(to: objURL, atomically: true, encoding: .utf8)
                 try artifact.metadataData().write(to: metadataURL, options: [.atomic])
             } catch {
-                self.recordFailure("Failed to write final overlay mesh: \(error.localizedDescription)")
+                self.noteError("Failed to write final overlay mesh: \(error.localizedDescription)")
             }
         }
     }
@@ -733,7 +746,7 @@ final class LocalROS2BagRecorder: ObservableObject {
                 try artifact.plyString().write(to: plyURL, atomically: true, encoding: .utf8)
                 try artifact.metadataData().write(to: metadataURL, options: [.atomic])
             } catch {
-                self.recordFailure("Failed to write final point cloud: \(error.localizedDescription)")
+                self.noteError("Failed to write final point cloud: \(error.localizedDescription)")
             }
         }
     }
@@ -1082,6 +1095,7 @@ final class LocalROS2BagRecorder: ObservableObject {
         try execute("CREATE TABLE IF NOT EXISTS topics(id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, serialization_format TEXT NOT NULL, offered_qos_profiles TEXT NOT NULL)")
         try execute("CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, topic_id INTEGER NOT NULL, timestamp INTEGER NOT NULL, data BLOB NOT NULL)")
         try execute("CREATE INDEX IF NOT EXISTS timestamp_idx ON messages (timestamp ASC)")
+        refreshAcceptanceFlag()
     }
 
     private func rotateChunk(startingAt timestampNanoseconds: Int64) throws {
@@ -1095,8 +1109,7 @@ final class LocalROS2BagRecorder: ObservableObject {
         do {
             try flushPendingWrites(publishStatsAfterFlush: false)
         } catch {
-            recordFailure("Failed to flush local rosbag: \(error.localizedDescription)")
-            return
+            noteError("Failed to flush local rosbag: \(error.localizedDescription)")
         }
         finalizeCurrentChunk()
         closeDatabase()
@@ -1131,6 +1144,7 @@ final class LocalROS2BagRecorder: ObservableObject {
             sqlite3_close(database)
         }
         database = nil
+        refreshAcceptanceFlag()
     }
 
     private func enqueuePendingWrite(_ write: PendingWrite) throws {
@@ -1153,7 +1167,7 @@ final class LocalROS2BagRecorder: ObservableObject {
             do {
                 try self.flushPendingWrites(publishStatsAfterFlush: true)
             } catch {
-                self.recordFailure("Failed to flush local rosbag: \(error.localizedDescription)")
+                self.recordTransientFailure("Failed to flush local rosbag: \(error.localizedDescription)")
             }
         }
         pendingFlushWorkItem = workItem
@@ -1246,6 +1260,8 @@ final class LocalROS2BagRecorder: ObservableObject {
                 try commitTransaction()
             }
 
+            consecutiveFlushFailures = 0
+
             if publishStatsAfterFlush {
                 publishStats(isRecording: true)
             }
@@ -1334,7 +1350,7 @@ final class LocalROS2BagRecorder: ObservableObject {
         do {
             try metadata.write(to: metadataURL, atomically: true, encoding: .utf8)
         } catch {
-            recordFailure("Failed to write metadata.yaml: \(error.localizedDescription)")
+            noteError("Failed to write metadata.yaml: \(error.localizedDescription)")
         }
     }
 
@@ -1433,8 +1449,27 @@ final class LocalROS2BagRecorder: ObservableObject {
 
     private func recordEncodingFailure(topic: String) {
         queue.async {
-            self.recordFailure("Failed to encode local rosbag payload for \(topic).")
+            self.noteError("Failed to encode local rosbag payload for \(topic).")
         }
+    }
+
+    // Surfaces an error without stopping the recording; a bad message or a
+    // one-off artifact write failure must not cost the rest of the session.
+    private func noteError(_ message: String) {
+        lastError = message
+        lastErrorAt = Date()
+        publishStats(isRecording: acceptsRecords && database != nil)
+    }
+
+    // Write failures keep the database open and recording alive; only
+    // repeated consecutive failures escalate to a full stop.
+    private func recordTransientFailure(_ message: String) {
+        consecutiveFlushFailures += 1
+        guard consecutiveFlushFailures < Self.maxConsecutiveFlushFailures else {
+            recordFailure(message)
+            return
+        }
+        noteError(message)
     }
 
     private func recordFailure(_ message: String) {
@@ -1443,6 +1478,7 @@ final class LocalROS2BagRecorder: ObservableObject {
         pendingWriteBytes = 0
         lastError = message
         lastErrorAt = Date()
+        acceptsRecords = false
         closeDatabase()
         publishStats(isRecording: false)
     }
@@ -1467,7 +1503,10 @@ final class LocalROS2BagRecorder: ObservableObject {
               let nanosec = integerValue(stamp["nanosec"]) else {
             return nil
         }
-        return sec * 1_000_000_000 + nanosec
+        let (scaled, multiplyOverflowed) = sec.multipliedReportingOverflow(by: 1_000_000_000)
+        guard !multiplyOverflowed else { return nil }
+        let (total, addOverflowed) = scaled.addingReportingOverflow(nanosec)
+        return addOverflowed ? nil : total
     }
 
     private static func integerValue(_ value: Any?) -> Int64? {
@@ -1479,7 +1518,7 @@ final class LocalROS2BagRecorder: ObservableObject {
         case let value as UInt64:
             return value <= UInt64(Int64.max) ? Int64(value) : nil
         case let value as Double:
-            return value.isFinite ? Int64(value) : nil
+            return value.isFinite ? Int64(exactly: value.rounded()) : nil
         case let value as NSNumber:
             return value.int64Value
         default:

@@ -355,7 +355,10 @@ final class DepthAnythingProcessor {
             guard sampleCount > 50 else { return nil }
 
             let denom = (sumW * sumXX - sumX * sumX)
-            guard abs(denom) > 1e-6 else { return nil }
+            // Cauchy-Schwarz makes denom >= 0 up to rounding; a relative threshold
+            // rejects near-constant relative-depth frames whose denom is pure
+            // floating-point cancellation noise on ~1e14-magnitude sums.
+            guard denom > 1e-9 * sumW * sumXX else { return nil }
 
             let scale = Float((sumW * sumXY - sumX * sumY) / denom)
             let offset = Float((sumY * sumXX - sumX * sumXY) / denom)

@@ -85,7 +85,14 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     static let shared = ROS2BridgeClient()
-    private var webSocket: URLSessionWebSocketTask?
+    // Guards connection state that is written on the main thread but read from
+    // publish/AR/motion queues.
+    private let connectionStateLock = NSLock()
+    private var _webSocket: URLSessionWebSocketTask?
+    private var webSocket: URLSessionWebSocketTask? {
+        get { connectionStateLock.withLock { _webSocket } }
+        set { connectionStateLock.withLock { _webSocket = newValue } }
+    }
     private let motionManager = CMMotionManager()
     private let ciContext = CIContext() // Reuse context to avoid massive CPU/GPU overhead
     private let motionQueue = OperationQueue()
@@ -111,8 +118,23 @@ class ROS2BridgeClient: ObservableObject {
         return queue
     }()
     
-    private var currentURL: String?
-    private var lastOdometrySample: OdometrySample?
+    private var _currentURL: String?
+    private var currentURL: String? {
+        get { connectionStateLock.withLock { _currentURL } }
+        set { connectionStateLock.withLock { _currentURL = newValue } }
+    }
+    private var _lastOdometrySample: OdometrySample?
+    private var lastOdometrySample: OdometrySample? {
+        get { connectionStateLock.withLock { _lastOdometrySample } }
+        set { connectionStateLock.withLock { _lastOdometrySample = newValue } }
+    }
+    private var _isConnectedFlag = false
+    // Main-thread only; invalidates delayed disconnect closures once a newer
+    // connection exists.
+    private var connectionGeneration = 0
+    private let meshMarkerIDLock = NSLock()
+    private var meshMarkerIDs: [UUID: Int] = [:]
+    private var nextMeshMarkerID = 0
     private var bufferedSamples: [LocalBufferedSample] = []
     private var bufferedSampleBytes = 0
     private var bufferedSampleSequence: UInt64 = 0
@@ -135,47 +157,79 @@ class ROS2BridgeClient: ObservableObject {
     ) {
         self.topicRegistry = topicRegistry
         self.localBagRecorder = localBagRecorder
+        motionQueue.maxConcurrentOperationCount = 1
     }
 
     var hasActivePublishTarget: Bool {
-        isConnected || localBagRecorder.isAcceptingRecords
+        isConnectedForPublishing || localBagRecorder.isAcceptingRecords
     }
-    
+
+    private var isConnectedForPublishing: Bool {
+        connectionStateLock.withLock { _isConnectedFlag }
+    }
+
+    // A session that wants remote streaming keeps currentURL set across
+    // transient disconnects, so samples can be buffered for replay.
+    private var shouldBufferWhileDisconnected: Bool {
+        connectionStateLock.withLock { _currentURL != nil }
+    }
+
+    private func setConnected(_ value: Bool) {
+        connectionStateLock.withLock { _isConnectedFlag = value }
+        if Thread.isMainThread {
+            isConnected = value
+        } else {
+            DispatchQueue.main.async { self.isConnected = value }
+        }
+    }
+
     func connect(to url: String) {
         currentURL = url
         guard let wsURL = URL(string: url) else { return }
-        
+
         // Explicitly close any lingering connection to prevent socket exhaustion on reconnects
+        connectionGeneration += 1
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
         webSocket?.cancel(with: .normalClosure, reason: nil)
         publishQueue.reset()
         lastOdometrySample = nil
-        
+
         let request = URLRequest(url: wsURL)
-        webSocket = URLSession.shared.webSocketTask(with: request)
-        webSocket?.resume()
-        
-        isConnected = true
-        
+        let socket = URLSession.shared.webSocketTask(with: request)
+        webSocket = socket
+        socket.resume()
+
+        setConnected(true)
+
         advertiseTopics()
-        flushBufferedLocalSamples()
         refreshSessionPublishers()
-        listenForDisconnection()
+        listenForDisconnection(on: socket)
+        // Replay buffered samples only once the handshake is confirmed;
+        // flushing earlier hands them to a queue that discards on failure.
+        socket.sendPing { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self, self.webSocket === socket, error == nil else { return }
+                self.flushBufferedLocalSamples()
+            }
+        }
     }
-    
+
     func disconnect(after delay: TimeInterval = 0) {
         stopSessionPublishers()
 
+        let generation = connectionGeneration
         let closeConnection = { [weak self] in
-            guard let self else { return }
+            guard let self, self.connectionGeneration == generation else { return }
             self.reconnectWorkItem?.cancel()
             self.reconnectWorkItem = nil
             self.publishQueue.discardPending()
             self.lastOdometrySample = nil
             self.webSocket?.cancel(with: .normalClosure, reason: nil)
+            self.webSocket = nil
+            self.currentURL = nil
             self.clearBufferedLocalSamples()
-            DispatchQueue.main.async { self.isConnected = false }
+            self.setConnected(false)
         }
 
         if delay > 0 {
@@ -186,18 +240,18 @@ class ROS2BridgeClient: ObservableObject {
             closeConnection()
         }
     }
-    
-    private func listenForDisconnection() {
-        webSocket?.receive { [weak self] result in
+
+    private func listenForDisconnection(on socket: URLSessionWebSocketTask) {
+        socket.receive { [weak self] result in
             switch result {
             case .success(_):
-                self?.listenForDisconnection()
+                self?.listenForDisconnection(on: socket)
             case .failure(let error):
-                self?.handleConnectionFailure(error)
+                self?.handleConnectionFailure(error, socket: socket)
             }
         }
     }
-    
+
     private func attemptReconnect() {
         guard let url = currentURL else { return }
         guard reconnectWorkItem == nil else { return }
@@ -214,18 +268,23 @@ class ROS2BridgeClient: ObservableObject {
         DispatchQueue.global().asyncAfter(deadline: .now() + 3.0, execute: workItem)
     }
 
-    private func handleConnectionFailure(_ error: Error) {
+    private func handleConnectionFailure(_ error: Error, socket: URLSessionWebSocketTask) {
         DispatchQueue.main.async {
-            guard self.isConnected || self.webSocket != nil else { return }
+            guard socket === self.webSocket else { return }
             print("ROS2 Bridge connection unavailable: \(error.localizedDescription)")
             self.publishQueue.discardPending()
             self.lastOdometrySample = nil
             self.webSocket?.cancel(with: .goingAway, reason: nil)
             self.webSocket = nil
-            self.isConnected = false
+            self.setConnected(false)
             self.refreshSessionPublishers()
             self.attemptReconnect()
         }
+    }
+
+    func refreshAdvertisedTopics() {
+        guard isConnectedForPublishing else { return }
+        advertiseTopics()
     }
     
     private func advertiseTopics() {
@@ -282,7 +341,7 @@ class ROS2BridgeClient: ObservableObject {
             recordLocalBagPublish(topic: topic, msg: msg, encodedData: data)
         }
 
-        if isConnected {
+        if isConnectedForPublishing {
             publishQueue.enqueueEncodedPayload(data, op: op, topic: topic)
         }
     }
@@ -301,9 +360,9 @@ class ROS2BridgeClient: ObservableObject {
         guard let data = encodeRosbridgePayload(payload, topic: topic) else { return }
         recordLocalBagPublish(topic: topic, msg: msg, encodedData: data)
 
-        if isConnected {
+        if isConnectedForPublishing {
             publishQueue.enqueueEncodedPayload(data, op: "publish", topic: topic)
-        } else {
+        } else if shouldBufferWhileDisconnected {
             bufferLocalSample(kind: kind, topic: topic, data: data)
         }
     }
@@ -432,15 +491,16 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     private func sendQueuedPayload(_ data: Data, completion: @escaping (Error?) -> Void) {
-        guard isConnected, let webSocket else {
+        let socket = connectionStateLock.withLock { _isConnectedFlag ? _webSocket : nil }
+        guard let socket else {
             completion(PublishQueueTransportError.disconnected)
             return
         }
 
         let message = URLSessionWebSocketTask.Message.data(data)
-        webSocket.send(message) { [weak self] error in
+        socket.send(message) { [weak self] error in
             if let error = error {
-                self?.handleConnectionFailure(error)
+                self?.handleConnectionFailure(error, socket: socket)
             }
             completion(error)
         }
@@ -774,7 +834,8 @@ class ROS2BridgeClient: ObservableObject {
         imageResolution: CGSize,
         timestamp: TimeInterval
     ) {
-        guard topicRegistry.isStreamEnabled(.pointCloud), hasActivePublishTarget else { return }
+        guard topicRegistry.isStreamEnabled(.pointCloud),
+              hasActivePublishTarget || shouldBufferWhileDisconnected else { return }
 
         let topic = topicRegistry.topic(.depthAnythingCalibration)
         let msg = Self.makeDepthAnythingCalibrationMessage(
@@ -810,7 +871,9 @@ class ROS2BridgeClient: ObservableObject {
         frameID: String,
         timestamp: TimeInterval
     ) {
-        guard topicRegistry.isStreamEnabled(.pointCloud), hasActivePublishTarget, !points.isEmpty else { return }
+        guard topicRegistry.isStreamEnabled(.pointCloud),
+              hasActivePublishTarget || shouldBufferWhileDisconnected,
+              !points.isEmpty else { return }
 
         let topic = topicRegistry.topic(topicID)
         let msg = Self.makeColoredPointCloudMessage(
@@ -976,6 +1039,16 @@ class ROS2BridgeClient: ObservableObject {
         ]
     }
 
+    private func markerID(for identifier: UUID) -> Int {
+        meshMarkerIDLock.withLock {
+            if let existing = meshMarkerIDs[identifier] { return existing }
+            let id = nextMeshMarkerID
+            nextMeshMarkerID = (nextMeshMarkerID + 1) % Int(Int32.max)
+            meshMarkerIDs[identifier] = id
+            return id
+        }
+    }
+
     func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
         // Surfels remain an internal reconstruction/export format. ROS output
         // uses source-specific /mapping/pointcloud/... PointCloud2 topics.
@@ -986,7 +1059,9 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     func publishMap(safeMeshes: [SafeARMesh], timestamp: TimeInterval) {
-        guard topicRegistry.isStreamEnabled(.mesh), hasActivePublishTarget, !safeMeshes.isEmpty else { return }
+        guard topicRegistry.isStreamEnabled(.mesh),
+              hasActivePublishTarget || shouldBufferWhileDisconnected,
+              !safeMeshes.isEmpty else { return }
 
         var markers: [[String: Any]] = []
         var trianglePointsIncluded = 0
@@ -998,7 +1073,7 @@ class ROS2BridgeClient: ObservableObject {
             guard !points.isEmpty else { continue }
             trianglePointsIncluded += points.count
 
-            let markerId = abs(mesh.identifier.hashValue) % Int(Int32.max)
+            let markerId = markerID(for: mesh.identifier)
 
             let marker: [String: Any] = [
                 "header": createHeader(frameId: "map", timestamp: timestamp),

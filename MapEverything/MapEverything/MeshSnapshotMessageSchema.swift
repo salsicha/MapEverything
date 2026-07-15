@@ -517,7 +517,7 @@ enum MeshSnapshotMessageBuilder {
                 originalPointCount: originalPointCount,
                 isTruncated: fittedPoints.count < originalPointCount,
                 originalPayloadBytes: originalPayloadBytes,
-                publishedPayloadBytes: 0,
+                publishedPayloadBytes: maxPayloadBytes,
                 compression: compression,
                 metadata: metadata
             )

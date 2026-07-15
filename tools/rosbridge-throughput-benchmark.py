@@ -272,7 +272,7 @@ async def run(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def print_markdown(results: list[dict[str, Any]]) -> None:
-    print("| Profile | Topic | Target Hz | Observed Hz | Messages | JSON MB/s |")
+    print("| Profile | Topic | Target Hz | Observed Hz | Messages | JSON Mbit/s |")
     print("| :--- | :--- | ---: | ---: | ---: | ---: |")
     for result in results:
         print(

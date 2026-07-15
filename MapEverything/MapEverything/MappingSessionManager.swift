@@ -157,7 +157,7 @@ final class MappingSessionManager: ObservableObject {
         self.localBagRecorder = localBagRecorder ?? LocalROS2BagRecorder.shared
         self.recorderURL = recorderURL
         self.remoteStreamingEnabled = remoteStreamingEnabled
-        self.enabledStreams = enabledStreams ?? Self.defaultStreams
+        self.enabledStreams = enabledStreams ?? Self.loadPersistedStreams() ?? Self.defaultStreams
     }
 
     func configure(
@@ -266,10 +266,50 @@ final class MappingSessionManager: ObservableObject {
             enabledStreams.remove(stream)
         }
         ROS2TopicRegistry.shared.setStream(stream, isEnabled: isEnabled)
+        persistEnabledStreams()
         if isActive {
+            applyStreamManagers(for: stream)
+            bridge.refreshAdvertisedTopics()
             bridge.refreshSessionPublishers()
         }
         publishSessionMetadata(event: "streams_updated")
+    }
+
+    // Manager-backed streams are normally started in start(); toggling one
+    // mid-session has to bring the backing managers into the same state.
+    private func applyStreamManagers(for stream: MappingSensorStream) {
+        switch stream {
+        case .satelliteImagery, .dem:
+            if enabledStreams.contains(.satelliteImagery) || enabledStreams.contains(.dem) {
+                geoTilePublisher.start()
+            } else {
+                geoTilePublisher.stop()
+            }
+        case .gps, .indoorLocalization:
+            if enabledStreams.contains(.gps) || enabledStreams.contains(.indoorLocalization) {
+                indoorLocalizationManager.start()
+            } else {
+                indoorLocalizationManager.stop()
+            }
+        case .radio:
+            if enabledStreams.contains(.radio) {
+                currentWiFiTelemetryManager.start()
+                bleBeaconTelemetryManager.start()
+                networkPathDiagnosticsManager.start()
+                if remoteStreamingEnabled {
+                    recorderEndpointProbeManager.start(recorderURL: recorderURL)
+                }
+                radioObservationPublisher.start(sessionID: sessionID)
+            } else {
+                currentWiFiTelemetryManager.stop()
+                bleBeaconTelemetryManager.stop()
+                networkPathDiagnosticsManager.stop()
+                recorderEndpointProbeManager.stop()
+                radioObservationPublisher.stop()
+            }
+        default:
+            break
+        }
     }
 
     func isStreamEnabled(_ stream: MappingSensorStream) -> Bool {
@@ -286,6 +326,8 @@ final class MappingSessionManager: ObservableObject {
         endedAt = nil
         lastError = nil
         enabledStreams = Self.defaultStreams
+        ROS2TopicRegistry.shared.configure(enabledStreams: enabledStreams)
+        persistEnabledStreams()
     }
 
     private func fail(_ message: String) {
@@ -333,4 +375,20 @@ final class MappingSessionManager: ObservableObject {
         .satelliteImagery,
         .dem
     ]
+
+    private static let enabledStreamsDefaultsKey = "enabledSensorStreams"
+
+    private static func loadPersistedStreams() -> Set<MappingSensorStream>? {
+        guard let rawValues = UserDefaults.standard.stringArray(forKey: enabledStreamsDefaultsKey) else {
+            return nil
+        }
+        return Set(rawValues.compactMap(MappingSensorStream.init(rawValue:)))
+    }
+
+    private func persistEnabledStreams() {
+        UserDefaults.standard.set(
+            enabledStreams.map(\.rawValue).sorted(),
+            forKey: Self.enabledStreamsDefaultsKey
+        )
+    }
 }
