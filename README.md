@@ -145,7 +145,7 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | `/mapping/gps/metadata` | `mapeverything_msgs/msg/GPSMetadata` | ~1 Hz | Extended Core Location validity, source, and georeference metadata. |
 | `/mapping/pointcloud/lidar` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | ARKit LiDAR-only colored point-cloud payloads downsampled to a sparse 10cm grid. |
 | `/mapping/pointcloud/depth_anything` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Relative Depth Anything colored point-cloud payloads in `iphone_camera`, downsampled to a sparse grid. Coordinates are not metric. |
-| `/mapping/depth_anything/calibration` | `mapeverything_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Scale/offset calibration used by the live overlay mesh: `metric_depth_m = scale * relative_depth + offset`. |
+| `/mapping/depth_anything/calibration` | `mapeverything_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Inverse-depth scale/offset calibration used by the live overlay mesh: `metric_depth_m = 1.0 / (scale * relative_depth + offset)`. |
 | `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | JPEG-compressed native ARKit camera image stream for visual loop closure and recorder context. |
 | `/mapping/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | 2 Hz | Same-timestamp camera intrinsics for the compressed image stream. |
 | `/mapping/map` | `visualization_msgs/msg/MarkerArray` | ~0.5 Hz | Emits reconstructed triangular mesh markers (`TRIANGLE_LIST`) for instant Rviz2 display when mesh publishing is enabled. |

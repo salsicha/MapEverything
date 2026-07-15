@@ -125,7 +125,7 @@ def message_for(profile: TopicProfile, sequence: int) -> dict[str, Any]:
     if profile.name == "depth-anything-calibration":
         return {
             "header": header,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": "depth_anything_v2_lidar_calibrated",
             "relative_pointcloud_topic": "/mapping/pointcloud/depth_anything",
             "overlay_mesh_source": "calibrated_depthanything_grid",
@@ -134,9 +134,9 @@ def message_for(profile: TopicProfile, sequence: int) -> dict[str, Any]:
             "relative_depth_height": 518,
             "image_width": 1920,
             "image_height": 1440,
-            "scale": 2.0,
-            "offset": 0.1,
-            "equation": "metric_depth_m = scale * relative_depth + offset",
+            "scale": 0.5,
+            "offset": 0.15,
+            "equation": "metric_depth_m = 1.0 / (scale * relative_depth + offset)",
             "relative_depth_units": "depthanything_relative",
             "metric_depth_units": "m",
             "calibration_source": "arkit_lidar_maximum_likelihood",

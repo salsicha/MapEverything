@@ -26,10 +26,18 @@ final class DepthAnythingProcessor {
     private let outputName: String
     private let inputSize: Int
 
+    /// Affine-invariant inverse-depth calibration for Depth Anything V2 output.
+    /// The network predicts relative inverse depth (disparity), so metric depth
+    /// is recovered with `metric_depth_m = 1 / (scale * relative + offset)`.
+    /// `scale` and `offset` are inverse-depth coefficients in 1/m.
     struct MaximumLikelihoodCalibration {
         let scale: Float
         let offset: Float
     }
+
+    /// The reciprocal model has a pole as fitted inverse depth approaches zero;
+    /// depths past this bound carry no monocular signal and would dominate the map.
+    static let maximumCalibratedDepth: Float = 100.0
 
     /// Loads the model from the app bundle. Returns nil if the model is missing,
     /// which lets the rest of the app continue working without depth enhancement.
@@ -133,8 +141,8 @@ final class DepthAnythingProcessor {
     }
 
     /// Calibrates a Depth Anything relative depth map into metric depth using LiDAR.
-    /// LiDAR samples are used only to estimate the affine metric transform; every
-    /// valid Depth Anything pixel is then kept on the calibrated monocular surface.
+    /// LiDAR samples are used only to estimate the affine inverse-depth transform;
+    /// every valid Depth Anything pixel is then kept on the calibrated monocular surface.
     func fuseMaximumLikelihood(
         relative: RelativeDepthMap,
         lidarDepthMap: CVPixelBuffer,
@@ -241,14 +249,17 @@ final class DepthAnythingProcessor {
     ) -> Float? {
         guard relativeDepth.isFinite, relativeDepth > 0 else { return nil }
 
-        let monocularDepth = calibration.scale * relativeDepth + calibration.offset
-        guard monocularDepth.isFinite, monocularDepth > 0.1 else { return nil }
+        let inverseDepth = calibration.scale * relativeDepth + calibration.offset
+        guard inverseDepth.isFinite, inverseDepth > 0 else { return nil }
+
+        let monocularDepth = 1.0 / inverseDepth
+        guard monocularDepth > 0.1, monocularDepth < Self.maximumCalibratedDepth else { return nil }
         return monocularDepth
     }
 
     /// Fuses a Depth Anything relative depth map with the sparse LiDAR depth from an ARFrame
-    /// to produce metric dense depth. Uses least-squares to solve `metric = a * relative + b`
-    /// on valid LiDAR samples, then applies the same affine transform across the whole map.
+    /// to produce metric dense depth. Uses least-squares to solve `1 / metric = a * relative + b`
+    /// on valid LiDAR samples, then applies the same inverse-depth transform across the whole map.
     func fuseWithLiDAR(relative: RelativeDepthMap, lidarDepthMap: CVPixelBuffer) -> RelativeDepthMap? {
         CVPixelBufferLockBaseAddress(lidarDepthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(lidarDepthMap, .readOnly) }
@@ -281,7 +292,7 @@ final class DepthAnythingProcessor {
                 guard r.isFinite, r > 0 else { continue }
 
                 let xv = Double(r)
-                let yv = Double(lidarDepth)
+                let yv = 1.0 / Double(lidarDepth)
                 sumX += xv
                 sumY += yv
                 sumXX += xv * xv
@@ -298,9 +309,9 @@ final class DepthAnythingProcessor {
         let a = Float((dn * sumXY - sumX * sumY) / denom)
         let b = Float((sumY * sumXX - sumX * sumXY) / denom)
 
-        // Apply the affine transform to the whole relative depth map
+        // Apply the inverse-depth transform to the whole relative depth map
         var fused = relative
-        fused.applyAffine(a: a, b: b)
+        fused.applyCalibration(MaximumLikelihoodCalibration(scale: a, offset: b))
         return fused
     }
 
@@ -338,10 +349,13 @@ final class DepthAnythingProcessor {
                     let r = relativeReader.value(atX: rx, y: ry)
                     guard r.isFinite, r > 0 else { continue }
 
+                    // Fit in inverse-depth space: 1/z = scale * r + offset.
+                    // sigma(1/z) = sigma(z) / z^2, so the ML weight gains z^4.
                     let sigma = Self.lidarStandardDeviation(depth: lidarDepth)
-                    let weight = Double(confidenceWeight / (sigma * sigma))
+                    let inverseDepthSigma = sigma / (lidarDepth * lidarDepth)
+                    let weight = Double(confidenceWeight / (inverseDepthSigma * inverseDepthSigma))
                     let xv = Double(r)
-                    let yv = Double(lidarDepth)
+                    let yv = 1.0 / Double(lidarDepth)
 
                     sumW += weight
                     sumX += weight * xv
@@ -765,12 +779,15 @@ struct RelativeDepthMap {
         }
     }
 
-    mutating func applyAffine(a: Float, b: Float) {
+    mutating func applyCalibration(_ calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration) {
         var transformed = [Float](repeating: .nan, count: width * height)
         withReadAccess { reader in
             for y in 0..<height {
                 for x in 0..<width {
-                    transformed[y * width + x] = a * reader.value(atX: x, y: y) + b
+                    transformed[y * width + x] = DepthAnythingProcessor.calibratedMetricDepth(
+                        relativeDepth: reader.value(atX: x, y: y),
+                        calibration: calibration
+                    ) ?? .nan
                 }
             }
         }

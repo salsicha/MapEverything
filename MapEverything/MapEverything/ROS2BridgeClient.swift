@@ -907,7 +907,9 @@ class ROS2BridgeClient: ObservableObject {
         let metadata: [String: Any] = [
             "pointcloud_coordinate_frame": "map",
             "pointcloud_semantics": "x_y_z_are_metric_map_coordinates_projected_from_full_depthanything_depth",
-            "metric_reconstruction": "metric_depth_m = scale * relative_depth + offset; every valid Depth Anything pixel is projected with that metric depth",
+            "metric_reconstruction": "metric_depth_m = 1.0 / (scale * relative_depth + offset); every valid Depth Anything pixel is projected with that metric depth",
+            "calibration_model": "affine_invariant_inverse_depth",
+            "valid_metric_depth_range_m": [0.1, 100.0],
             "uses_lidar_for_scale_calibration": true,
             "lidar_usage": "calibration_only",
             "overlay_mesh_uses_calibrated_depth": true
@@ -924,7 +926,7 @@ class ROS2BridgeClient: ObservableObject {
 
         return [
             "header": header,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": "depth_anything_v2_lidar_calibrated",
             "metric_pointcloud_topic": relativePointCloudTopic,
             "relative_pointcloud_topic": relativePointCloudTopic,
@@ -936,7 +938,7 @@ class ROS2BridgeClient: ObservableObject {
             "image_height": max(0, Int(imageResolution.height.rounded())),
             "scale": Double(calibration.scale),
             "offset": Double(calibration.offset),
-            "equation": "metric_depth_m = scale * relative_depth + offset",
+            "equation": "metric_depth_m = 1.0 / (scale * relative_depth + offset)",
             "relative_depth_units": "depthanything_relative",
             "metric_depth_units": "m",
             "calibration_source": "arkit_lidar_maximum_likelihood",
