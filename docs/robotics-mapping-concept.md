@@ -39,7 +39,7 @@ This differs from room-scanning apps because the primary output is not a floorpl
 ### LiDAR, Point Cloud, and Mesh
 
 - Publish downsampled LiDAR and relative Depth Anything `sensor_msgs/PointCloud2` streams as separate topics by default.
-- Publish the Depth Anything scale/offset calibration used by the live overlay mesh so recorder-side consumers can reconstruct metric depth from the relative point cloud.
+- Publish the Depth Anything inverse-depth scale/offset calibration used by the live overlay mesh so recorder-side consumers can reconstruct metric depth from the relative point cloud (`metric_depth_m = 1.0 / (scale * relative_depth + offset)`).
 - Build the live solid mesh overlay from the calibrated Depth Anything depth grid rather than fusing LiDAR and Depth Anything points.
 - Keep colored surfel reconstruction as an internal/export path rather than a ROS topic.
 - Publish reconstructed AR mesh as either:
@@ -142,7 +142,7 @@ Recommended output:
 | `/mapping/camera/image/compressed` | `sensor_msgs/msg/CompressedImage` | 2 Hz | Camera frames for context, replay, and loop closure without saturating the iPhone. |
 | `/mapping/pointcloud/lidar` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Downsampled ARKit LiDAR-only colored point cloud. |
 | `/mapping/pointcloud/depth_anything` | `sensor_msgs/msg/PointCloud2` | ~5 Hz | Downsampled relative Depth Anything colored point cloud in `iphone_camera`. |
-| `/mapping/depth_anything/calibration` | `mapeverything_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Scale/offset calibration used by the live overlay mesh. |
+| `/mapping/depth_anything/calibration` | `mapeverything_msgs/msg/DepthAnythingCalibration` | ~5 Hz | Inverse-depth scale/offset calibration used by the live overlay mesh. |
 | `/mapping/map` | `visualization_msgs/msg/MarkerArray` | 0.2-2 Hz | RViz-friendly mesh and semantic objects. |
 | `/mapping/radio` | `mapeverything_msgs/msg/RadioObservation` | 0.5-5 Hz | Wi-Fi, BLE, link, or external radio measurements. |
 | `/mapping/satellite/image/compressed` | `sensor_msgs/msg/CompressedImage` | 1/min | Satellite imagery tile payloads. |

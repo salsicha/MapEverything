@@ -70,7 +70,7 @@ struct MapEverythingTests {
         let lidarDepthMap = try makeDepthFloat32PixelBuffer(
             width: width,
             height: height,
-            values: relativeData.map { 2.0 * $0 + 0.5 }
+            values: relativeData.map { 1.0 / (0.5 * $0 + 0.15) }
         )
         let cameraImage = try makeYpCbCrPixelBuffer(width: width, height: height, luma: 128, cb: 128, cr: 128)
 
@@ -90,7 +90,7 @@ struct MapEverythingTests {
         )
 
         #expect(points.count == width * height)
-        #expect(points.allSatisfy { $0.position.z < -1.4 && $0.position.z > -3.5 })
+        #expect(points.allSatisfy { $0.position.z < -1.1 && $0.position.z > -2.6 })
         #expect(points.allSatisfy { $0.color == SIMD3<UInt8>(128, 128, 128) })
     }
 
@@ -117,11 +117,11 @@ struct MapEverythingTests {
             imageResolution: CGSize(width: width, height: height),
             transform: matrix_identity_float4x4,
             relativeDepthMap: relativeDepthMap,
-            calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 2.0, offset: 0.0)
+            calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 0.02, offset: 0.005)
         )
 
         #expect(points.count == width * height)
-        #expect(points.allSatisfy { abs($0.position.z + 12.0) < 0.001 })
+        #expect(points.allSatisfy { abs($0.position.z + 8.0) < 0.001 })
     }
 
     @Test("Depth Anything mesh snapshot keeps the full calibrated grid")
@@ -320,15 +320,15 @@ struct MapEverythingTests {
         #expect(secondMap.data.count == map.data.count)
     }
 
-    @Test("Affine transform correctly maps relative depth to metric")
-    func testRelativeDepthAffineTransform() {
-        var map = RelativeDepthMap(width: 2, height: 2, data: [0.0, 0.25, 0.5, 1.0])
-        map.applyAffine(a: 4.0, b: 1.0)
-        // metric = 4 * relative + 1
-        #expect(map.data[0] == 1.0)
+    @Test("Inverse-depth calibration correctly maps relative depth to metric")
+    func testRelativeDepthCalibrationTransform() {
+        var map = RelativeDepthMap(width: 2, height: 2, data: [0.25, 0.5, 1.0, 0.0])
+        map.applyCalibration(DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 1.0, offset: 0.0))
+        // metric = 1 / (1 * relative + 0); non-positive relative depth is invalid
+        #expect(map.data[0] == 4.0)
         #expect(map.data[1] == 2.0)
-        #expect(map.data[2] == 3.0)
-        #expect(map.data[3] == 5.0)
+        #expect(map.data[2] == 1.0)
+        #expect(map.data[3].isNaN)
     }
 
     @Test("RelativeDepthMap reads native model outputs without eager copies")
@@ -379,7 +379,7 @@ struct MapEverythingTests {
         let lidar = try makeDepthFloat32PixelBuffer(
             width: width,
             height: height,
-            values: relativeValues.map { 2.0 * $0 + 0.5 }
+            values: relativeValues.map { 1.0 / (0.5 * $0 + 0.15) }
         )
         let confidence = try makeLiDARConfidencePixelBuffer(
             width: width,
@@ -393,8 +393,8 @@ struct MapEverythingTests {
             lidarConfidenceMap: confidence
         ))
 
-        #expect(abs(calibration.scale - 2.0) < 0.001)
-        #expect(abs(calibration.offset - 0.5) < 0.001)
+        #expect(abs(calibration.scale - 0.5) < 0.001)
+        #expect(abs(calibration.offset - 0.15) < 0.001)
     }
 
     @Test("Depth Anything calibration cache reuses nearby frames")
@@ -946,7 +946,7 @@ struct MapEverythingTests {
             frameID: "iphone_camera"
         )
 
-        #expect(msg["schema_version"] as? Int == 1)
+        #expect(msg["schema_version"] as? Int == 2)
         // rosbridge rejects publishes carrying keys that are not fields of the
         // .msg definition, so the message must not grow extra keys.
         #expect(msg["metric_pointcloud_topic"] == nil)
@@ -956,7 +956,8 @@ struct MapEverythingTests {
         #expect(msg["relative_depth_height"] as? Int == 518)
         #expect(msg["scale"] as? Double == 2.5)
         #expect(msg["offset"] as? Double == 0.25)
-        #expect(msg["equation"] as? String == "metric_depth_m = scale * relative_depth + offset")
+        #expect(msg["equation"] as? String == "metric_depth_m = 1.0 / (scale * relative_depth + offset)")
+        #expect((msg["metadata_json"] as? String)?.contains("affine_invariant_inverse_depth") == true)
         #expect((msg["metadata_json"] as? String)?.contains("pointcloud_coordinate_frame") == true)
         #expect((msg["metadata_json"] as? String)?.contains("calibration_only") == true)
         #expect((msg["metadata_json"] as? String)?.contains("overlay_mesh_uses_calibrated_depth") == true)
