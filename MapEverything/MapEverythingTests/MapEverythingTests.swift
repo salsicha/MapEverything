@@ -947,7 +947,9 @@ struct MapEverythingTests {
         )
 
         #expect(msg["schema_version"] as? Int == 1)
-        #expect(msg["metric_pointcloud_topic"] as? String == "/mapping/pointcloud/depth_anything")
+        // rosbridge rejects publishes carrying keys that are not fields of the
+        // .msg definition, so the message must not grow extra keys.
+        #expect(msg["metric_pointcloud_topic"] == nil)
         #expect(msg["relative_pointcloud_topic"] as? String == "/mapping/pointcloud/depth_anything")
         #expect(msg["frame_id"] as? String == "iphone_camera")
         #expect(msg["relative_depth_width"] as? Int == 518)

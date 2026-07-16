@@ -202,6 +202,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var lastSurfelVisualizationTime: TimeInterval = 0
     private var isProcessingFrame = false
     private var cumulativePointCount = 0
+    // Bumped on scan restart so in-flight frame tasks from the previous scan
+    // cannot write pre-reset voxels into the freshly cleared map.
+    private var scanGeneration = 0
     var maxPointLimit: Int = 2_000_000
     var boundingBoxSize: Float = 20.0
     var voxelSize: Float = 0.05 {
@@ -322,6 +325,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         guard let configuration = makeWorldTrackingConfiguration() else { return }
         depthAnythingCalibrationCache.reset()
         cumulativePointCount = 0
+        scanGeneration += 1
         Task { await pointManager.clear() }
         clearLiveMeshEntities()
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
@@ -987,9 +991,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
         
         lastPointProcessingTime = frame.timestamp
         isProcessingFrame = true
-        
+
         let transform = frame.camera.transform
         let timestamp = frame.timestamp
+        let frameScanGeneration = scanGeneration
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else {
             isProcessingFrame = false
             return
@@ -1008,12 +1013,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let shouldUseDepthAnythingDepth = shouldUseDepthAnythingMappingDepth()
         let pointCloudStreamEnabled = topicRegistry.isStreamEnabled(.pointCloud)
         let cameraStreamEnabled = topicRegistry.isStreamEnabled(.camera)
-        let hasPublishTarget = (pointCloudStreamEnabled || cameraStreamEnabled) && bridge.hasActivePublishTarget
+        // Point clouds can be buffered by the bridge across transient
+        // disconnects; camera images cannot, so they keep the stricter gate.
         let shouldPublishPointCloud = pointCloudStreamEnabled
-            && hasPublishTarget
+            && bridge.hasPublishOrBufferTarget
             && timestamp - lastPointCloudPublishTime >= pointCloudPublishInterval
         let shouldPublishCameraImage = cameraStreamEnabled
-            && hasPublishTarget
+            && bridge.hasActivePublishTarget
             && timestamp - lastCameraImagePublishTime >= cameraImagePublishInterval
             && !isPublishingCameraImage
         let shouldRefreshSurfelVisualization = currentMode == .surfels
@@ -1104,12 +1110,16 @@ class ARViewController: UIViewController, ARSessionDelegate {
             if !lidarPointCloud.isEmpty {
                 // The scan limit bounds accumulated unique voxels, not the
                 // per-frame counts of transient Depth Anything clouds.
-                let voxelTotal = await self.pointManager.addAndFilter(newPoints: lidarPointCloud)
-                await MainActor.run {
-                    self.cumulativePointCount = voxelTotal
-                    self.delegate?.didUpdatePointCount(voxelTotal)
-                    if voxelTotal >= self.maxPointLimit {
-                        self.delegate?.didReachScanLimit(limit: self.maxPointLimit)
+                let isCurrentScan = await MainActor.run { self.scanGeneration == frameScanGeneration }
+                if isCurrentScan {
+                    let voxelTotal = await self.pointManager.addAndFilter(newPoints: lidarPointCloud)
+                    await MainActor.run {
+                        guard self.scanGeneration == frameScanGeneration else { return }
+                        self.cumulativePointCount = voxelTotal
+                        self.delegate?.didUpdatePointCount(voxelTotal)
+                        if voxelTotal >= self.maxPointLimit {
+                            self.delegate?.didReachScanLimit(limit: self.maxPointLimit)
+                        }
                     }
                 }
             }
@@ -1162,7 +1172,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     
     private func publishMapToROS2IfNeeded(anchors: [ARAnchor]) {
         guard ROS2TopicRegistry.shared.isStreamEnabled(.mesh) else { return }
-        guard ROS2BridgeClient.shared.hasActivePublishTarget else { return }
+        guard ROS2BridgeClient.shared.hasPublishOrBufferTarget else { return }
         
         let currentTime = Date().timeIntervalSince1970
         if currentTime - lastMapPublishTime > meshSnapshotPublishConfiguration.publishInterval {
@@ -1180,18 +1190,24 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
     
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
-        for anchor in anchors {
-            if let meshAnchor = anchor as? ARMeshAnchor {
-                meshUpdateTasks[meshAnchor.identifier]?.cancel()
-                meshUpdateTasks.removeValue(forKey: meshAnchor.identifier)
-                meshRebuildThrottle.removeAnchor(meshAnchor.identifier)
-                
-                if let anchorEntity = anchorEntities[meshAnchor.identifier] {
-                    arView?.scene.removeAnchor(anchorEntity)
-                }
-                meshEntities.removeValue(forKey: meshAnchor.identifier)
-                anchorEntities.removeValue(forKey: meshAnchor.identifier)
+        let removedMeshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
+        for meshAnchor in removedMeshAnchors {
+            meshUpdateTasks[meshAnchor.identifier]?.cancel()
+            meshUpdateTasks.removeValue(forKey: meshAnchor.identifier)
+            meshRebuildThrottle.removeAnchor(meshAnchor.identifier)
+
+            if let anchorEntity = anchorEntities[meshAnchor.identifier] {
+                arView?.scene.removeAnchor(anchorEntity)
             }
+            meshEntities.removeValue(forKey: meshAnchor.identifier)
+            anchorEntities.removeValue(forKey: meshAnchor.identifier)
+        }
+
+        if isScanning, !removedMeshAnchors.isEmpty {
+            ROS2BridgeClient.shared.publishMeshRemovals(
+                removedMeshAnchors.map(\.identifier),
+                timestamp: ProcessInfo.processInfo.systemUptime
+            )
         }
     }
     

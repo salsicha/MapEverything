@@ -174,6 +174,12 @@ class ROS2BridgeClient: ObservableObject {
         connectionStateLock.withLock { _currentURL != nil }
     }
 
+    // For callers producing point cloud/mesh samples, which the bridge can
+    // buffer during a transient disconnect even with no live publish target.
+    var hasPublishOrBufferTarget: Bool {
+        hasActivePublishTarget || shouldBufferWhileDisconnected
+    }
+
     private func setConnected(_ value: Bool) {
         connectionStateLock.withLock { _isConnectedFlag = value }
         if Thread.isMainThread {
@@ -218,6 +224,12 @@ class ROS2BridgeClient: ObservableObject {
     func disconnect(after delay: TimeInterval = 0) {
         stopSessionPublishers()
 
+        // Cancel any pending auto-reconnect immediately; if it fired inside
+        // the delay window it would bump the generation and void this
+        // deliberate disconnect, leaving a zombie connection.
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+
         let generation = connectionGeneration
         let closeConnection = { [weak self] in
             guard let self, self.connectionGeneration == generation else { return }
@@ -256,14 +268,21 @@ class ROS2BridgeClient: ObservableObject {
         guard let url = currentURL else { return }
         guard reconnectWorkItem == nil else { return }
 
+        // The outer item can already be dequeued when cancel() is called, so
+        // the inner block re-checks identity against reconnectWorkItem, which
+        // disconnect()/connect() clear synchronously on the main thread.
+        var scheduledItem: DispatchWorkItem?
         let workItem = DispatchWorkItem { [weak self] in
             DispatchQueue.main.async {
-                self?.reconnectWorkItem = nil
-                if UserDefaults.standard.bool(forKey: "ros2Enabled") && !(self?.isConnected ?? false) {
-                    self?.connect(to: url)
+                guard let self, let scheduledItem,
+                      self.reconnectWorkItem === scheduledItem else { return }
+                self.reconnectWorkItem = nil
+                if UserDefaults.standard.bool(forKey: "ros2Enabled") && !self.isConnected {
+                    self.connect(to: url)
                 }
             }
         }
+        scheduledItem = workItem
         reconnectWorkItem = workItem
         DispatchQueue.global().asyncAfter(deadline: .now() + 3.0, execute: workItem)
     }
@@ -926,7 +945,6 @@ class ROS2BridgeClient: ObservableObject {
             "header": header,
             "schema_version": 1,
             "source": "depth_anything_v2_lidar_calibrated",
-            "metric_pointcloud_topic": relativePointCloudTopic,
             "relative_pointcloud_topic": relativePointCloudTopic,
             "overlay_mesh_source": "calibrated_depthanything_grid",
             "frame_id": frameID,
@@ -1047,6 +1065,33 @@ class ROS2BridgeClient: ObservableObject {
             meshMarkerIDs[identifier] = id
             return id
         }
+    }
+
+    // Markers are published with the default infinite lifetime, so anchors
+    // ARKit removes must be deleted explicitly or they ghost in RViz.
+    func publishMeshRemovals(_ anchorIdentifiers: [UUID], timestamp: TimeInterval) {
+        guard topicRegistry.isStreamEnabled(.mesh),
+              hasActivePublishTarget || shouldBufferWhileDisconnected,
+              !anchorIdentifiers.isEmpty else { return }
+
+        let removals: [[String: Any]] = anchorIdentifiers.compactMap { identifier in
+            guard let id = meshMarkerIDLock.withLock({ meshMarkerIDs.removeValue(forKey: identifier) }) else {
+                return nil
+            }
+            return [
+                "header": createHeader(frameId: FrameID.map, timestamp: timestamp),
+                "ns": "mesh",
+                "id": id,
+                "action": 2 // DELETE
+            ]
+        }
+        guard !removals.isEmpty else { return }
+
+        publishOrBufferLocalSample(
+            kind: .mesh,
+            topic: topicRegistry.topic(.meshMarkers),
+            msg: ["markers": removals]
+        )
     }
 
     func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
@@ -1321,7 +1366,9 @@ class ROS2BridgeClient: ObservableObject {
 
         let latitude = finiteROSNumber(location.coordinate.latitude, fallback: 0)
         let longitude = finiteROSNumber(location.coordinate.longitude, fallback: 0)
-        let altitude = finiteROSNumber(location.altitude, fallback: 0)
+        // NavSatFix.altitude is defined against the WGS-84 ellipsoid;
+        // CLLocation.altitude is mean sea level.
+        let altitude = finiteROSNumber(location.ellipsoidalAltitude, fallback: 0)
         let horizontalAccuracy = finiteROSNumber(location.horizontalAccuracy)
         let verticalAccuracy = finiteROSNumber(location.verticalAccuracy)
         let hasCoordinate = location.coordinate.latitude.isFinite && location.coordinate.longitude.isFinite
@@ -2006,23 +2053,32 @@ class ROS2BridgeClient: ObservableObject {
                   self.hasActivePublishTarget,
                   self.topicRegistry.isStreamEnabled(.imu) else { return }
 
+            // CMDeviceMotion vectors are in the portrait device frame; the
+            // "iphone_camera" TF frame is ARKit camera space, which is the
+            // device frame rotated about z (camera x = device y, camera
+            // y = -device x). REP 145 wants specific force (+9.81 on the up
+            // axis at rest), the negation of CoreMotion's convention.
+            let specificForce = (
+                x: -(data.userAcceleration.x + data.gravity.x) * 9.81,
+                y: -(data.userAcceleration.y + data.gravity.y) * 9.81,
+                z: -(data.userAcceleration.z + data.gravity.z) * 9.81
+            )
             let msg: [String: Any] = [
                 "header": self.createHeader(frameId: "iphone_camera", timestamp: data.timestamp),
-                "orientation": [
-                    "x": data.attitude.quaternion.x,
-                    "y": data.attitude.quaternion.y,
-                    "z": data.attitude.quaternion.z,
-                    "w": data.attitude.quaternion.w
-                ],
+                // CoreMotion's attitude reference frame does not match the map
+                // frame; per sensor_msgs/Imu, orientation_covariance[0] == -1
+                // declares the orientation unavailable.
+                "orientation": ["x": 0, "y": 0, "z": 0, "w": 1],
+                "orientation_covariance": [-1, 0, 0, 0, 0, 0, 0, 0, 0],
                 "angular_velocity": [
-                    "x": data.rotationRate.x,
-                    "y": data.rotationRate.y,
+                    "x": data.rotationRate.y,
+                    "y": -data.rotationRate.x,
                     "z": data.rotationRate.z
                 ],
                 "linear_acceleration": [
-                    "x": (data.userAcceleration.x + data.gravity.x) * 9.81, // ROS expects m/s^2 including gravity
-                    "y": (data.userAcceleration.y + data.gravity.y) * 9.81,
-                    "z": (data.userAcceleration.z + data.gravity.z) * 9.81
+                    "x": specificForce.y,
+                    "y": -specificForce.x,
+                    "z": specificForce.z
                 ]
             ]
             self.send(op: "publish", topic: imuTopic, msg: msg)

@@ -202,6 +202,22 @@ final class RecorderEndpointProbeManager: NSObject, ObservableObject, URLSession
         }
     }
 
+    // Fail fast on refused connections and handshake errors instead of
+    // waiting for the probe timeout.
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        guard let error else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  let probeID = self.activeProbeID,
+                  task === self.activeTask else { return }
+            self.failProbeIfActive(probeID, message: "Recorder endpoint probe failed: \(error.localizedDescription)")
+        }
+    }
+
     func urlSession(
         _ session: URLSession,
         webSocketTask: URLSessionWebSocketTask,

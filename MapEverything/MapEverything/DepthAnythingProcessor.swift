@@ -273,8 +273,8 @@ final class DepthAnythingProcessor {
                 guard lidarDepth > 0.2 && lidarDepth < 5.0 else { continue }
 
                 // Map (x, y) in LiDAR space → (rx, ry) in relative-depth space
-                let nx = Float(x) / Float(lidarW - 1)
-                let ny = Float(y) / Float(lidarH - 1)
+                let nx = Float(x) / Float(max(lidarW - 1, 1))
+                let ny = Float(y) / Float(max(lidarH - 1, 1))
                 let rx = Int(nx * Float(relative.width - 1))
                 let ry = Int(ny * Float(relative.height - 1))
                 let r = relative.value(atX: rx, y: ry)
@@ -294,7 +294,9 @@ final class DepthAnythingProcessor {
 
         let dn = Double(n)
         let denom = (dn * sumXX - sumX * sumX)
-        guard abs(denom) > 1e-6 else { return nil }
+        // Relative threshold: cancellation noise on large sums exceeds any
+        // absolute epsilon when the relative map is near-constant.
+        guard denom > 1e-9 * dn * sumXX else { return nil }
         let a = Float((dn * sumXY - sumX * sumY) / denom)
         let b = Float((sumY * sumXX - sumX * sumXY) / denom)
 

@@ -100,6 +100,7 @@ final class IndoorLocalizationManager: NSObject, ObservableObject, CLLocationMan
         if CLLocationManager.headingAvailable() {
             locationManager.stopUpdatingHeading()
         }
+        latestHeading = nil
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
@@ -152,10 +153,13 @@ final class IndoorLocalizationManager: NSObject, ObservableObject, CLLocationMan
         }
     }
 
+    // Heading runs whenever the manager runs (publishing is gated per stream at
+    // publish time); gating it on the stream here would leave heading stopped
+    // when the stream is enabled mid-session.
     private func startLocationUpdates() {
         locationManager.startUpdatingLocation()
         isHeadingAvailable = CLLocationManager.headingAvailable()
-        if isHeadingAvailable, topicRegistry.isStreamEnabled(.indoorLocalization) {
+        if isHeadingAvailable {
             locationManager.startUpdatingHeading()
         } else {
             lastHeadingAccuracy = -1

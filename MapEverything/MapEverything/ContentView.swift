@@ -134,6 +134,13 @@ struct ContentView: View {
             }
             .onChange(of: isScanning) { scanning in
                 UIApplication.shared.isIdleTimerDisabled = scanning
+                // Paths that clear isScanning without going through the stop
+                // button (e.g. the scan limit) must still end the session, or
+                // the bag stays open and sensors keep publishing.
+                if !scanning, mappingSession.isActive {
+                    NotificationCenter.default.post(name: .mapEverythingWillStopMapping, object: nil)
+                    mappingSession.stop()
+                }
             }
             .onChange(of: ros2Enabled) { enabled in
                 commitROSBridgeHostInput(reconnectIfActive: false)
@@ -142,6 +149,9 @@ struct ContentView: View {
                     remoteStreamingEnabled: enabled
                 )
                 if isScanning {
+                    // restart() closes the current bag; save its final
+                    // artifacts first, as the stop button does.
+                    NotificationCenter.default.post(name: .mapEverythingWillStopMapping, object: nil)
                     mappingSession.restart(
                         recorderURL: ros2WebSocketURL,
                         remoteStreamingEnabled: enabled
@@ -595,6 +605,7 @@ struct ContentView: View {
         )
 
         if reconnectIfActive, isScanning, ros2Enabled {
+            NotificationCenter.default.post(name: .mapEverythingWillStopMapping, object: nil)
             mappingSession.restart(
                 recorderURL: updatedURL,
                 remoteStreamingEnabled: true
@@ -861,6 +872,11 @@ struct LocalROS2BagBrowserView: View {
                         }
                     }
                 } catch {
+                    guard !Task.isCancelled else { return }
+                    if let cocoaError = error as? CocoaError,
+                       cocoaError.code == .fileReadNoSuchFile || cocoaError.code == .fileNoSuchFile {
+                        continue
+                    }
                     await MainActor.run {
                         errorMessage = error.localizedDescription
                     }
@@ -925,8 +941,10 @@ struct LocalROS2BagSessionDetailView: View {
                 if isActive {
                     Label("Recording", systemImage: "record.circle.fill")
                         .foregroundColor(.red)
-                }
-                if !session.files.isEmpty {
+                    Text("Sharing is available after recording stops.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if !session.files.isEmpty {
                     ShareLink(items: session.files.map(\.url)) {
                         Label("Share Bag Files", systemImage: "square.and.arrow.up")
                     }
@@ -948,11 +966,14 @@ struct LocalROS2BagSessionDetailView: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        ShareLink(item: file.url) {
-                            Image(systemName: "square.and.arrow.up")
-                                .frame(width: 32, height: 32)
+                        // Sharing a chunk mid-write exports a torn SQLite file.
+                        if !isActive {
+                            ShareLink(item: file.url) {
+                                Image(systemName: "square.and.arrow.up")
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.borderless)
                         }
-                        .buttonStyle(.borderless)
                     }
                 }
             }

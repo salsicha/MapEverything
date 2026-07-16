@@ -153,8 +153,8 @@ struct GeoTilePixelCoordinate {
         let pixelY = (rawTileY - Double(coordinate.y)) * Double(tileSizePixels)
 
         return GeoTilePixelCoordinate(
-            x: min(max(pixelX, 0), Double(tileSizePixels)),
-            y: min(max(pixelY, 0), Double(tileSizePixels)),
+            x: min(max(pixelX, 0), Double(tileSizePixels - 1)),
+            y: min(max(pixelY, 0), Double(tileSizePixels - 1)),
             width: tileSizePixels,
             height: tileSizePixels
         )

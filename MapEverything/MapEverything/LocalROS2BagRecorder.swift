@@ -615,10 +615,12 @@ final class LocalROS2BagRecorder: ObservableObject {
             options: [.skipsHiddenFiles]
         )
 
-        return try directoryURLs.compactMap { url in
-            let values = try url.resourceValues(forKeys: [.isDirectoryKey])
-            guard values.isDirectory == true else { return nil }
-            return try bagSession(directoryURL: url, previewLoadingMode: previewLoadingMode)
+        // One unreadable directory (concurrent delete, Files-app edits) must
+        // not hide every other bag in the browser.
+        return directoryURLs.compactMap { url in
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey]),
+                  values.isDirectory == true else { return nil }
+            return try? bagSession(directoryURL: url, previewLoadingMode: previewLoadingMode)
         }
         .sorted { lhs, rhs in
             (lhs.modifiedAt ?? .distantPast) > (rhs.modifiedAt ?? .distantPast)
@@ -640,13 +642,22 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 
     func bagSessionWithPreviewScan(_ session: LocalROS2BagSession) async throws -> LocalROS2BagSession {
-        try await withCheckedThrowingContinuation { continuation in
+        // Scanning the chunk the recorder is actively writing holds a SHARED
+        // lock that makes the writer's COMMITs fail with SQLITE_BUSY, so the
+        // active session is never scanned; it gets a preview after it stops.
+        let isActiveSession = queue.sync {
+            (self.acceptsRecords || self.database != nil)
+                && self.bagDirectoryURL?.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path
+        }
+        let loadingMode: LocalROS2BagPreviewLoadingMode = isActiveSession ? .cachedOnly : .scanIfNeeded
+
+        return try await withCheckedThrowingContinuation { continuation in
             previewQueue.async {
                 do {
                     continuation.resume(
                         returning: try self.bagSession(
                             directoryURL: session.directoryURL,
-                            previewLoadingMode: .scanIfNeeded
+                            previewLoadingMode: loadingMode
                         )
                     )
                 } catch {
@@ -837,7 +848,9 @@ final class LocalROS2BagRecorder: ObservableObject {
 
         guard loadingMode == .scanIfNeeded else { return nil }
 
-        let preview = buildPreview(for: directoryURL, files: files, cacheKey: cacheKey)
+        guard let preview = buildPreview(for: directoryURL, files: files, cacheKey: cacheKey) else {
+            return nil
+        }
         writeCachedPreview(preview, to: cacheURL)
         return preview
     }
@@ -871,7 +884,7 @@ final class LocalROS2BagRecorder: ObservableObject {
         for directoryURL: URL,
         files: [LocalROS2BagFile],
         cacheKey: String
-    ) -> LocalROS2BagSessionPreview {
+    ) -> LocalROS2BagSessionPreview? {
         var messageCount = 0
         var topicNames = Set<String>()
         var startedAtNanoseconds: Int64?
@@ -879,7 +892,9 @@ final class LocalROS2BagRecorder: ObservableObject {
         var thumbnailSourceData: Data?
 
         for file in files where file.kind == .sqliteChunk {
-            guard let chunkPreview = sqlitePreview(from: file.url) else { continue }
+            // An unreadable chunk means the preview would undercount; fail the
+            // scan rather than caching a wrong preview under a stable key.
+            guard let chunkPreview = sqlitePreview(from: file.url) else { return nil }
             messageCount += chunkPreview.messageCount
             topicNames.formUnion(chunkPreview.topicNames)
 
@@ -925,11 +940,18 @@ final class LocalROS2BagRecorder: ObservableObject {
             return nil
         }
         defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 500)
 
-        let messageCount = Int(sqliteInt64(
+        // COUNT(*) never yields NULL, so nil means the chunk cannot be
+        // queried (hot journal, locked writer); it must not be treated as an
+        // empty chunk or the zero preview gets cached permanently.
+        guard let rawMessageCount = sqliteInt64(
             database: database,
             sql: "SELECT COUNT(*) FROM messages"
-        ) ?? 0)
+        ) else {
+            return nil
+        }
+        let messageCount = Int(rawMessageCount)
         let start = sqliteInt64(
             database: database,
             sql: "SELECT MIN(timestamp) FROM messages"
@@ -1090,6 +1112,9 @@ final class LocalROS2BagRecorder: ObservableObject {
         if sqlite3_open_v2(chunkURL.path, &database, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
             throw SQLiteError(database: database, fallback: "Unable to open SQLite chunk")
         }
+        // A concurrent reader (preview scan, share) briefly holding a SHARED
+        // lock must delay the writer's COMMIT, not fail it.
+        sqlite3_busy_timeout(database, 2_000)
 
         try execute("PRAGMA synchronous=NORMAL")
         try execute("CREATE TABLE IF NOT EXISTS topics(id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, serialization_format TEXT NOT NULL, offered_qos_profiles TEXT NOT NULL)")
@@ -1195,6 +1220,17 @@ final class LocalROS2BagRecorder: ObservableObject {
         var transactionOpen = false
         var messageStatement: OpaquePointer?
 
+        // Per-transaction deltas are folded into the chunk counters only on
+        // COMMIT, so a rollback (now survivable) leaves the counters and the
+        // inserted-topics set matching what is actually in the database.
+        var txMessageCount = 0
+        var txBytes = 0
+        var txStartNanoseconds: Int64?
+        var txEndNanoseconds: Int64?
+        var txTopicCounts: [String: Int] = [:]
+        var txInsertedTopics: Set<String> = []
+        var txNextMessageID = nextMessageID
+
         func beginTransaction() throws {
             try execute("BEGIN IMMEDIATE TRANSACTION")
             transactionOpen = true
@@ -1212,6 +1248,28 @@ final class LocalROS2BagRecorder: ObservableObject {
             closeStatement()
             try execute("COMMIT")
             transactionOpen = false
+
+            currentChunkMessageCount += txMessageCount
+            currentChunkBytes += txBytes
+            currentChunkStartNanoseconds = currentChunkStartNanoseconds ?? txStartNanoseconds
+            if let txEndNanoseconds {
+                currentChunkEndNanoseconds = txEndNanoseconds
+            }
+            for (topic, count) in txTopicCounts {
+                if var topicInfo = topicsByName[topic] {
+                    topicInfo.messageCount += count
+                    topicsByName[topic] = topicInfo
+                }
+            }
+            topicsInsertedInCurrentChunk.formUnion(txInsertedTopics)
+            nextMessageID = txNextMessageID
+
+            txMessageCount = 0
+            txBytes = 0
+            txStartNanoseconds = nil
+            txEndNanoseconds = nil
+            txTopicCounts.removeAll()
+            txInsertedTopics.removeAll()
         }
 
         func rollbackTransaction() {
@@ -1224,8 +1282,8 @@ final class LocalROS2BagRecorder: ObservableObject {
 
         do {
             for write in writes {
-                if currentChunkMessageCount > 0,
-                   currentChunkBytes + write.data.count > configuration.maxChunkBytes {
+                if currentChunkMessageCount + txMessageCount > 0,
+                   currentChunkBytes + txBytes + write.data.count > configuration.maxChunkBytes {
                     if transactionOpen {
                         try commitTransaction()
                     }
@@ -1236,24 +1294,24 @@ final class LocalROS2BagRecorder: ObservableObject {
                     try beginTransaction()
                 }
 
-                let topicID = try ensureTopic(write.topic, messageType: write.messageType)
+                let topicID = try ensureTopic(
+                    write.topic,
+                    messageType: write.messageType,
+                    pendingInsertedTopics: &txInsertedTopics
+                )
                 try insertMessage(
-                    id: nextMessageID,
+                    id: txNextMessageID,
                     topicID: topicID,
                     timestampNanoseconds: write.timestampNanoseconds,
                     data: write.data,
                     statement: messageStatement
                 )
-                nextMessageID += 1
-                currentChunkMessageCount += 1
-                currentChunkBytes += write.data.count
-                currentChunkStartNanoseconds = currentChunkStartNanoseconds ?? write.timestampNanoseconds
-                currentChunkEndNanoseconds = write.timestampNanoseconds
-
-                if var topicInfo = topicsByName[write.topic] {
-                    topicInfo.messageCount += 1
-                    topicsByName[write.topic] = topicInfo
-                }
+                txNextMessageID += 1
+                txMessageCount += 1
+                txBytes += write.data.count
+                txStartNanoseconds = txStartNanoseconds ?? write.timestampNanoseconds
+                txEndNanoseconds = write.timestampNanoseconds
+                txTopicCounts[write.topic, default: 0] += 1
             }
 
             if transactionOpen {
@@ -1271,7 +1329,11 @@ final class LocalROS2BagRecorder: ObservableObject {
         }
     }
 
-    private func ensureTopic(_ topic: String, messageType: String) throws -> Int64 {
+    private func ensureTopic(
+        _ topic: String,
+        messageType: String,
+        pendingInsertedTopics: inout Set<String>
+    ) throws -> Int64 {
         let topicInfo: TopicInfo
         if let existing = topicsByName[topic] {
             topicInfo = existing
@@ -1281,9 +1343,9 @@ final class LocalROS2BagRecorder: ObservableObject {
             nextTopicID += 1
         }
 
-        if !topicsInsertedInCurrentChunk.contains(topic) {
+        if !topicsInsertedInCurrentChunk.contains(topic), !pendingInsertedTopics.contains(topic) {
             try insertTopic(topicInfo)
-            topicsInsertedInCurrentChunk.insert(topic)
+            pendingInsertedTopics.insert(topic)
         }
 
         return topicInfo.id

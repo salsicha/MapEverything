@@ -21,6 +21,7 @@ final class MapEverythingAppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct MapEverythingApp: App {
     @UIApplicationDelegateAdaptor(MapEverythingAppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
 
     var sharedModelContainer: ModelContainer = {
         let schema = MapEverythingModelSchema.schema
@@ -38,5 +39,12 @@ struct MapEverythingApp: App {
             ContentView()
         }
         .modelContainer(sharedModelContainer)
+        .onChange(of: scenePhase) { phase in
+            // A background termination discards the in-memory write batch;
+            // flush it while iOS still allows work.
+            if phase == .background {
+                LocalROS2BagRecorder.shared.flushAndWait()
+            }
+        }
     }
 }

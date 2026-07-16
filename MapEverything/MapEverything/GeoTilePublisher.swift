@@ -249,8 +249,19 @@ final class GeoTilePublisher: NSObject, ObservableObject, CLLocationManagerDeleg
               200..<300 ~= httpResponse.statusCode else {
             throw URLError(.badServerResponse)
         }
+        // ArcGIS-style servers can return HTTP 200 with a JSON/HTML error body;
+        // caching one would poison this tile for every future session.
+        if let mimeType = httpResponse.mimeType?.lowercased(),
+           mimeType.contains("json") || mimeType.contains("html") || mimeType.hasPrefix("text/") {
+            throw URLError(.cannotDecodeContentData)
+        }
+        guard !data.isEmpty else {
+            throw URLError(.zeroByteResource)
+        }
 
-        try cache.store(data, provider: provider, coordinate: coordinate, time: time)
+        // A cache-write failure (e.g. disk pressure) must not discard a
+        // successfully fetched tile.
+        try? cache.store(data, provider: provider, coordinate: coordinate, time: time)
 
         return GeoTilePayload(
             provider: provider,

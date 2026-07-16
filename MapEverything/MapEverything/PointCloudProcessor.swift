@@ -116,9 +116,13 @@ private struct PointProjectionTableKey: Hashable, Sendable {
         self.cy = Self.quantized(cy)
     }
 
+    // Whole-pixel quantization: autofocus/OIS jitters intrinsics by fractions
+    // of a pixel every frame, and finer keys defeat the cache entirely,
+    // rebuilding multi-megabyte tables per frame. Sub-pixel intrinsics error
+    // is negligible for these projection tables.
     private static func quantized(_ value: Float) -> Int {
         guard value.isFinite else { return Int.min }
-        return Int((value * 100).rounded())
+        return Int(max(-1e9, min(1e9, value)).rounded())
     }
 }
 
@@ -128,7 +132,7 @@ private final class PointProjectionTableCache: @unchecked Sendable {
     private var entries: [PointProjectionTableKey: PointProjectionTable] = [:]
     private var keysByUse: [PointProjectionTableKey] = []
 
-    init(capacity: Int = 8) {
+    init(capacity: Int = 4) {
         self.capacity = capacity
     }
 
@@ -721,13 +725,11 @@ struct PointCloudProcessor {
     /// - Returns: A downsampled point cloud.
     func voxelGridFilter(points: [ColoredPoint], voxelSize: Float) -> [ColoredPoint] {
         var voxelMap: [SIMD3<Int>: ColoredPoint] = [:]
-        
+
         for point in points {
-            let voxelIndex = SIMD3<Int>(
-                Int(floor(point.position.x / voxelSize)),
-                Int(floor(point.position.y / voxelSize)),
-                Int(floor(point.position.z / voxelSize))
-            )
+            guard let voxelIndex = safeVoxelIndex(for: point.position, voxelSize: voxelSize) else {
+                continue
+            }
             if voxelMap[voxelIndex] == nil {
                 voxelMap[voxelIndex] = point
             }
@@ -789,6 +791,21 @@ struct PointCloudProcessor {
     }
 }
 
+// Voxel indices computed from unvalidated positions can trap in the Float-to-Int
+// conversion (NaN, infinity, or positions beyond Int range after scaling).
+private func safeVoxelIndex(for position: SIMD3<Float>, voxelSize: Float) -> SIMD3<Int>? {
+    let scaled = position / voxelSize
+    guard scaled.x.isFinite, scaled.y.isFinite, scaled.z.isFinite,
+          abs(scaled.x) < 1e15, abs(scaled.y) < 1e15, abs(scaled.z) < 1e15 else {
+        return nil
+    }
+    return SIMD3<Int>(
+        Int(floor(scaled.x)),
+        Int(floor(scaled.y)),
+        Int(floor(scaled.z))
+    )
+}
+
 /// Manages the accumulation and processing of point clouds off the main AR thread.
 actor PointCloudManager {
     private var voxelMap: [SIMD3<Int>: ColoredPoint] = [:]
@@ -801,11 +818,9 @@ actor PointCloudManager {
     
     func addAndFilter(newPoints: [ColoredPoint]) -> Int {
         for point in newPoints {
-            let voxelIndex = SIMD3<Int>(
-                Int(floor(point.position.x / voxelSize)),
-                Int(floor(point.position.y / voxelSize)),
-                Int(floor(point.position.z / voxelSize))
-            )
+            guard let voxelIndex = safeVoxelIndex(for: point.position, voxelSize: voxelSize) else {
+                continue
+            }
             if voxelMap[voxelIndex] == nil {
                 voxelMap[voxelIndex] = point
             }
@@ -949,13 +964,10 @@ actor ColoredSurfelMap {
         guard !points.isEmpty else { return surfels.count }
 
         for point in points {
-            guard point.position.x.isFinite,
-                  point.position.y.isFinite,
-                  point.position.z.isFinite else {
+            guard let key = safeVoxelIndex(for: point.position, voxelSize: voxelSize) else {
                 continue
             }
 
-            let key = voxelIndex(for: point.position)
             let incomingNormal = estimatedNormal(point: point.position, observerPosition: observerPosition)
             let incomingColor = SIMD3<Float>(
                 Float(point.color.x),
@@ -971,7 +983,9 @@ actor ColoredSurfelMap {
                 existing.normal = normalized((existing.normal * oldWeight) + incomingNormal)
                 existing.radius = min(max(existing.radius, voxelSize * 0.75), voxelSize * 2)
                 existing.confidence = min(1, existing.confidence + 0.04)
-                existing.observationCount = min(UInt32.max, existing.observationCount + 1)
+                existing.observationCount = existing.observationCount == .max
+                    ? .max
+                    : existing.observationCount + 1
                 existing.updatedAt = timestamp
                 surfels[key] = existing
             } else {
@@ -1019,14 +1033,6 @@ actor ColoredSurfelMap {
 
     func clear() {
         surfels.removeAll()
-    }
-
-    private func voxelIndex(for position: SIMD3<Float>) -> SIMD3<Int> {
-        SIMD3<Int>(
-            Int(floor(position.x / voxelSize)),
-            Int(floor(position.y / voxelSize)),
-            Int(floor(position.z / voxelSize))
-        )
     }
 
     private func estimatedNormal(point: SIMD3<Float>, observerPosition: SIMD3<Float>) -> SIMD3<Float> {
