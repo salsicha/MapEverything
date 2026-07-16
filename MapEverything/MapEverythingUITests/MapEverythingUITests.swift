@@ -31,6 +31,38 @@ final class MapEverythingUITests: XCTestCase {
     }
 
     @MainActor
+    func testSessionHistoryOpensFromActionRail() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let allowCamera = springboard.buttons["Allow"].firstMatch
+        let okCamera = springboard.buttons["OK"].firstMatch
+        if allowCamera.waitForExistence(timeout: 3) {
+            allowCamera.tap()
+        } else if okCamera.exists {
+            okCamera.tap()
+        }
+
+        // The simulator cannot run AR world tracking; clear the resulting alert.
+        let arAlert = app.alerts["AR Session Error"]
+        if arAlert.waitForExistence(timeout: 5) {
+            arAlert.buttons["OK"].tap()
+        }
+
+        let historyButton = app.buttons["Session History"]
+        XCTAssertTrue(historyButton.waitForExistence(timeout: 10))
+        historyButton.tap()
+
+        XCTAssertTrue(app.navigationBars["Session History"].waitForExistence(timeout: 5))
+        let emptyState = app.staticTexts["No Mapping Sessions"]
+        XCTAssertTrue(emptyState.exists || app.cells.count > 0)
+
+        app.buttons["Done"].tap()
+        XCTAssertTrue(historyButton.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {

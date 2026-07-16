@@ -36,6 +36,7 @@ struct ContentView: View {
     private static let actionRailButtonSize: CGFloat = 56
     private static let recorderPanelPreferredWidth: CGFloat = 248
 
+    @Environment(\.modelContext) private var modelContext
     @ObservedObject private var ros2Client = ROS2BridgeClient.shared
     @ObservedObject private var mappingSession = MappingSessionManager.shared
     @ObservedObject private var localBagRecorder = LocalROS2BagRecorder.shared
@@ -56,6 +57,7 @@ struct ContentView: View {
     @State private var errorMessage: String? = nil
 
     @State private var showLocalBagBrowser = false
+    @State private var showSessionHistory = false
     @State private var hasCameraPermission = false
     @State private var stoppedInspectionScene: SCNScene?
     @State private var isPreparingMapper = true
@@ -78,6 +80,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            mappingSession.attachSessionHistory(context: modelContext)
             guard checksCameraPermission else { return }
             checkCameraPermission()
         }
@@ -161,6 +164,9 @@ struct ContentView: View {
             .sheet(isPresented: $showLocalBagBrowser) {
                 LocalROS2BagBrowserView()
             }
+            .sheet(isPresented: $showSessionHistory) {
+                MappingSessionHistoryView()
+            }
         }
     }
 
@@ -169,6 +175,7 @@ struct ContentView: View {
             startButton
             localBagButton
             shareLocalBagsButton
+            sessionHistoryButton
         }
     }
 
@@ -328,6 +335,20 @@ struct ContentView: View {
             )
         }
         .accessibilityLabel("Share Local Bags")
+        .buttonStyle(.plain)
+    }
+
+    private var sessionHistoryButton: some View {
+        Button {
+            showSessionHistory = true
+        } label: {
+            actionRailIcon(
+                systemName: "clock.arrow.circlepath",
+                foregroundColor: .primary,
+                backgroundColor: nil
+            )
+        }
+        .accessibilityLabel("Session History")
         .buttonStyle(.plain)
     }
 
