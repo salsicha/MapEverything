@@ -32,7 +32,7 @@ nonisolated final class MeshSnapshotMessageSchema: @unchecked Sendable {
     let packageName = "mapeverything_msgs"
     let messageName = "MeshSnapshot"
     let topic = "/mapping/mesh_snapshot"
-    let schemaVersion = 2
+    let schemaVersion = 3
     let dependencies = [
         "std_msgs/msg/Header"
     ]
@@ -92,7 +92,7 @@ nonisolated final class MeshSnapshotMessageSchema: @unchecked Sendable {
             name: "schema_version",
             type: "uint32",
             description: "MeshSnapshot schema version emitted by MapEverything.",
-            unsetValue: "2"
+            unsetValue: "3"
         ),
         MeshSnapshotMessageField(
             name: "snapshot_id",
@@ -169,19 +169,19 @@ nonisolated final class MeshSnapshotMessageSchema: @unchecked Sendable {
         MeshSnapshotMessageField(
             name: "vertex_encoding",
             type: "string",
-            description: "Encoding for vertex_data, currently float32_xyz_le_base64.",
+            description: "Encoding for vertex_data: float32_xyz_le_base64 (12-byte xyz) or float32_xyz_rgb8_le_base64 (12-byte xyz + 3-byte rgb).",
             unsetValue: ""
         ),
         MeshSnapshotMessageField(
             name: "vertex_stride_bytes",
             type: "uint32",
-            description: "Bytes per packed vertex in vertex_data.",
+            description: "Bytes per packed vertex in vertex_data (12 for xyz, 15 for xyz+rgb).",
             unsetValue: "0"
         ),
         MeshSnapshotMessageField(
             name: "vertex_data",
             type: "uint8[]",
-            description: "Base64 rosbridge payload containing packed little-endian float32 xyz vertices.",
+            description: "Base64 rosbridge payload of packed little-endian float32 xyz vertices, optionally followed by 3 uint8 rgb bytes per vertex.",
             unsetValue: "[]"
         ),
         MeshSnapshotMessageField(
@@ -591,7 +591,9 @@ nonisolated enum MeshSnapshotMessageBuilder {
         compression: String,
         vertexData: Data,
         indexData: Data,
-        metadata: [String: Any]
+        metadata: [String: Any],
+        vertexEncoding: String = "float32_xyz_le_base64",
+        vertexStrideBytes: Int = 12
     ) -> [String: Any] {
         [
             "header": header,
@@ -608,14 +610,261 @@ nonisolated enum MeshSnapshotMessageBuilder {
             "original_payload_bytes": originalPayloadBytes,
             "published_payload_bytes": publishedPayloadBytes,
             "compression": compression,
-            "vertex_encoding": "float32_xyz_le_base64",
-            "vertex_stride_bytes": 12,
+            "vertex_encoding": vertexEncoding,
+            "vertex_stride_bytes": vertexStrideBytes,
             "vertex_data": vertexData.base64EncodedString(),
             "index_encoding": "uint32_le_base64",
             "index_stride_bytes": 4,
             "index_data": indexData.base64EncodedString(),
             "metadata_json": metadataJSONString(metadata)
         ]
+    }
+
+    // MARK: - Colored grid mesh (Depth Anything overlay)
+
+    static let coloredVertexEncoding = "float32_xyz_rgb8_le_base64"
+    static let coloredVertexStrideBytes = 15
+    static let uncoloredVertexEncoding = "float32_xyz_le_base64"
+    static let uncoloredVertexStrideBytes = 12
+
+    /// Builds a MeshSnapshot from an already-transformed indexed grid mesh
+    /// (Depth Anything overlay). When `colors` is non-empty it must have one
+    /// entry per vertex and is interleaved as 3 rgb bytes after each xyz
+    /// vertex; otherwise the legacy xyz-only encoding is used. Trailing
+    /// triangles are dropped and their vertices compacted until the encoded
+    /// message fits `maxPayloadBytes`.
+    static func makeColoredGridMeshMessage(
+        header: [String: Any],
+        snapshotID: String,
+        source: String,
+        frameID: String,
+        vertices: [SIMD3<Float>],
+        indices: [UInt32],
+        colors: [SIMD3<UInt8>],
+        maxTrianglePoints: Int? = nil,
+        maxPayloadBytes: Int? = nil,
+        compression: String = "mesh_snapshot_binary_base64",
+        metadata: [String: Any] = [:],
+        topic: String = MeshSnapshotMessageSchema.shared.topic
+    ) -> [String: Any] {
+        let hasColor = !colors.isEmpty && colors.count == vertices.count
+        let vertexEncoding = hasColor ? coloredVertexEncoding : uncoloredVertexEncoding
+        let vertexStrideBytes = hasColor ? coloredVertexStrideBytes : uncoloredVertexStrideBytes
+
+        let sourceVertexCount = vertices.count
+        let sourceTriangleCount = indices.count / 3
+        let pointBudgetTriangleLimit = maxTrianglePoints.map { max(0, $0 / 3) }
+        let initialTriangleLimit = min(sourceTriangleCount, pointBudgetTriangleLimit ?? sourceTriangleCount)
+
+        let originalGeometry = packedColoredGridGeometry(
+            vertices: vertices,
+            colors: colors,
+            indices: indices,
+            hasColor: hasColor,
+            maxTriangleCount: initialTriangleLimit
+        )
+        let originalMessage = basePackedMessage(
+            header: header,
+            snapshotID: snapshotID,
+            source: source,
+            frameID: frameID,
+            anchorCount: 1,
+            vertexCount: originalGeometry.vertexCount,
+            triangleCount: originalGeometry.triangleCount,
+            originalVertexCount: sourceVertexCount,
+            originalTriangleCount: sourceTriangleCount,
+            isTruncated: originalGeometry.triangleCount < sourceTriangleCount,
+            originalPayloadBytes: 0,
+            publishedPayloadBytes: 0,
+            compression: compression,
+            vertexData: originalGeometry.vertexData,
+            indexData: originalGeometry.indexData,
+            metadata: metadata,
+            vertexEncoding: vertexEncoding,
+            vertexStrideBytes: vertexStrideBytes
+        )
+        let originalPayloadBytes = encodedPublishPayloadByteCount(topic: topic, msg: originalMessage) ?? 0
+
+        let fittedGeometry = fittedColoredGridGeometry(
+            vertices: vertices,
+            colors: colors,
+            indices: indices,
+            hasColor: hasColor,
+            initialTriangleLimit: originalGeometry.triangleCount,
+            sourceVertexCount: sourceVertexCount,
+            sourceTriangleCount: sourceTriangleCount,
+            header: header,
+            snapshotID: snapshotID,
+            source: source,
+            frameID: frameID,
+            originalPayloadBytes: originalPayloadBytes,
+            maxPayloadBytes: maxPayloadBytes,
+            compression: compression,
+            metadata: metadata,
+            vertexEncoding: vertexEncoding,
+            vertexStrideBytes: vertexStrideBytes,
+            topic: topic
+        )
+
+        var message = basePackedMessage(
+            header: header,
+            snapshotID: snapshotID,
+            source: source,
+            frameID: frameID,
+            anchorCount: 1,
+            vertexCount: fittedGeometry.vertexCount,
+            triangleCount: fittedGeometry.triangleCount,
+            originalVertexCount: sourceVertexCount,
+            originalTriangleCount: sourceTriangleCount,
+            isTruncated: fittedGeometry.triangleCount < sourceTriangleCount,
+            originalPayloadBytes: originalPayloadBytes,
+            publishedPayloadBytes: 0,
+            compression: compression,
+            vertexData: fittedGeometry.vertexData,
+            indexData: fittedGeometry.indexData,
+            metadata: metadata,
+            vertexEncoding: vertexEncoding,
+            vertexStrideBytes: vertexStrideBytes
+        )
+
+        for _ in 0..<3 {
+            let byteCount = encodedPublishPayloadByteCount(topic: topic, msg: message) ?? 0
+            if message["published_payload_bytes"] as? Int == byteCount {
+                break
+            }
+            message["published_payload_bytes"] = byteCount
+        }
+
+        return message
+    }
+
+    private static func fittedColoredGridGeometry(
+        vertices: [SIMD3<Float>],
+        colors: [SIMD3<UInt8>],
+        indices: [UInt32],
+        hasColor: Bool,
+        initialTriangleLimit: Int,
+        sourceVertexCount: Int,
+        sourceTriangleCount: Int,
+        header: [String: Any],
+        snapshotID: String,
+        source: String,
+        frameID: String,
+        originalPayloadBytes: Int,
+        maxPayloadBytes: Int?,
+        compression: String,
+        metadata: [String: Any],
+        vertexEncoding: String,
+        vertexStrideBytes: Int,
+        topic: String
+    ) -> PackedMeshGeometry {
+        guard let maxPayloadBytes, maxPayloadBytes > 0 else {
+            return packedColoredGridGeometry(
+                vertices: vertices,
+                colors: colors,
+                indices: indices,
+                hasColor: hasColor,
+                maxTriangleCount: initialTriangleLimit
+            )
+        }
+
+        var triangleLimit = initialTriangleLimit
+        while triangleLimit > 0 {
+            let geometry = packedColoredGridGeometry(
+                vertices: vertices,
+                colors: colors,
+                indices: indices,
+                hasColor: hasColor,
+                maxTriangleCount: triangleLimit
+            )
+            let candidate = basePackedMessage(
+                header: header,
+                snapshotID: snapshotID,
+                source: source,
+                frameID: frameID,
+                anchorCount: 1,
+                vertexCount: geometry.vertexCount,
+                triangleCount: geometry.triangleCount,
+                originalVertexCount: sourceVertexCount,
+                originalTriangleCount: sourceTriangleCount,
+                isTruncated: geometry.triangleCount < sourceTriangleCount,
+                originalPayloadBytes: originalPayloadBytes,
+                publishedPayloadBytes: maxPayloadBytes,
+                compression: compression,
+                vertexData: geometry.vertexData,
+                indexData: geometry.indexData,
+                metadata: metadata,
+                vertexEncoding: vertexEncoding,
+                vertexStrideBytes: vertexStrideBytes
+            )
+
+            guard let byteCount = encodedPublishPayloadByteCount(topic: topic, msg: candidate),
+                  byteCount > maxPayloadBytes else {
+                return geometry
+            }
+
+            let estimatedCount = Int(Double(triangleLimit) * Double(maxPayloadBytes) / Double(byteCount))
+            triangleLimit = max(0, min(triangleLimit - 1, estimatedCount))
+        }
+
+        return PackedMeshGeometry()
+    }
+
+    /// Keeps the first `maxTriangleCount` triangles, compacting referenced
+    /// vertices into first-use order (matching packedSafeMeshGeometry), and
+    /// interleaves rgb after xyz when `hasColor`.
+    private static func packedColoredGridGeometry(
+        vertices: [SIMD3<Float>],
+        colors: [SIMD3<UInt8>],
+        indices: [UInt32],
+        hasColor: Bool,
+        maxTriangleCount: Int
+    ) -> PackedMeshGeometry {
+        guard maxTriangleCount > 0 else { return PackedMeshGeometry() }
+
+        let stride = hasColor ? coloredVertexStrideBytes : uncoloredVertexStrideBytes
+        var geometry = PackedMeshGeometry()
+        geometry.vertexData.reserveCapacity(maxTriangleCount * 3 * stride)
+        geometry.indexData.reserveCapacity(maxTriangleCount * 3 * MemoryLayout<UInt32>.size)
+
+        var remappedIndices: [UInt32: UInt32] = [:]
+        remappedIndices.reserveCapacity(min(vertices.count, maxTriangleCount * 3))
+
+        let triangleCount = min(maxTriangleCount, indices.count / 3)
+        for faceIndex in 0..<triangleCount {
+            let indexOffset = faceIndex * 3
+            let localIndices = [
+                indices[indexOffset],
+                indices[indexOffset + 1],
+                indices[indexOffset + 2]
+            ]
+            guard localIndices.allSatisfy({ Int($0) < vertices.count }) else { continue }
+
+            for localIndex in localIndices {
+                let globalIndex: UInt32
+                if let existing = remappedIndices[localIndex] {
+                    globalIndex = existing
+                } else {
+                    globalIndex = UInt32(geometry.vertexCount)
+                    remappedIndices[localIndex] = globalIndex
+                    let vertex = vertices[Int(localIndex)]
+                    appendLittleEndianFloat32(sanitizedFloat(vertex.x), to: &geometry.vertexData)
+                    appendLittleEndianFloat32(sanitizedFloat(vertex.y), to: &geometry.vertexData)
+                    appendLittleEndianFloat32(sanitizedFloat(vertex.z), to: &geometry.vertexData)
+                    if hasColor {
+                        let color = colors[Int(localIndex)]
+                        geometry.vertexData.append(color.x)
+                        geometry.vertexData.append(color.y)
+                        geometry.vertexData.append(color.z)
+                    }
+                    geometry.vertexCount += 1
+                }
+                appendLittleEndianUInt32(globalIndex, to: &geometry.indexData)
+            }
+            geometry.triangleCount += 1
+        }
+
+        return geometry
     }
 
     private static func packedVertexData(_ points: [[String: Float]]) -> Data {

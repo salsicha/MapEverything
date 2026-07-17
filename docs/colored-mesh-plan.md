@@ -10,7 +10,10 @@ N:`, and this document is the source of truth for scope and encoding.
 
 - [x] Stage 0 — this plan (committed before implementation began)
 - [x] Stage 1 — per-vertex colors in mesh generation
-- [ ] Stage 2 — MeshSnapshot schema v3 with colored vertex encoding
+- [x] Stage 2 — MeshSnapshot schema v3 with colored vertex encoding
+      (colored encoding named `float32_xyz_rgb8_le_base64` to match the
+      existing `float32_xyz_le_base64` convention, not the `xyz_f32_rgb_u8`
+      placeholder in the spec below)
 - [ ] Stage 3 — publish colored mesh snapshot + RViz marker
 - [ ] Stage 4 — colored local artifacts and inspection scene
 

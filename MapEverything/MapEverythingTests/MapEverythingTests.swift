@@ -549,7 +549,7 @@ struct MapEverythingTests {
         #expect(snapshotTopic.messageType == schema.messageType)
         #expect(advertisedIDs.contains(.meshMarkers))
         #expect(advertisedIDs.contains(.meshSnapshot))
-        #expect(schema.schemaVersion == 2)
+        #expect(schema.schemaVersion == 3)
         #expect(!schema.dependencies.contains("geometry_msgs/msg/Point"))
         #expect(schema.messageDefinition.contains("uint8[] vertex_data"))
         #expect(schema.messageDefinition.contains("uint8[] index_data"))
@@ -601,7 +601,7 @@ struct MapEverythingTests {
         )
 
         #expect(message["is_truncated"] as? Bool == true)
-        #expect(message["schema_version"] as? Int == 2)
+        #expect(message["schema_version"] as? Int == 3)
         #expect(message["compression"] as? String == "mesh_snapshot_binary_base64")
         #expect(message["vertex_encoding"] as? String == "float32_xyz_le_base64")
         #expect(message["index_encoding"] as? String == "uint32_le_base64")
