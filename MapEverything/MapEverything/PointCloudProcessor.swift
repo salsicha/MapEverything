@@ -8,6 +8,7 @@
 import Foundation
 import ARKit
 import CoreVideo
+import os
 
 nonisolated public struct ColoredPoint: Equatable, Sendable {
     public let position: SIMD3<Float>
@@ -497,7 +498,50 @@ nonisolated struct PointCloudProcessor {
 
     /// Generates colored points from Depth Anything relative depth calibrated into metric scale.
     /// LiDAR is not sampled per output point; any LiDAR contribution is limited to the calibration.
+    private static let metalDepthProcessor = DepthPointCloudMetalProcessor()
+    private static let depthSignposter = OSSignposter(
+        subsystem: "com.salsicha.MapEverything",
+        category: "DepthPipeline"
+    )
+
     func processDepthAnythingPointCloud(
+        cameraImage pixelBuffer: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution resolution: CGSize,
+        transform: simd_float4x4,
+        relativeDepthMap: RelativeDepthMap,
+        calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
+    ) -> [ColoredPoint] {
+        let interval = Self.depthSignposter.beginInterval("DepthAnythingPointCloud")
+
+        if let metal = Self.metalDepthProcessor,
+           let points = metal.processDepthAnythingPointCloud(
+               cameraImage: pixelBuffer,
+               intrinsics: intrinsics,
+               imageResolution: resolution,
+               transform: transform,
+               relativeDepthMap: relativeDepthMap,
+               calibration: calibration
+           ) {
+            Self.depthSignposter.endInterval("DepthAnythingPointCloud", interval, "gpu")
+            return points
+        }
+
+        let points = processDepthAnythingPointCloudCPU(
+            cameraImage: pixelBuffer,
+            intrinsics: intrinsics,
+            imageResolution: resolution,
+            transform: transform,
+            relativeDepthMap: relativeDepthMap,
+            calibration: calibration
+        )
+        Self.depthSignposter.endInterval("DepthAnythingPointCloud", interval, "cpu")
+        return points
+    }
+
+    /// CPU reference implementation; the Metal kernel mirrors this math and
+    /// the parity test compares the two.
+    func processDepthAnythingPointCloudCPU(
         cameraImage pixelBuffer: CVPixelBuffer,
         intrinsics: simd_float3x3,
         imageResolution resolution: CGSize,

@@ -40,6 +40,10 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
     /// depths past this bound carry no monocular signal and would dominate the map.
     static let maximumCalibratedDepth: Float = 100.0
 
+    /// Below this bound the monocular depth is inside the sensor's blind range.
+    /// Shared by the CPU path and the Metal kernel so both apply identical gates.
+    static let minimumCalibratedDepth: Float = 0.1
+
     /// Loads the model from the app bundle. Returns nil if the model is missing,
     /// which lets the rest of the app continue working without depth enhancement.
     init?(modelResourceName: String = "DepthAnythingV2SmallF16") {
@@ -254,7 +258,8 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         guard inverseDepth.isFinite, inverseDepth > 0 else { return nil }
 
         let monocularDepth = 1.0 / inverseDepth
-        guard monocularDepth > 0.1, monocularDepth < Self.maximumCalibratedDepth else { return nil }
+        guard monocularDepth > Self.minimumCalibratedDepth,
+              monocularDepth < Self.maximumCalibratedDepth else { return nil }
         return monocularDepth
     }
 
