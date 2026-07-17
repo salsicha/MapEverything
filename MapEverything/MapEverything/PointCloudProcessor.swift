@@ -9,7 +9,7 @@ import Foundation
 import ARKit
 import CoreVideo
 
-public struct ColoredPoint: Equatable, Sendable {
+nonisolated public struct ColoredPoint: Equatable, Sendable {
     public let position: SIMD3<Float>
     public let color: SIMD3<UInt8>
     
@@ -19,7 +19,7 @@ public struct ColoredPoint: Equatable, Sendable {
     }
 }
 
-public struct ColoredSurfel: Equatable, Sendable {
+nonisolated public struct ColoredSurfel: Equatable, Sendable {
     public let position: SIMD3<Float>
     public let normal: SIMD3<Float>
     public let color: SIMD3<UInt8>
@@ -171,7 +171,7 @@ private final class PointProjectionTableCache: @unchecked Sendable {
     }
 }
 
-struct PointCloudProcessor {
+nonisolated struct PointCloudProcessor {
     private static let projectionTableCache = PointProjectionTableCache()
 
     private static func projectionTable(
@@ -793,7 +793,7 @@ struct PointCloudProcessor {
 
 // Voxel indices computed from unvalidated positions can trap in the Float-to-Int
 // conversion (NaN, infinity, or positions beyond Int range after scaling).
-private func safeVoxelIndex(for position: SIMD3<Float>, voxelSize: Float) -> SIMD3<Int>? {
+private nonisolated func safeVoxelIndex(for position: SIMD3<Float>, voxelSize: Float) -> SIMD3<Int>? {
     let scaled = position / voxelSize
     guard scaled.x.isFinite, scaled.y.isFinite, scaled.z.isFinite,
           abs(scaled.x) < 1e15, abs(scaled.y) < 1e15, abs(scaled.z) < 1e15 else {

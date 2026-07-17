@@ -11,7 +11,7 @@ import simd
 import UIKit
 #endif
 
-struct LocalROS2BagRecorderConfiguration: Equatable {
+nonisolated struct LocalROS2BagRecorderConfiguration: Equatable, Sendable {
     static let enabledStorageKey = "localROS2BagStorageEnabled"
     static let chunkSizeMBStorageKey = "localROS2BagChunkSizeMB"
     static let defaultChunkSizeMB = 64
@@ -37,7 +37,7 @@ struct LocalROS2BagRecorderConfiguration: Equatable {
     }
 }
 
-struct LocalOverlayMeshArtifact {
+nonisolated struct LocalOverlayMeshArtifact: Sendable {
     static let objFileName = "final_overlay_mesh.obj"
     static let metadataFileName = "final_overlay_mesh.json"
 
@@ -118,7 +118,7 @@ struct LocalOverlayMeshArtifact {
     }
 }
 
-struct LocalPointCloudArtifact {
+nonisolated struct LocalPointCloudArtifact: Sendable {
     static let plyFileName = "final_pointcloud.ply"
     static let lasFileName = "final_pointcloud.las"
     static let metadataFileName = "final_pointcloud.json"
@@ -193,7 +193,7 @@ struct LocalPointCloudArtifact {
     }
 }
 
-struct LocalROS2BagRecorderStats: Equatable {
+nonisolated struct LocalROS2BagRecorderStats: Equatable, Sendable {
     let isEnabled: Bool
     let isRecording: Bool
     let bagDirectoryURL: URL?
@@ -273,7 +273,7 @@ struct LocalROS2BagRecorderStats: Equatable {
     }
 }
 
-struct LocalROS2BagFile: Identifiable, Hashable {
+nonisolated struct LocalROS2BagFile: Identifiable, Hashable, Sendable {
     enum Kind: String {
         case metadata
         case sqliteChunk
@@ -327,7 +327,7 @@ struct LocalROS2BagFile: Identifiable, Hashable {
     }
 }
 
-struct LocalROS2BagSession: Identifiable, Hashable {
+nonisolated struct LocalROS2BagSession: Identifiable, Hashable, Sendable {
     let directoryURL: URL
     let files: [LocalROS2BagFile]
     let byteCount: Int
@@ -351,7 +351,7 @@ struct LocalROS2BagSession: Identifiable, Hashable {
     }
 }
 
-struct LocalROS2BagSessionPreview: Codable, Hashable {
+nonisolated struct LocalROS2BagSessionPreview: Codable, Hashable, Sendable {
     static let currentSchemaVersion = 1
     static let cacheFileName = ".mapeverything-preview.json"
     static let thumbnailFileName = ".mapeverything-thumbnail.jpg"
@@ -417,17 +417,21 @@ struct LocalROS2BagSessionPreview: Codable, Hashable {
     }
 }
 
-enum LocalROS2BagPreviewLoadingMode {
+nonisolated enum LocalROS2BagPreviewLoadingMode: Sendable {
     case cachedOnly
     case scanIfNeeded
 }
 
-final class LocalROS2BagRecorder: ObservableObject {
+// All mutable recording state is confined to the serial `queue`; the
+// acceptance flag has its own lock for hot-path reads and @Published
+// stats are only assigned on the main queue.
+nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Sendable {
     static let shared = LocalROS2BagRecorder()
     static let serializationFormat = "rosbridge_json"
     static let storageIdentifier = "sqlite3"
 
-    @Published private(set) var stats = LocalROS2BagRecorderStats()
+    // Assigned only on the main queue for SwiftUI observation.
+    @MainActor @Published private(set) var stats = LocalROS2BagRecorderStats()
 
     private struct TopicInfo {
         let id: Int64
@@ -503,16 +507,16 @@ final class LocalROS2BagRecorder: ObservableObject {
         self.baseDirectoryURL = baseDirectoryURL
     }
 
-    var sessionMetadata: [String: Any] {
+    @MainActor var sessionMetadata: [String: Any] {
         stats.rosMessage
     }
 
-    var diagnosticLevel: Int {
+    @MainActor var diagnosticLevel: Int {
         if stats.lastError != nil { return 1 }
         return 0
     }
 
-    var diagnosticMessage: String {
+    @MainActor var diagnosticMessage: String {
         if let lastError = stats.lastError {
             return lastError
         }
@@ -1548,7 +1552,9 @@ final class LocalROS2BagRecorder: ObservableObject {
         )
 
         DispatchQueue.main.async {
-            self.stats = stats
+            MainActor.assumeIsolated {
+                self.stats = stats
+            }
         }
     }
 
@@ -1660,7 +1666,7 @@ final class LocalROS2BagRecorder: ObservableObject {
     }
 }
 
-private let sqliteTransientDestructor = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+private nonisolated(unsafe) let sqliteTransientDestructor = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 private struct SQLiteError: LocalizedError {
     let message: String

@@ -5,7 +5,7 @@
 
 import Foundation
 
-enum ROS2TopicID: String, CaseIterable, Codable, Hashable {
+nonisolated enum ROS2TopicID: String, CaseIterable, Codable, Hashable, Sendable {
     case pose
     case lidarPointCloud
     case depthAnythingPointCloud
@@ -29,7 +29,7 @@ enum ROS2TopicID: String, CaseIterable, Codable, Hashable {
     case demTile
 }
 
-struct ROS2TopicDefinition: Identifiable, Codable, Hashable {
+nonisolated struct ROS2TopicDefinition: Identifiable, Codable, Hashable, Sendable {
     let id: ROS2TopicID
     let stream: MappingSensorStream
     let topic: String
@@ -38,7 +38,9 @@ struct ROS2TopicDefinition: Identifiable, Codable, Hashable {
     let isImplemented: Bool
 }
 
-final class ROS2TopicRegistry {
+// Immutable definitions plus a lock-guarded enabled-stream set; safe to
+// call from any thread.
+nonisolated final class ROS2TopicRegistry: @unchecked Sendable {
     static let shared = ROS2TopicRegistry()
 
     private let lock = NSLock()

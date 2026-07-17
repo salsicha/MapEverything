@@ -7,7 +7,7 @@ import Foundation
 import Combine
 import SwiftData
 
-enum MappingSensorStream: String, CaseIterable, Identifiable, Codable, Hashable {
+nonisolated enum MappingSensorStream: String, CaseIterable, Identifiable, Codable, Hashable, Sendable {
     case pose
     case odometry
     case tf

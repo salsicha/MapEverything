@@ -10,7 +10,7 @@ import simd
 /// Format 2 (XYZ + intensity + flags + classification + scan angle + user
 /// data + point source ID + RGB) so the final cloud opens directly in GIS and
 /// photogrammetry tools alongside the PLY artifact.
-enum LASPointCloudWriter {
+nonisolated enum LASPointCloudWriter {
     static let versionMajor: UInt8 = 1
     static let versionMinor: UInt8 = 2
     static let pointDataFormat: UInt8 = 2
@@ -124,7 +124,7 @@ enum LASPointCloudWriter {
     }
 }
 
-private extension Data {
+nonisolated private extension Data {
     mutating func appendUInt16LE(_ value: UInt16) {
         Swift.withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
     }
