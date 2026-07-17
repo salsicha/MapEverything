@@ -19,7 +19,8 @@ import Vision
 import ARKit
 import simd
 
-final class DepthAnythingProcessor {
+// Inference is serialized by inferenceLock; everything else is immutable.
+nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
     private let model: MLModel
     private let relativeDepthRequest: VNCoreMLRequest
     private let inferenceLock = NSLock()
@@ -30,7 +31,7 @@ final class DepthAnythingProcessor {
     /// The network predicts relative inverse depth (disparity), so metric depth
     /// is recovered with `metric_depth_m = 1 / (scale * relative + offset)`.
     /// `scale` and `offset` are inverse-depth coefficients in 1/m.
-    struct MaximumLikelihoodCalibration {
+    struct MaximumLikelihoodCalibration: Sendable {
         let scale: Float
         let offset: Float
     }
@@ -440,7 +441,7 @@ final class DepthAnythingProcessor {
 
 }
 
-final class DepthAnythingCalibrationCache {
+nonisolated final class DepthAnythingCalibrationCache: @unchecked Sendable {
     private struct Entry {
         let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
         let timestamp: TimeInterval
@@ -682,7 +683,7 @@ final class DepthAnythingCalibrationCache {
 
 /// Dense depth map view. Depth Anything outputs stay backed by their native
 /// MLMultiArray or CVPixelBuffer until a caller explicitly asks for `data`.
-struct RelativeDepthMap {
+nonisolated struct RelativeDepthMap: @unchecked Sendable {
     private enum Storage {
         case array([Float])
         case multiArray(MultiArrayStorage)
@@ -893,7 +894,7 @@ struct RelativeDepthMap {
     }
 }
 
-struct RelativeDepthMapReader {
+nonisolated struct RelativeDepthMapReader {
     enum Storage {
         case array(UnsafeBufferPointer<Float>)
         case multiArrayFloat32(UnsafePointer<Float>, yStride: Int, xStride: Int)

@@ -9,7 +9,7 @@ import Foundation
 /// Supports the value types the message builders produce: dictionaries with
 /// string keys, arrays, strings, integers, doubles, booleans, Data, and NSNull.
 /// Returns nil for any unsupported value so callers can fall back to JSON.
-enum CBOREncoder {
+nonisolated enum CBOREncoder {
     static func encode(_ payload: [String: Any]) -> Data? {
         var output = Data()
         guard appendValue(payload, to: &output) else { return nil }

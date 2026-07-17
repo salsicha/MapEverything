@@ -11,54 +11,25 @@ import CoreLocation
 import Combine
 import UIKit
 
-struct LocalSampleBufferStats: Equatable {
-    let maxTotalBytes: Int
-    let maxPointCloudSamples: Int
-    let maxMeshSamples: Int
-    let totalBytes: Int
-    let pointCloudSamples: Int
-    let meshSamples: Int
-    let droppedSamples: Int
-    let replayedSamples: Int
-    let lastBufferedAt: Date?
-
-    init(
-        maxTotalBytes: Int = 0,
-        maxPointCloudSamples: Int = 0,
-        maxMeshSamples: Int = 0,
-        totalBytes: Int = 0,
-        pointCloudSamples: Int = 0,
-        meshSamples: Int = 0,
-        droppedSamples: Int = 0,
-        replayedSamples: Int = 0,
-        lastBufferedAt: Date? = nil
-    ) {
-        self.maxTotalBytes = maxTotalBytes
-        self.maxPointCloudSamples = maxPointCloudSamples
-        self.maxMeshSamples = maxMeshSamples
-        self.totalBytes = totalBytes
-        self.pointCloudSamples = pointCloudSamples
-        self.meshSamples = meshSamples
-        self.droppedSamples = droppedSamples
-        self.replayedSamples = replayedSamples
-        self.lastBufferedAt = lastBufferedAt
-    }
-}
-
-enum ROS2TrackingQuality: String {
+nonisolated enum ROS2TrackingQuality: String, Sendable {
     case normal
     case limited
     case notAvailable
 }
 
 class ROS2BridgeClient: ObservableObject {
-    private struct OdometrySample {
+    // Written once during init, before any traffic reaches the queue.
+    nonisolated private final class WeakClientBox: @unchecked Sendable {
+        weak var client: ROS2BridgeClient?
+    }
+
+    nonisolated private struct OdometrySample: Sendable {
         let timestamp: TimeInterval
         let position: SIMD3<Float>
         let orientation: simd_quatf
     }
 
-    private enum FrameID {
+    nonisolated private enum FrameID {
         static let earth = "earth"
         static let map = "map"
         static let odom = "odom"
@@ -66,31 +37,7 @@ class ROS2BridgeClient: ObservableObject {
         static let iphoneCamera = "iphone_camera"
     }
 
-    private enum LocalBufferedSampleKind {
-        case pointCloud
-        case mesh
-    }
-
-    private struct LocalBufferedSample {
-        let sequence: UInt64
-        let kind: LocalBufferedSampleKind
-        let topic: String
-        let data: Data
-    }
-
-    private struct LocalSampleBufferConfiguration {
-        let maxPointCloudSamples: Int
-        let maxMeshSamples: Int
-        let maxTotalBytes: Int
-
-        static let `default` = LocalSampleBufferConfiguration(
-            maxPointCloudSamples: 30,
-            maxMeshSamples: 5,
-            maxTotalBytes: 20_000_000
-        )
-    }
-
-    enum RosbridgePayloadEncoding: String {
+    nonisolated enum RosbridgePayloadEncoding: String, Sendable {
         case json
         case cbor
 
@@ -98,8 +45,8 @@ class ROS2BridgeClient: ObservableObject {
     }
 
     static let shared = ROS2BridgeClient()
-    private static let pinningDelegate = RecorderCertificatePinningDelegate()
-    private static let socketSession = URLSession(
+    nonisolated private static let pinningDelegate = RecorderCertificatePinningDelegate()
+    nonisolated private static let socketSession = URLSession(
         configuration: .default,
         delegate: pinningDelegate,
         delegateQueue: nil
@@ -110,8 +57,8 @@ class ROS2BridgeClient: ObservableObject {
     // Guards connection state that is written on the main thread but read from
     // publish/AR/motion queues.
     private let connectionStateLock = NSLock()
-    private var _webSocket: ROSBridgeSocket?
-    private var webSocket: ROSBridgeSocket? {
+    nonisolated(unsafe) private var _webSocket: ROSBridgeSocket?
+    nonisolated private var webSocket: ROSBridgeSocket? {
         get { connectionStateLock.withLock { _webSocket } }
         set { connectionStateLock.withLock { _webSocket = newValue } }
     }
@@ -123,52 +70,34 @@ class ROS2BridgeClient: ObservableObject {
     private let meshSnapshotConfiguration = MeshSnapshotPublishConfiguration.default
     private let streamPayloadMetrics = StreamPayloadMetricsStore.shared
     private let localBagRecorder: LocalROS2BagRecorder
-    private let localSampleBufferConfiguration = LocalSampleBufferConfiguration.default
-    private let localSampleBufferQueue = DispatchQueue(label: "com.mapeverything.localSampleBuffer", qos: .utility)
+    private let localSampleBuffer = LocalSampleBuffer()
     private var diagnosticsTimer: DispatchSourceTimer?
     private var reconnectWorkItem: DispatchWorkItem?
-    private lazy var publishQueue: PublishQueue = {
-        let queue = PublishQueue { [weak self] data, completion in
-            self?.sendQueuedPayload(data, completion: completion)
-                ?? completion(PublishQueueTransportError.disconnected)
-        }
-        queue.onStatsChange = { [weak self] stats in
-            DispatchQueue.main.async {
-                self?.publishQueueStats = stats
-            }
-        }
-        return queue
-    }()
+    private let publishQueue: PublishQueue
     
-    private var _currentURL: String?
-    private var currentURL: String? {
+    nonisolated(unsafe) private var _currentURL: String?
+    nonisolated private var currentURL: String? {
         get { connectionStateLock.withLock { _currentURL } }
         set { connectionStateLock.withLock { _currentURL = newValue } }
     }
-    private var _lastOdometrySample: OdometrySample?
-    private var lastOdometrySample: OdometrySample? {
+    nonisolated(unsafe) private var _lastOdometrySample: OdometrySample?
+    nonisolated private var lastOdometrySample: OdometrySample? {
         get { connectionStateLock.withLock { _lastOdometrySample } }
         set { connectionStateLock.withLock { _lastOdometrySample = newValue } }
     }
-    private var _isConnectedFlag = false
-    private var _payloadEncoding: RosbridgePayloadEncoding = .json
-    private var _trackingQuality: ROS2TrackingQuality = .normal
+    nonisolated(unsafe) private var _isConnectedFlag = false
+    nonisolated(unsafe) private var _payloadEncoding: RosbridgePayloadEncoding = .json
+    nonisolated(unsafe) private var _trackingQuality: ROS2TrackingQuality = .normal
     // Captured once and refreshed only at connect time so mid-session NTP
     // clock slews cannot jitter ROS header timestamps.
-    private var _uptimeEpochOffset: TimeInterval =
+    nonisolated(unsafe) private var _uptimeEpochOffset: TimeInterval =
         Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
     // Main-thread only; invalidates delayed disconnect closures once a newer
     // connection exists.
     private var connectionGeneration = 0
     private let meshMarkerIDLock = NSLock()
-    private var meshMarkerIDs: [UUID: Int] = [:]
-    private var nextMeshMarkerID = 0
-    private var bufferedSamples: [LocalBufferedSample] = []
-    private var bufferedSampleBytes = 0
-    private var bufferedSampleSequence: UInt64 = 0
-    private var droppedBufferedSamples = 0
-    private var replayedBufferedSamples = 0
-    private var lastBufferedSampleAt: Date?
+    nonisolated(unsafe) private var meshMarkerIDs: [UUID: Int] = [:]
+    nonisolated(unsafe) private var nextMeshMarkerID = 0
     @Published var isConnected = false
     @Published private(set) var publishQueueStats = PublishQueueStats(
         capacity: PublishQueue.Configuration.default.capacity
@@ -191,14 +120,39 @@ class ROS2BridgeClient: ObservableObject {
             Self.socketSession.webSocketTask(with: request)
         }
         self.reconnectDelay = reconnectDelay
+
+        let clientBox = WeakClientBox()
+        self.publishQueue = PublishQueue { data, completion in
+            guard let client = clientBox.client else {
+                completion(PublishQueueTransportError.disconnected)
+                return
+            }
+            client.sendQueuedPayload(data, completion: completion)
+        }
+
         motionQueue.maxConcurrentOperationCount = 1
+        clientBox.client = self
+        publishQueue.onStatsChange = { [weak self] stats in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.publishQueueStats = stats
+                }
+            }
+        }
+        localSampleBuffer.onStatsChange = { [weak self] stats in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.localSampleBufferStats = stats
+                }
+            }
+        }
     }
 
-    func updateTrackingQuality(_ quality: ROS2TrackingQuality) {
+    nonisolated func updateTrackingQuality(_ quality: ROS2TrackingQuality) {
         connectionStateLock.withLock { _trackingQuality = quality }
     }
 
-    static func covarianceMultiplier(for quality: ROS2TrackingQuality) -> Double {
+    nonisolated static func covarianceMultiplier(for quality: ROS2TrackingQuality) -> Double {
         switch quality {
         case .normal: return 1
         case .limited: return 25
@@ -206,11 +160,11 @@ class ROS2BridgeClient: ObservableObject {
         }
     }
 
-    private var trackingCovarianceMultiplier: Double {
+    nonisolated private var trackingCovarianceMultiplier: Double {
         Self.covarianceMultiplier(for: connectionStateLock.withLock { _trackingQuality })
     }
 
-    private var uptimeEpochOffset: TimeInterval {
+    nonisolated private var uptimeEpochOffset: TimeInterval {
         connectionStateLock.withLock { _uptimeEpochOffset }
     }
 
@@ -219,27 +173,27 @@ class ROS2BridgeClient: ObservableObject {
         connectionStateLock.withLock { _uptimeEpochOffset = offset }
     }
 
-    private var currentPayloadEncoding: RosbridgePayloadEncoding {
+    nonisolated private var currentPayloadEncoding: RosbridgePayloadEncoding {
         connectionStateLock.withLock { _payloadEncoding }
     }
 
-    var hasActivePublishTarget: Bool {
+    nonisolated var hasActivePublishTarget: Bool {
         isConnectedForPublishing || localBagRecorder.isAcceptingRecords
     }
 
-    private var isConnectedForPublishing: Bool {
+    nonisolated private var isConnectedForPublishing: Bool {
         connectionStateLock.withLock { _isConnectedFlag }
     }
 
     // A session that wants remote streaming keeps currentURL set across
     // transient disconnects, so samples can be buffered for replay.
-    private var shouldBufferWhileDisconnected: Bool {
+    nonisolated private var shouldBufferWhileDisconnected: Bool {
         connectionStateLock.withLock { _currentURL != nil }
     }
 
     // For callers producing point cloud/mesh samples, which the bridge can
     // buffer during a transient disconnect even with no live publish target.
-    var hasPublishOrBufferTarget: Bool {
+    nonisolated var hasPublishOrBufferTarget: Bool {
         hasActivePublishTarget || shouldBufferWhileDisconnected
     }
 
@@ -343,7 +297,7 @@ class ROS2BridgeClient: ObservableObject {
         }
     }
 
-    private func listenForDisconnection(on socket: ROSBridgeSocket) {
+    nonisolated private func listenForDisconnection(on socket: ROSBridgeSocket) {
         socket.receive { [weak self] result in
             switch result {
             case .success(_):
@@ -377,18 +331,24 @@ class ROS2BridgeClient: ObservableObject {
         DispatchQueue.global().asyncAfter(deadline: .now() + reconnectDelay, execute: workItem)
     }
 
-    private func handleConnectionFailure(_ error: Error, socket: ROSBridgeSocket) {
+    nonisolated private func handleConnectionFailure(_ error: Error, socket: ROSBridgeSocket) {
         DispatchQueue.main.async {
-            guard socket === self.webSocket else { return }
-            print("ROS2 Bridge connection unavailable: \(error.localizedDescription)")
-            self.publishQueue.discardPending()
-            self.lastOdometrySample = nil
-            self.webSocket?.cancel(with: .goingAway, reason: nil)
-            self.webSocket = nil
-            self.setConnected(false)
-            self.refreshSessionPublishers()
-            self.attemptReconnect()
+            MainActor.assumeIsolated {
+                self.handleConnectionFailureOnMain(error, socket: socket)
+            }
         }
+    }
+
+    private func handleConnectionFailureOnMain(_ error: Error, socket: ROSBridgeSocket) {
+        guard socket === self.webSocket else { return }
+        print("ROS2 Bridge connection unavailable: \(error.localizedDescription)")
+        publishQueue.discardPending()
+        lastOdometrySample = nil
+        webSocket?.cancel(with: .goingAway, reason: nil)
+        webSocket = nil
+        setConnected(false)
+        refreshSessionPublishers()
+        attemptReconnect()
     }
 
     func refreshAdvertisedTopics() {
@@ -439,7 +399,7 @@ class ROS2BridgeClient: ObservableObject {
         stopIMU()
     }
     
-    private func send(op: String, topic: String, type: String? = nil, msg: [String: Any]? = nil) {
+    nonisolated private func send(op: String, topic: String, type: String? = nil, msg: [String: Any]? = nil) {
         var payload: [String: Any] = ["op": op, "topic": topic]
         if let type = type { payload["type"] = type }
         if let msg = msg { payload["msg"] = msg }
@@ -463,12 +423,12 @@ class ROS2BridgeClient: ObservableObject {
 
     // Experimental CBOR wire encoding; falls back to JSON when a payload
     // contains a value the CBOR encoder does not support.
-    private func wireData(payload: [String: Any], jsonData: Data) -> Data {
+    nonisolated private func wireData(payload: [String: Any], jsonData: Data) -> Data {
         guard currentPayloadEncoding == .cbor else { return jsonData }
         return CBOREncoder.encode(payload) ?? jsonData
     }
 
-    private func publishOrBufferLocalSample(
+    nonisolated private func publishOrBufferLocalSample(
         kind: LocalBufferedSampleKind,
         topic: String,
         msg: [String: Any]
@@ -490,7 +450,7 @@ class ROS2BridgeClient: ObservableObject {
         }
     }
 
-    private func encodeRosbridgePayload(_ payload: [String: Any], topic: String) -> Data? {
+    nonisolated private func encodeRosbridgePayload(_ payload: [String: Any], topic: String) -> Data? {
         guard JSONSerialization.isValidJSONObject(payload) else {
             publishQueue.recordEncodingFailure(topic: topic, error: PublishQueueEncodingError.invalidJSONObject)
             return nil
@@ -504,7 +464,7 @@ class ROS2BridgeClient: ObservableObject {
         }
     }
 
-    private func recordLocalBagPublish(topic: String, msg: [String: Any], encodedData data: Data) {
+    nonisolated private func recordLocalBagPublish(topic: String, msg: [String: Any], encodedData data: Data) {
         let messageType = topicRegistry.definition(forTopic: topic)?.messageType ?? "unknown_msgs/msg/Unknown"
         let timestamp = LocalROS2BagRecorder.timestampNanoseconds(from: msg) ?? LocalROS2BagRecorder.nowNanoseconds()
         localBagRecorder.recordEncodedPublishPayload(
@@ -515,105 +475,24 @@ class ROS2BridgeClient: ObservableObject {
         )
     }
 
-    private func bufferLocalSample(kind: LocalBufferedSampleKind, topic: String, data: Data) {
-        localSampleBufferQueue.async {
-            self.bufferedSampleSequence += 1
-            self.bufferedSamples.append(
-                LocalBufferedSample(
-                    sequence: self.bufferedSampleSequence,
-                    kind: kind,
-                    topic: topic,
-                    data: data
-                )
-            )
-            self.bufferedSampleBytes += data.count
-            self.lastBufferedSampleAt = Date()
-            self.trimBufferedLocalSamples()
-            self.publishLocalSampleBufferStats()
-        }
+    nonisolated private func bufferLocalSample(kind: LocalBufferedSampleKind, topic: String, data: Data) {
+        localSampleBuffer.buffer(kind: kind, topic: topic, data: data)
     }
 
-    private func trimBufferedLocalSamples() {
-        while countBufferedSamples(kind: .pointCloud) > localSampleBufferConfiguration.maxPointCloudSamples {
-            dropOldestBufferedSample(kind: .pointCloud)
-        }
-
-        while countBufferedSamples(kind: .mesh) > localSampleBufferConfiguration.maxMeshSamples {
-            dropOldestBufferedSample(kind: .mesh)
-        }
-
-        while bufferedSampleBytes > localSampleBufferConfiguration.maxTotalBytes,
-              !bufferedSamples.isEmpty {
-            dropBufferedSample(at: 0)
-        }
-    }
-
-    private func countBufferedSamples(kind: LocalBufferedSampleKind) -> Int {
-        bufferedSamples.reduce(0) { count, sample in
-            count + (sample.kind == kind ? 1 : 0)
-        }
-    }
-
-    private func dropOldestBufferedSample(kind: LocalBufferedSampleKind) {
-        guard let index = bufferedSamples.firstIndex(where: { $0.kind == kind }) else { return }
-        dropBufferedSample(at: index)
-    }
-
-    private func dropBufferedSample(at index: Int) {
-        let sample = bufferedSamples.remove(at: index)
-        bufferedSampleBytes -= sample.data.count
-        droppedBufferedSamples += 1
-    }
-
-    private func flushBufferedLocalSamples() {
-        localSampleBufferQueue.async {
-            let samples = self.bufferedSamples.sorted { $0.sequence < $1.sequence }
-            guard !samples.isEmpty else {
-                self.publishLocalSampleBufferStats()
-                return
-            }
-
-            self.bufferedSamples.removeAll()
-            self.bufferedSampleBytes = 0
-            self.replayedBufferedSamples += samples.count
-            self.publishLocalSampleBufferStats()
-
+    nonisolated private func flushBufferedLocalSamples() {
+        let queue = publishQueue
+        localSampleBuffer.flush { samples in
             for sample in samples {
-                self.publishQueue.enqueueEncodedPayload(sample.data, op: "publish", topic: sample.topic)
+                queue.enqueueEncodedPayload(sample.data, op: "publish", topic: sample.topic)
             }
         }
     }
 
-    private func clearBufferedLocalSamples() {
-        localSampleBufferQueue.async {
-            self.bufferedSamples.removeAll()
-            self.bufferedSampleBytes = 0
-            self.lastBufferedSampleAt = nil
-            self.publishLocalSampleBufferStats()
-        }
+    nonisolated private func clearBufferedLocalSamples() {
+        localSampleBuffer.clear()
     }
 
-    private func publishLocalSampleBufferStats() {
-        let pointCloudSamples = countBufferedSamples(kind: .pointCloud)
-        let meshSamples = countBufferedSamples(kind: .mesh)
-        let stats = LocalSampleBufferStats(
-            maxTotalBytes: localSampleBufferConfiguration.maxTotalBytes,
-            maxPointCloudSamples: localSampleBufferConfiguration.maxPointCloudSamples,
-            maxMeshSamples: localSampleBufferConfiguration.maxMeshSamples,
-            totalBytes: bufferedSampleBytes,
-            pointCloudSamples: pointCloudSamples,
-            meshSamples: meshSamples,
-            droppedSamples: droppedBufferedSamples,
-            replayedSamples: replayedBufferedSamples,
-            lastBufferedAt: lastBufferedSampleAt
-        )
-
-        DispatchQueue.main.async {
-            self.localSampleBufferStats = stats
-        }
-    }
-
-    private func sendQueuedPayload(_ data: Data, completion: @escaping (Error?) -> Void) {
+    nonisolated private func sendQueuedPayload(_ data: Data, completion: @escaping @Sendable (Error?) -> Void) {
         let socket = connectionStateLock.withLock { _isConnectedFlag ? _webSocket : nil }
         guard let socket else {
             completion(PublishQueueTransportError.disconnected)
@@ -629,7 +508,7 @@ class ROS2BridgeClient: ObservableObject {
         }
     }
     
-    private func createHeader(frameId: String, timestamp: TimeInterval) -> [String: Any] {
+    nonisolated private func createHeader(frameId: String, timestamp: TimeInterval) -> [String: Any] {
         // Convert Apple's system uptime (ARKit/IMU hardware clock) to the UNIX
         // epoch using the offset captured at connect time, so NTP clock slews
         // cannot jitter header timestamps mid-session.
@@ -643,7 +522,7 @@ class ROS2BridgeClient: ObservableObject {
         ]
     }
 
-    private func createHeader(frameId: String, date: Date) -> [String: Any] {
+    nonisolated private func createHeader(frameId: String, date: Date) -> [String: Any] {
         let timestamp = date.timeIntervalSince1970
         let sec = Int(timestamp)
         let nanosec = Int((timestamp - Double(sec)) * 1_000_000_000)
@@ -1163,7 +1042,7 @@ class ROS2BridgeClient: ObservableObject {
         ]
     }
 
-    private func markerID(for identifier: UUID) -> Int {
+    nonisolated private func markerID(for identifier: UUID) -> Int {
         meshMarkerIDLock.withLock {
             if let existing = meshMarkerIDs[identifier] { return existing }
             let id = nextMeshMarkerID
@@ -1175,7 +1054,7 @@ class ROS2BridgeClient: ObservableObject {
 
     // Markers are published with the default infinite lifetime, so anchors
     // ARKit removes must be deleted explicitly or they ghost in RViz.
-    func publishMeshRemovals(_ anchorIdentifiers: [UUID], timestamp: TimeInterval) {
+    nonisolated func publishMeshRemovals(_ anchorIdentifiers: [UUID], timestamp: TimeInterval) {
         guard topicRegistry.isStreamEnabled(.mesh),
               hasActivePublishTarget || shouldBufferWhileDisconnected,
               !anchorIdentifiers.isEmpty else { return }

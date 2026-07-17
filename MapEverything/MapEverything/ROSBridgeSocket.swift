@@ -8,7 +8,7 @@ import CryptoKit
 
 /// Seam over URLSessionWebSocketTask so the bridge connection lifecycle can be
 /// unit tested with a mock socket.
-protocol ROSBridgeSocket: AnyObject {
+nonisolated protocol ROSBridgeSocket: AnyObject, Sendable {
     func resume()
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
     func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping @Sendable (Error?) -> Void)
@@ -18,13 +18,13 @@ protocol ROSBridgeSocket: AnyObject {
 
 extension URLSessionWebSocketTask: ROSBridgeSocket {}
 
-typealias ROSBridgeSocketFactory = (URLRequest) -> ROSBridgeSocket
+typealias ROSBridgeSocketFactory = @Sendable (URLRequest) -> ROSBridgeSocket
 
 /// Optional trust override for `wss://` recorders with self-signed
 /// certificates: the connection is accepted only when the leaf certificate's
 /// SHA-256 fingerprint matches the user-configured value. With no fingerprint
 /// configured, default system trust evaluation applies unchanged.
-final class RecorderCertificatePinningDelegate: NSObject, URLSessionDelegate {
+nonisolated final class RecorderCertificatePinningDelegate: NSObject, URLSessionDelegate {
     static let fingerprintDefaultsKey = "recorderCertificateSHA256Fingerprint"
 
     func urlSession(

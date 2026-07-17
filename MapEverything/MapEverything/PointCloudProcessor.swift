@@ -48,7 +48,7 @@ nonisolated public struct ColoredSurfel: Equatable, Sendable {
     }
 }
 
-private struct PointProjectionSample: Sendable {
+nonisolated private struct PointProjectionSample: Sendable {
     let depthX: Int
     let depthY: Int
     let depthIndex: Int
@@ -59,13 +59,13 @@ private struct PointProjectionSample: Sendable {
     let uvIndex: Int
 }
 
-private struct PointProjectionTable: Sendable {
+nonisolated private struct PointProjectionTable: Sendable {
     let samples: [PointProjectionSample]
 
     static let empty = PointProjectionTable(samples: [])
 }
 
-private struct PointProjectionTableKey: Hashable, Sendable {
+nonisolated private struct PointProjectionTableKey: Hashable, Sendable {
     let depthWidth: Int
     let depthHeight: Int
     let depthFloatsPerRow: Int
@@ -126,7 +126,7 @@ private struct PointProjectionTableKey: Hashable, Sendable {
     }
 }
 
-private final class PointProjectionTableCache: @unchecked Sendable {
+nonisolated private final class PointProjectionTableCache: @unchecked Sendable {
     private let lock = NSLock()
     private let capacity: Int
     private var entries: [PointProjectionTableKey: PointProjectionTable] = [:]
