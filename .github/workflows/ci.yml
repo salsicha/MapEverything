@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tools:
+    name: Python and shell tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Byte-compile Python tools
+        run: python3 -m py_compile tools/*.py
+
+      - name: Syntax-check shell tools
+        run: bash -n tools/*.sh
+
+      - name: App Store release check
+        # The checker exits 0 with warnings; only a nonzero exit fails this job.
+        run: python3 tools/app-store-release-check.py
+
+  ios-tests:
+    name: iOS unit tests
+    # NOTE: the runner label may need adjusting to whatever GitHub-hosted macOS
+    # image carries an iOS 26.4 SDK (the project's deployment target requires a
+    # very recent Xcode).
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick an available iPhone simulator
+        id: sim
+        run: |
+          DEVICE="$(xcrun simctl list devices available \
+            | grep -E '^ *iPhone' \
+            | sed -E 's/^ +//; s/ \([0-9A-Fa-f-]{36}\).*$//' \
+            | head -n 1)"
+          if [ -z "$DEVICE" ]; then
+            DEVICE="iPhone 17 Pro"
+          fi
+          echo "Using simulator: $DEVICE"
+          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests
+        run: |
+          xcodebuild test \
+            -project MapEverything/MapEverything.xcodeproj \
+            -scheme MapEverything \
+            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.device }}" \
+            -only-testing:MapEverythingTests
+
+  ios-tsan:
+    name: iOS unit tests (Thread Sanitizer)
+    # Same runner caveat as ios-tests: adjust the label to an image with an
+    # iOS 26.4 SDK. TSan can be noisy on CI, so this job is advisory only.
+    runs-on: macos-26
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick an available iPhone simulator
+        id: sim
+        run: |
+          DEVICE="$(xcrun simctl list devices available \
+            | grep -E '^ *iPhone' \
+            | sed -E 's/^ +//; s/ \([0-9A-Fa-f-]{36}\).*$//' \
+            | head -n 1)"
+          if [ -z "$DEVICE" ]; then
+            DEVICE="iPhone 17 Pro"
+          fi
+          echo "Using simulator: $DEVICE"
+          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests with Thread Sanitizer
+        run: |
+          xcodebuild test \
+            -project MapEverything/MapEverything.xcodeproj \
+            -scheme MapEverything \
+            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.device }}" \
+            -only-testing:MapEverythingTests \
+            -enableThreadSanitizer YES

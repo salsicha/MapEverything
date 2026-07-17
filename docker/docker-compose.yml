@@ -1,0 +1,21 @@
+services:
+  recorder:
+    build:
+      # Build from the repository root so ros2/ and tools/ are in the context.
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mapeverything-recorder
+    # Host networking is Linux-only. On macOS/Windows, comment out
+    # network_mode and publish the rosbridge port instead:
+    #
+    # ports:
+    #   - "9090:9090"
+    network_mode: host
+    volumes:
+      - ./bags:/bags
+    # The entrypoint sources ROS + the workspace and, because no --output is
+    # given here, records to /bags/mapeverything_<timestamp>. Arguments below
+    # are passed straight through to tools/run-rosbridge-recorder.py.
+    command:
+      - --include-optional
+    stop_grace_period: 30s

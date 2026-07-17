@@ -1,0 +1,75 @@
+{
+  "configById": {
+    "3D!mapeverything": {
+      "followMode": "follow-pose",
+      "followTf": "iphone_camera",
+      "scene": {
+        "transforms": {
+          "showLabel": false
+        }
+      },
+      "topics": {
+        "/mapping/pointcloud/lidar": {
+          "visible": true,
+          "colorField": "rgb",
+          "colorMode": "rgb",
+          "pointSize": 3
+        },
+        "/mapping/pointcloud/depth_anything": {
+          "visible": true,
+          "colorField": "rgb",
+          "colorMode": "rgb",
+          "pointSize": 2
+        },
+        "/mapping/map": {
+          "visible": true
+        },
+        "/mapping/pose": {
+          "visible": true,
+          "type": "arrow"
+        }
+      }
+    },
+    "Image!camera": {
+      "imageMode": {
+        "imageTopic": "/mapping/camera/image/compressed",
+        "calibrationTopic": "/mapping/camera/camera_info"
+      }
+    },
+    "RawMessages!status": {
+      "topicPath": "/mapping/status"
+    },
+    "Plot!imu_accel_z": {
+      "paths": [
+        {
+          "value": "/mapping/imu.linear_acceleration.z",
+          "enabled": true,
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showLegend": true,
+      "xAxisVal": "timestamp"
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "direction": "row",
+    "first": "3D!mapeverything",
+    "second": {
+      "direction": "column",
+      "first": "Image!camera",
+      "second": {
+        "direction": "column",
+        "first": "Plot!imu_accel_z",
+        "second": "RawMessages!status",
+        "splitPercentage": 50
+      },
+      "splitPercentage": 40
+    },
+    "splitPercentage": 60
+  }
+}

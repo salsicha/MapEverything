@@ -1,0 +1,35 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Run the MapEverything unit tests on a simulator"
+  lane :tests do
+    run_tests(
+      project: "MapEverything/MapEverything.xcodeproj",
+      scheme: "MapEverything",
+      device: "iPhone 17 Pro",
+      only_testing: ["MapEverythingTests"]
+    )
+  end
+
+  desc "Run the App Store release readiness checker"
+  lane :release_check do
+    # fastlane's sh runs from the fastlane/ directory; the checker expects the
+    # repository root.
+    sh("cd .. && python3 tools/app-store-release-check.py")
+  end
+
+  desc "Build and upload a TestFlight beta"
+  # NOTE: `beta` needs App Store Connect credentials: either a logged-in
+  # Apple ID session (FASTLANE_SESSION via `fastlane spaceauth`) or an
+  # App Store Connect API key (api_key_path / APP_STORE_CONNECT_API_KEY_*).
+  lane :beta do
+    build_app(
+      project: "MapEverything/MapEverything.xcodeproj",
+      scheme: "MapEverything",
+      export_method: "app-store"
+    )
+    upload_to_testflight(
+      skip_waiting_for_build_processing: true
+    )
+  end
+end

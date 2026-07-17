@@ -100,6 +100,8 @@ The current ROS topic namespace is `/mapping`.
 
 Transport decision: MapEverything continues to use `rosbridge_suite` over WebSocket in this build. A native binary bridge is not enabled until there is a maintained iOS ROS2/DDS client or companion ROS2 binary receiver and a throughput benchmark showing rosbridge is insufficient.
 
+**Transport encoding:** JSON text frames are the default rosbridge encoding. CBOR is an experimental opt-in in the app's Advanced settings and requires a rosbridge build that accepts incoming CBOR frames. The local SQLite bag always records the JSON payloads regardless of the wire encoding, so [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) is unaffected.
+
 The companion ROS2 custom message package lives in [ros2/mapeverything_msgs](ros2/mapeverything_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
 
 Local SQLite bag storage is controlled by the **Save Local** button and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The **Share Local Bags** button opens a browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. The browser caches per-session preview metadata and camera thumbnails in hidden sidecar files so repeated scans of saved bags stay quick. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
@@ -302,6 +304,40 @@ This aligns iOS data streams perfectly with standard sensor times on your remote
 Surfels, geotiles, and any opt-in high-bandwidth publishers report original payload bytes,
 encoded payload bytes, maximum observed payload size, last encoding/compression
 mode, and compression ratio when diagnostics/session streams are enabled.
+
+---
+
+## 🔁 Continuous Integration
+
+GitHub Actions runs on every push to `main` and on pull requests via [.github/workflows/ci.yml](.github/workflows/ci.yml):
+
+* **tools:** byte-compiles every `tools/*.py` script, syntax-checks `tools/*.sh`, and runs `python3 tools/app-store-release-check.py` (warnings are allowed; only a nonzero exit fails the job).
+* **ios-tests:** runs `xcodebuild test` for the `MapEverything` scheme (`MapEverythingTests`) on the first available iPhone simulator, falling back to `iPhone 17 Pro`. The macOS runner label may need adjusting to an image that ships the iOS 26.4 SDK.
+* **ios-tsan:** the same tests with `-enableThreadSanitizer YES`; marked `continue-on-error` because TSan can be noisy on CI.
+
+---
+
+## 🐳 Dockerized Recorder
+
+The [docker/](docker) directory packages rosbridge, the prebuilt `mapeverything_msgs` workspace, and the chunked rosbag2 recorder into a single ROS 2 Jazzy container.
+Run `docker compose up --build` from `docker/`, point the app's **ROS bridge IP** at `ws://<host-ip>:9090`, and bags land in `docker/bags/mapeverything_<timestamp>/`.
+See [docker/README.md](docker/README.md) for the quickstart and the macOS/Windows port-mapping note.
+
+---
+
+## 🦊 Foxglove Studio
+
+A starter Foxglove Studio layout is checked in at [ros2/foxglove/mapeverything-layout.json](ros2/foxglove/mapeverything-layout.json) with 3D point-cloud/mesh, camera image, diagnostics, and IMU plot panels. Foxglove connects directly to the same rosbridge WebSocket the recorder uses (**Open connection → Rosbridge** → `ws://<recorder-host>:9090`); see [docs/ros2-companion-package.md](docs/ros2-companion-package.md) for details.
+
+---
+
+## 🚀 fastlane
+
+The [fastlane/](fastlane) directory configures three lanes:
+
+* `fastlane tests` — runs the `MapEverythingTests` unit tests on an `iPhone 17 Pro` simulator via `run_tests`.
+* `fastlane release_check` — runs `tools/app-store-release-check.py` from the repo root.
+* `fastlane beta` — archives with `build_app` (`app-store` export) and uploads to TestFlight; requires an Apple ID session or an App Store Connect API key.
 
 ---
 

@@ -169,6 +169,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     depthAnythingCalibrationCache.reset()
                     resumeWorldTrackingSession()
                 } else {
+                    saveWorldMapIfEnabled()
                     saveFinalRecordingArtifacts()
                     depthAnythingCalibrationCache.reset()
                     freezeCurrentMeshForInspection()
@@ -323,6 +324,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private func resumeWorldTrackingSession() {
         guard let arView else { return }
         guard let configuration = makeWorldTrackingConfiguration() else { return }
+        if let worldMap = loadSavedWorldMapIfEnabled() {
+            // resetTracking with an initialWorldMap is the standard resume
+            // pattern: tracking restarts, then relocalizes into the saved map.
+            configuration.initialWorldMap = worldMap
+            delegate?.didUpdateTrackingFeedback("Resuming previous scan area…")
+        }
         depthAnythingCalibrationCache.reset()
         cumulativePointCount = 0
         scanGeneration += 1
@@ -330,6 +337,60 @@ class ARViewController: UIViewController, ARSessionDelegate {
         clearLiveMeshEntities()
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         updateVisualizationMode(currentMode)
+    }
+
+    private static let resumeWorldMapDefaultsKey = "resumeWorldMapEnabled"
+
+    private static var worldMapFileURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("MapEverythingWorldMap.armap")
+    }
+
+    private func saveWorldMapIfEnabled() {
+        guard UserDefaults.standard.bool(forKey: Self.resumeWorldMapDefaultsKey) else { return }
+        guard let session = arView?.session, let fileURL = Self.worldMapFileURL else { return }
+
+        // Requested before the session pauses; ARKit still delivers the map
+        // asynchronously afterwards. Failures only surface as feedback text.
+        session.getCurrentWorldMap { [weak self] worldMap, error in
+            guard let worldMap else {
+                DispatchQueue.main.async {
+                    let reason = error?.localizedDescription ?? "world map unavailable"
+                    self?.delegate?.didUpdateTrackingFeedback("Couldn't save scan area: \(reason)")
+                }
+                return
+            }
+
+            Task.detached(priority: .utility) { [weak self] in
+                do {
+                    let data = try NSKeyedArchiver.archivedData(withRootObject: worldMap, requiringSecureCoding: true)
+                    try data.write(to: fileURL, options: [.atomic])
+                } catch {
+                    await MainActor.run {
+                        self?.delegate?.didUpdateTrackingFeedback("Couldn't save scan area: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func loadSavedWorldMapIfEnabled() -> ARWorldMap? {
+        guard UserDefaults.standard.bool(forKey: Self.resumeWorldMapDefaultsKey),
+              let fileURL = Self.worldMapFileURL,
+              FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            guard let worldMap = try NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) else {
+                throw NSError(domain: "MapEverything", code: 2, userInfo: [NSLocalizedDescriptionKey: "Archived world map was empty."])
+            }
+            return worldMap
+        } catch {
+            // A stale or corrupt archive would fail on every launch; drop it
+            // and continue with a fresh session.
+            try? FileManager.default.removeItem(at: fileURL)
+            return nil
+        }
     }
 
     private func makeWorldTrackingConfiguration() -> ARWorldTrackingConfiguration? {
@@ -1212,6 +1273,17 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
     
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+        let trackingQuality: ROS2TrackingQuality
+        switch camera.trackingState {
+        case .normal:
+            trackingQuality = .normal
+        case .limited:
+            trackingQuality = .limited
+        case .notAvailable:
+            trackingQuality = .notAvailable
+        }
+        ROS2BridgeClient.shared.updateTrackingQuality(trackingQuality)
+
         switch camera.trackingState {
         case .notAvailable:
             delegate?.didUpdateTrackingFeedback("Tracking Unavailable")
@@ -1223,8 +1295,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 generator.notificationOccurred(.warning)
             case .insufficientFeatures:
                 delegate?.didUpdateTrackingFeedback("More Light / Features Needed")
-            case .initializing, .relocalizing:
+            case .initializing:
                 delegate?.didUpdateTrackingFeedback("Calibrating...")
+            case .relocalizing:
+                delegate?.didUpdateTrackingFeedback("Relocalizing — return to a previously scanned area")
             @unknown default:
                 delegate?.didUpdateTrackingFeedback("Tracking Limited")
             }
@@ -1239,17 +1313,20 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
     
     func sessionWasInterrupted(_ session: ARSession) {
-        // Inform the user that the session has been interrupted, for example, by taking the phone away from the face
-        print("AR Session Interrupted")
+        delegate?.didUpdateTrackingFeedback("Session interrupted — recording paused")
     }
-    
+
     func sessionInterruptionEnded(_ session: ARSession) {
-        print("AR Session Interruption Ended")
+        delegate?.didUpdateTrackingFeedback("Relocalizing…")
         // Resume the session without resetting tracking so the user doesn't lose their scan
         guard isScanning else { return }
         if let configuration = session.configuration {
             session.run(configuration)
         }
+    }
+
+    func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool {
+        true
     }
 
 }

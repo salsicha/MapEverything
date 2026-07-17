@@ -488,9 +488,10 @@ final class DepthAnythingCalibrationCache {
         let lidarConfidenceHeight = lidarConfidenceMap.map(CVPixelBufferGetHeight)
 
         lock.lock()
-        if let entry,
+        let previousEntry = entry
+        if let previousEntry,
            isReusable(
-               entry,
+               previousEntry,
                relative: relative,
                lidarWidth: lidarWidth,
                lidarHeight: lidarHeight,
@@ -499,17 +500,34 @@ final class DepthAnythingCalibrationCache {
                timestamp: timestamp,
                cameraTransform: cameraTransform
            ) {
-            let calibration = entry.calibration
+            let calibration = previousEntry.calibration
             lock.unlock()
             return calibration
         }
         lock.unlock()
 
-        guard let calibration = DepthAnythingProcessor.maximumLikelihoodCalibration(
+        guard let fittedCalibration = DepthAnythingProcessor.maximumLikelihoodCalibration(
             relative: relative,
             lidarDepthMap: lidarDepthMap,
             lidarConfidenceMap: lidarConfidenceMap
         ) else { return nil }
+
+        let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
+        if let previousEntry,
+           isSmoothingSuccessor(
+               previousEntry,
+               relative: relative,
+               lidarWidth: lidarWidth,
+               lidarHeight: lidarHeight,
+               lidarConfidenceWidth: lidarConfidenceWidth,
+               lidarConfidenceHeight: lidarConfidenceHeight,
+               timestamp: timestamp,
+               cameraTransform: cameraTransform
+           ) {
+            calibration = Self.smoothedCalibration(new: fittedCalibration, previous: previousEntry.calibration)
+        } else {
+            calibration = fittedCalibration
+        }
 
         let nextEntry = Entry(
             calibration: calibration,
@@ -530,6 +548,33 @@ final class DepthAnythingCalibrationCache {
         return calibration
     }
 
+    /// EMA weight applied to a newly fitted calibration when blending with its predecessor.
+    static let smoothingFactor: Float = 0.4
+    /// Relative jump beyond which a new fit is treated as a scene change and passed through.
+    static let smoothingMaxRelativeJump: Float = 0.3
+
+    /// Blends a newly accepted fit with the previous calibration to damp
+    /// frame-to-frame jitter in the inverse-depth coefficients. First-ever
+    /// fits (`previous == nil`) and large jumps pass through unmodified so
+    /// single-shot calibrations stay exact and scene changes take effect
+    /// immediately.
+    static func smoothedCalibration(
+        new: DepthAnythingProcessor.MaximumLikelihoodCalibration,
+        previous: DepthAnythingProcessor.MaximumLikelihoodCalibration?
+    ) -> DepthAnythingProcessor.MaximumLikelihoodCalibration {
+        guard let previous else { return new }
+        guard abs(new.scale - previous.scale) <= smoothingMaxRelativeJump * max(abs(previous.scale), 1e-6),
+              abs(new.offset - previous.offset) <= smoothingMaxRelativeJump * max(abs(previous.offset), 1e-3) else {
+            return new
+        }
+
+        let alpha = smoothingFactor
+        return DepthAnythingProcessor.MaximumLikelihoodCalibration(
+            scale: alpha * new.scale + (1 - alpha) * previous.scale,
+            offset: alpha * new.offset + (1 - alpha) * previous.offset
+        )
+    }
+
     private func isReusable(
         _ entry: Entry,
         relative: RelativeDepthMap,
@@ -540,8 +585,59 @@ final class DepthAnythingCalibrationCache {
         timestamp: TimeInterval,
         cameraTransform: simd_float4x4
     ) -> Bool {
+        isNearby(
+            entry,
+            relative: relative,
+            lidarWidth: lidarWidth,
+            lidarHeight: lidarHeight,
+            lidarConfidenceWidth: lidarConfidenceWidth,
+            lidarConfidenceHeight: lidarConfidenceHeight,
+            timestamp: timestamp,
+            cameraTransform: cameraTransform,
+            maxAllowedAge: maxAge
+        )
+    }
+
+    /// A fit only counts as the successor of the cached one when the camera
+    /// has not jumped. Steady-state refits land just after `maxAge` expires,
+    /// so successors are accepted up to twice that gap; anything older is a
+    /// fresh observation and must not be blended.
+    private func isSmoothingSuccessor(
+        _ entry: Entry,
+        relative: RelativeDepthMap,
+        lidarWidth: Int,
+        lidarHeight: Int,
+        lidarConfidenceWidth: Int?,
+        lidarConfidenceHeight: Int?,
+        timestamp: TimeInterval,
+        cameraTransform: simd_float4x4
+    ) -> Bool {
+        isNearby(
+            entry,
+            relative: relative,
+            lidarWidth: lidarWidth,
+            lidarHeight: lidarHeight,
+            lidarConfidenceWidth: lidarConfidenceWidth,
+            lidarConfidenceHeight: lidarConfidenceHeight,
+            timestamp: timestamp,
+            cameraTransform: cameraTransform,
+            maxAllowedAge: maxAge * 2
+        )
+    }
+
+    private func isNearby(
+        _ entry: Entry,
+        relative: RelativeDepthMap,
+        lidarWidth: Int,
+        lidarHeight: Int,
+        lidarConfidenceWidth: Int?,
+        lidarConfidenceHeight: Int?,
+        timestamp: TimeInterval,
+        cameraTransform: simd_float4x4,
+        maxAllowedAge: TimeInterval
+    ) -> Bool {
         guard timestamp >= entry.timestamp,
-              timestamp - entry.timestamp <= maxAge,
+              timestamp - entry.timestamp <= maxAllowedAge,
               entry.relativeWidth == relative.width,
               entry.relativeHeight == relative.height,
               entry.lidarWidth == lidarWidth,

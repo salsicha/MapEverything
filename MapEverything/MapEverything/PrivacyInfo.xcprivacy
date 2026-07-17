@@ -47,6 +47,16 @@
 				<string>35F9.1</string>
 			</array>
 		</dict>
+		<dict>
+			<!-- Free-space check before and during local bag recording so a
+			     long capture cannot fill the disk. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

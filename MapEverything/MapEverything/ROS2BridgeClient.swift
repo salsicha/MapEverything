@@ -45,6 +45,12 @@ struct LocalSampleBufferStats: Equatable {
     }
 }
 
+enum ROS2TrackingQuality: String {
+    case normal
+    case limited
+    case notAvailable
+}
+
 class ROS2BridgeClient: ObservableObject {
     private struct OdometrySample {
         let timestamp: TimeInterval
@@ -84,12 +90,28 @@ class ROS2BridgeClient: ObservableObject {
         )
     }
 
+    enum RosbridgePayloadEncoding: String {
+        case json
+        case cbor
+
+        static let defaultsKey = "rosbridgePayloadEncoding"
+    }
+
     static let shared = ROS2BridgeClient()
+    private static let pinningDelegate = RecorderCertificatePinningDelegate()
+    private static let socketSession = URLSession(
+        configuration: .default,
+        delegate: pinningDelegate,
+        delegateQueue: nil
+    )
+
+    private let socketFactory: ROSBridgeSocketFactory
+    private let reconnectDelay: TimeInterval
     // Guards connection state that is written on the main thread but read from
     // publish/AR/motion queues.
     private let connectionStateLock = NSLock()
-    private var _webSocket: URLSessionWebSocketTask?
-    private var webSocket: URLSessionWebSocketTask? {
+    private var _webSocket: ROSBridgeSocket?
+    private var webSocket: ROSBridgeSocket? {
         get { connectionStateLock.withLock { _webSocket } }
         set { connectionStateLock.withLock { _webSocket = newValue } }
     }
@@ -129,6 +151,12 @@ class ROS2BridgeClient: ObservableObject {
         set { connectionStateLock.withLock { _lastOdometrySample = newValue } }
     }
     private var _isConnectedFlag = false
+    private var _payloadEncoding: RosbridgePayloadEncoding = .json
+    private var _trackingQuality: ROS2TrackingQuality = .normal
+    // Captured once and refreshed only at connect time so mid-session NTP
+    // clock slews cannot jitter ROS header timestamps.
+    private var _uptimeEpochOffset: TimeInterval =
+        Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
     // Main-thread only; invalidates delayed disconnect closures once a newer
     // connection exists.
     private var connectionGeneration = 0
@@ -153,11 +181,46 @@ class ROS2BridgeClient: ObservableObject {
 
     init(
         topicRegistry: ROS2TopicRegistry = .shared,
-        localBagRecorder: LocalROS2BagRecorder = .shared
+        localBagRecorder: LocalROS2BagRecorder = .shared,
+        socketFactory: ROSBridgeSocketFactory? = nil,
+        reconnectDelay: TimeInterval = 3.0
     ) {
         self.topicRegistry = topicRegistry
         self.localBagRecorder = localBagRecorder
+        self.socketFactory = socketFactory ?? { request in
+            Self.socketSession.webSocketTask(with: request)
+        }
+        self.reconnectDelay = reconnectDelay
         motionQueue.maxConcurrentOperationCount = 1
+    }
+
+    func updateTrackingQuality(_ quality: ROS2TrackingQuality) {
+        connectionStateLock.withLock { _trackingQuality = quality }
+    }
+
+    static func covarianceMultiplier(for quality: ROS2TrackingQuality) -> Double {
+        switch quality {
+        case .normal: return 1
+        case .limited: return 25
+        case .notAvailable: return 10_000
+        }
+    }
+
+    private var trackingCovarianceMultiplier: Double {
+        Self.covarianceMultiplier(for: connectionStateLock.withLock { _trackingQuality })
+    }
+
+    private var uptimeEpochOffset: TimeInterval {
+        connectionStateLock.withLock { _uptimeEpochOffset }
+    }
+
+    private func resyncClockOffset() {
+        let offset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
+        connectionStateLock.withLock { _uptimeEpochOffset = offset }
+    }
+
+    private var currentPayloadEncoding: RosbridgePayloadEncoding {
+        connectionStateLock.withLock { _payloadEncoding }
     }
 
     var hasActivePublishTarget: Bool {
@@ -200,14 +263,21 @@ class ROS2BridgeClient: ObservableObject {
         webSocket?.cancel(with: .normalClosure, reason: nil)
         publishQueue.reset()
         lastOdometrySample = nil
+        resyncClockOffset()
+
+        let encoding = RosbridgePayloadEncoding(
+            rawValue: UserDefaults.standard.string(forKey: RosbridgePayloadEncoding.defaultsKey) ?? ""
+        ) ?? .json
+        connectionStateLock.withLock { _payloadEncoding = encoding }
 
         let request = URLRequest(url: wsURL)
-        let socket = URLSession.shared.webSocketTask(with: request)
+        let socket = socketFactory(request)
         webSocket = socket
         socket.resume()
 
         setConnected(true)
 
+        sendAuthenticationIfConfigured(destination: wsURL.host ?? "")
         advertiseTopics()
         refreshSessionPublishers()
         listenForDisconnection(on: socket)
@@ -219,6 +289,26 @@ class ROS2BridgeClient: ObservableObject {
                 self.flushBufferedLocalSamples()
             }
         }
+    }
+
+    // rosauth: when a shared secret is configured, the auth op must be the
+    // first message the server sees or it drops the connection.
+    private func sendAuthenticationIfConfigured(destination: String) {
+        guard let secret = RosbridgeAuthSecretStore.load(), !secret.isEmpty else { return }
+
+        let now = Int(Date().timeIntervalSince1970)
+        let message = RosbridgeAuth.authMessage(
+            secret: secret,
+            client: "MapEverything-iOS",
+            destination: destination,
+            rand: UUID().uuidString,
+            t: now,
+            level: "user",
+            end: now + 120
+        )
+        guard JSONSerialization.isValidJSONObject(message),
+              let data = try? JSONSerialization.data(withJSONObject: message, options: []) else { return }
+        publishQueue.enqueueEncodedPayload(data, op: "auth", topic: "")
     }
 
     func disconnect(after delay: TimeInterval = 0) {
@@ -253,7 +343,7 @@ class ROS2BridgeClient: ObservableObject {
         }
     }
 
-    private func listenForDisconnection(on socket: URLSessionWebSocketTask) {
+    private func listenForDisconnection(on socket: ROSBridgeSocket) {
         socket.receive { [weak self] result in
             switch result {
             case .success(_):
@@ -284,10 +374,10 @@ class ROS2BridgeClient: ObservableObject {
         }
         scheduledItem = workItem
         reconnectWorkItem = workItem
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0, execute: workItem)
+        DispatchQueue.global().asyncAfter(deadline: .now() + reconnectDelay, execute: workItem)
     }
 
-    private func handleConnectionFailure(_ error: Error, socket: URLSessionWebSocketTask) {
+    private func handleConnectionFailure(_ error: Error, socket: ROSBridgeSocket) {
         DispatchQueue.main.async {
             guard socket === self.webSocket else { return }
             print("ROS2 Bridge connection unavailable: \(error.localizedDescription)")
@@ -354,15 +444,28 @@ class ROS2BridgeClient: ObservableObject {
         if let type = type { payload["type"] = type }
         if let msg = msg { payload["msg"] = msg }
 
-        guard let data = encodeRosbridgePayload(payload, topic: topic) else { return }
+        // JSON is always produced: it gates message validity (NaN checks) and
+        // is what the local bag records regardless of the wire encoding.
+        guard let jsonData = encodeRosbridgePayload(payload, topic: topic) else { return }
 
         if op == "publish", let msg {
-            recordLocalBagPublish(topic: topic, msg: msg, encodedData: data)
+            recordLocalBagPublish(topic: topic, msg: msg, encodedData: jsonData)
         }
 
         if isConnectedForPublishing {
-            publishQueue.enqueueEncodedPayload(data, op: op, topic: topic)
+            publishQueue.enqueueEncodedPayload(
+                wireData(payload: payload, jsonData: jsonData),
+                op: op,
+                topic: topic
+            )
         }
+    }
+
+    // Experimental CBOR wire encoding; falls back to JSON when a payload
+    // contains a value the CBOR encoder does not support.
+    private func wireData(payload: [String: Any], jsonData: Data) -> Data {
+        guard currentPayloadEncoding == .cbor else { return jsonData }
+        return CBOREncoder.encode(payload) ?? jsonData
     }
 
     private func publishOrBufferLocalSample(
@@ -376,13 +479,14 @@ class ROS2BridgeClient: ObservableObject {
             "msg": msg
         ]
 
-        guard let data = encodeRosbridgePayload(payload, topic: topic) else { return }
-        recordLocalBagPublish(topic: topic, msg: msg, encodedData: data)
+        guard let jsonData = encodeRosbridgePayload(payload, topic: topic) else { return }
+        recordLocalBagPublish(topic: topic, msg: msg, encodedData: jsonData)
 
+        let wireData = wireData(payload: payload, jsonData: jsonData)
         if isConnectedForPublishing {
-            publishQueue.enqueueEncodedPayload(data, op: "publish", topic: topic)
+            publishQueue.enqueueEncodedPayload(wireData, op: "publish", topic: topic)
         } else if shouldBufferWhileDisconnected {
-            bufferLocalSample(kind: kind, topic: topic, data: data)
+            bufferLocalSample(kind: kind, topic: topic, data: wireData)
         }
     }
 
@@ -526,11 +630,11 @@ class ROS2BridgeClient: ObservableObject {
     }
     
     private func createHeader(frameId: String, timestamp: TimeInterval) -> [String: Any] {
-        // Convert Apple's system uptime (ARKit/IMU hardware clock) accurately to the UNIX Epoch for ROS2
-        let systemUptime = ProcessInfo.processInfo.systemUptime
-        let nowUnix = Date().timeIntervalSince1970
-        let hardwareUnix = nowUnix - systemUptime + timestamp
-        
+        // Convert Apple's system uptime (ARKit/IMU hardware clock) to the UNIX
+        // epoch using the offset captured at connect time, so NTP clock slews
+        // cannot jitter header timestamps mid-session.
+        let hardwareUnix = uptimeEpochOffset + timestamp
+
         let sec = Int(hardwareUnix)
         let nanosec = Int((hardwareUnix - Double(sec)) * 1_000_000_000)
         return [
@@ -1998,12 +2102,17 @@ class ROS2BridgeClient: ObservableObject {
         )
     }
 
+    // Base diagonals reflect ARKit's nominal tracking; the multiplier widens
+    // them when ARKit reports limited or unavailable tracking so downstream
+    // fusion (e.g. robot_localization) can discount degraded stretches.
     private func odometryPoseCovariance() -> [Double] {
-        covariance(diagonal: [0.0025, 0.0025, 0.0025, 0.0004, 0.0004, 0.0004])
+        let multiplier = trackingCovarianceMultiplier
+        return covariance(diagonal: [0.0025, 0.0025, 0.0025, 0.0004, 0.0004, 0.0004].map { $0 * multiplier })
     }
 
     private func odometryTwistCovariance() -> [Double] {
-        covariance(diagonal: [0.04, 0.04, 0.04, 0.01, 0.01, 0.01])
+        let multiplier = trackingCovarianceMultiplier
+        return covariance(diagonal: [0.04, 0.04, 0.04, 0.01, 0.01, 0.01].map { $0 * multiplier })
     }
 
     private func covariance(diagonal: [Double]) -> [Double] {

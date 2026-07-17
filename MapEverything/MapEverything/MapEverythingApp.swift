@@ -23,6 +23,10 @@ struct MapEverythingApp: App {
     @UIApplicationDelegateAdaptor(MapEverythingAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        MetricKitDiagnostics.shared.start()
+    }
+
     var sharedModelContainer: ModelContainer = {
         let schema = MapEverythingModelSchema.schema
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)

@@ -83,7 +83,9 @@ struct MappingSessionHistoryView: View {
 }
 
 struct MappingSessionHistoryDetailView: View {
-    let session: MappingSessionModel
+    @Environment(\.modelContext) private var modelContext
+    @Bindable var session: MappingSessionModel
+    @State private var showLocalBagBrowser = false
 
     var body: some View {
         List {
@@ -106,11 +108,33 @@ struct MappingSessionHistoryDetailView: View {
                 }
             }
 
+            Section("Notes") {
+                TextField("Add session notes", text: $session.notes, axis: .vertical)
+                    .lineLimit(3...8)
+                    .onSubmit {
+                        saveNotes()
+                    }
+                    .onChange(of: session.notes) { _ in
+                        saveNotes()
+                    }
+            }
+
             Section("Recorder") {
                 LabeledContent("URL", value: session.recorderURL.isEmpty ? "—" : session.recorderURL)
                 LabeledContent("Transport", value: session.bridgeTransport)
                 if let sessionDirectoryPath = session.sessionDirectoryPath {
-                    LabeledContent("Local Bag", value: (sessionDirectoryPath as NSString).lastPathComponent)
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent("Local Bag", value: (sessionDirectoryPath as NSString).lastPathComponent)
+                        Text(sessionDirectoryPath)
+                            .font(.caption2.monospaced())
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+                Button {
+                    showLocalBagBrowser = true
+                } label: {
+                    Label("Open Local Bags", systemImage: "externaldrive")
                 }
             }
 
@@ -134,6 +158,17 @@ struct MappingSessionHistoryDetailView: View {
         }
         .navigationTitle(session.startLabel)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showLocalBagBrowser) {
+            LocalROS2BagBrowserView()
+        }
+    }
+
+    private func saveNotes() {
+        do {
+            try modelContext.save()
+        } catch {
+            print("MappingSessionHistoryDetailView: failed to save notes: \(error)")
+        }
     }
 }
 

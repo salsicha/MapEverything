@@ -33,6 +33,8 @@ final class MappingSessionModel {
     var lastUpdatedAt: Date
     var lastError: String?
     var sessionDirectoryPath: String?
+    /// User-authored free text; never touched by the snapshot upsert path.
+    var notes: String
 
     init(
         id: UUID = UUID(),
@@ -49,7 +51,8 @@ final class MappingSessionModel {
         endedAt: Date? = nil,
         lastUpdatedAt: Date = Date(),
         lastError: String? = nil,
-        sessionDirectoryPath: String? = nil
+        sessionDirectoryPath: String? = nil,
+        notes: String = ""
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -66,6 +69,7 @@ final class MappingSessionModel {
         self.lastUpdatedAt = lastUpdatedAt
         self.lastError = lastError
         self.sessionDirectoryPath = sessionDirectoryPath
+        self.notes = notes
     }
 
     convenience init(snapshot: MappingSessionSnapshot, metadataJSON: String = "{}") {

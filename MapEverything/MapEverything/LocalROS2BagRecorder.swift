@@ -120,6 +120,7 @@ struct LocalOverlayMeshArtifact {
 
 struct LocalPointCloudArtifact {
     static let plyFileName = "final_pointcloud.ply"
+    static let lasFileName = "final_pointcloud.las"
     static let metadataFileName = "final_pointcloud.json"
 
     struct Point {
@@ -458,6 +459,10 @@ final class LocalROS2BagRecorder: ObservableObject {
     private static let writeBatchMaxBytes = 1_048_576
     private static let writeBatchFlushDelay: TimeInterval = 0.25
     private static let maxConsecutiveFlushFailures = 3
+    private static let minimumFreeBytesToStart: Int64 = 200 * 1_048_576
+    private static let lowDiskSpaceWarningBytes: Int64 = 2 * 1_073_741_824
+    private static let minimumFreeBytesWhileRecording: Int64 = 100 * 1_048_576
+    private static let flushesPerFreeSpaceCheck = 64
     private static let insertMessageSQL = "INSERT INTO messages(id, topic_id, timestamp, data) VALUES (?, ?, ?, ?)"
 
     private let queue = DispatchQueue(label: "com.mapeverything.localROS2BagRecorder", qos: .utility)
@@ -488,6 +493,7 @@ final class LocalROS2BagRecorder: ObservableObject {
     private let acceptanceFlagLock = NSLock()
     private var acceptingRecordsFlag = false
     private var consecutiveFlushFailures = 0
+    private var successfulFlushCount = 0
     private var pendingWrites: [PendingWrite] = []
     private var pendingWriteBytes = 0
     private var pendingFlushWorkItem: DispatchWorkItem?
@@ -545,6 +551,7 @@ final class LocalROS2BagRecorder: ObservableObject {
             self.lastError = nil
             self.lastErrorAt = nil
             self.consecutiveFlushFailures = 0
+            self.successfulFlushCount = 0
 
             guard configuration.isEnabled else {
                 self.publishStats(isRecording: false)
@@ -555,6 +562,16 @@ final class LocalROS2BagRecorder: ObservableObject {
                 self.resetBagState()
                 let rootURL = try self.storageRootURL()
                 try self.fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+
+                if let freeBytes = self.availableDiskCapacityBytes(at: rootURL) {
+                    if freeBytes < Self.minimumFreeBytesToStart {
+                        self.recordFailure("Not enough free space to start local bag recording (\(freeBytes / 1_048_576)MB free).")
+                        return
+                    }
+                    if freeBytes < Self.lowDiskSpaceWarningBytes {
+                        self.noteError("Local bag recording started with low disk space (\(freeBytes / 1_048_576)MB free).")
+                    }
+                }
 
                 let bagName = self.bagName(sessionID: sessionID, date: Date())
                 let directoryURL = rootURL.appendingPathComponent(bagName, isDirectory: true)
@@ -759,6 +776,20 @@ final class LocalROS2BagRecorder: ObservableObject {
             } catch {
                 self.noteError("Failed to write final point cloud: \(error.localizedDescription)")
             }
+
+            let coloredPoints = artifact.points.map {
+                ColoredPoint(position: $0.position, color: $0.color)
+            }
+            if let lasData = LASPointCloudWriter.lasData(points: coloredPoints) {
+                do {
+                    let lasURL = targetDirectoryURL.appendingPathComponent(LocalPointCloudArtifact.lasFileName)
+                    try lasData.write(to: lasURL, options: [.atomic])
+                } catch {
+                    self.noteError("Failed to write final point cloud LAS: \(error.localizedDescription)")
+                }
+            } else {
+                self.noteError("Failed to encode final point cloud LAS: no finite points.")
+            }
         }
     }
 
@@ -787,6 +818,7 @@ final class LocalROS2BagRecorder: ObservableObject {
                 || url.lastPathComponent == LocalOverlayMeshArtifact.objFileName
                 || url.lastPathComponent == LocalOverlayMeshArtifact.metadataFileName
                 || url.lastPathComponent == LocalPointCloudArtifact.plyFileName
+                || url.lastPathComponent == LocalPointCloudArtifact.lasFileName
                 || url.lastPathComponent == LocalPointCloudArtifact.metadataFileName
         }
         .sorted { lhs, rhs in
@@ -804,7 +836,8 @@ final class LocalROS2BagRecorder: ObservableObject {
                 kind = .overlayMesh
             } else if url.lastPathComponent == LocalOverlayMeshArtifact.metadataFileName {
                 kind = .overlayMeshMetadata
-            } else if url.lastPathComponent == LocalPointCloudArtifact.plyFileName {
+            } else if url.lastPathComponent == LocalPointCloudArtifact.plyFileName
+                        || url.lastPathComponent == LocalPointCloudArtifact.lasFileName {
                 kind = .pointCloud
             } else if url.lastPathComponent == LocalPointCloudArtifact.metadataFileName {
                 kind = .pointCloudMetadata
@@ -1319,6 +1352,16 @@ final class LocalROS2BagRecorder: ObservableObject {
             }
 
             consecutiveFlushFailures = 0
+            successfulFlushCount += 1
+
+            if acceptsRecords,
+               successfulFlushCount % Self.flushesPerFreeSpaceCheck == 0,
+               let bagDirectoryURL,
+               let freeBytes = availableDiskCapacityBytes(at: bagDirectoryURL),
+               freeBytes < Self.minimumFreeBytesWhileRecording {
+                stopRecordingForLowDiskSpace()
+                return
+            }
 
             if publishStatsAfterFlush {
                 publishStats(isRecording: true)
@@ -1542,6 +1585,30 @@ final class LocalROS2BagRecorder: ObservableObject {
         lastErrorAt = Date()
         acceptsRecords = false
         closeDatabase()
+        publishStats(isRecording: false)
+    }
+
+    // volumeAvailableCapacityForImportantUsage is a required-reason API
+    // (NSPrivacyAccessedAPICategoryDiskSpace, reason E174.1); it counts
+    // purgeable space toward user-initiated recordings. nil means the
+    // capacity could not be read and callers proceed without the guard.
+    private func availableDiskCapacityBytes(at url: URL) -> Int64? {
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+
+    // Unlike recordFailure, this finalizes the bag (metadata.yaml included)
+    // so everything captured before the disk filled up stays readable.
+    private func stopRecordingForLowDiskSpace() {
+        cancelPendingFlush()
+        pendingWrites.removeAll()
+        pendingWriteBytes = 0
+        acceptsRecords = false
+        refreshAcceptanceFlag()
+        stoppedAt = Date()
+        lastError = "Local bag recording stopped: device is low on disk space."
+        lastErrorAt = Date()
+        closeCurrentBag(writeMetadata: true)
         publishStats(isRecording: false)
     }
 

@@ -48,7 +48,9 @@ struct ContentView: View {
     @AppStorage("ros2Enabled") private var ros2Enabled: Bool = false
     @AppStorage("ros2WebSocketURL") private var ros2WebSocketURL: String = "ws://192.168.1.100:9090"
     @AppStorage(LocalROS2BagRecorderConfiguration.enabledStorageKey) private var localROS2BagStorageEnabled: Bool = false
-    
+    @AppStorage("resumeWorldMapEnabled") private var resumeWorldMapEnabled: Bool = false
+    @AppStorage("recorderCertificateSHA256Fingerprint") private var recorderCertificateSHA256Fingerprint: String = ""
+
     @State private var visualizationMode: VisualizationMode = .solidMesh
     @State private var isScanning = false
     @State private var pointCount = 0
@@ -64,6 +66,12 @@ struct ContentView: View {
     @State private var isDepthAnythingReady = false
     @State private var shouldMountARView = false
     @State private var rosBridgeHostInput = ""
+    @State private var isExportingUSDZ = false
+    @State private var usdzExportURL: URL?
+    @State private var showAdvancedSettings = false
+    @State private var cborTransportEnabled = UserDefaults.standard.string(forKey: "rosbridgePayloadEncoding") == "cbor"
+    @State private var rosauthSecretInput = RosbridgeAuthSecretStore.load() ?? ""
+    @State private var diagnosticFileURLs: [URL] = []
     private let checksCameraPermission: Bool
 
     init(checksCameraPermission: Bool = true, previewHasCameraPermission: Bool? = nil) {
@@ -167,6 +175,14 @@ struct ContentView: View {
             .sheet(isPresented: $showSessionHistory) {
                 MappingSessionHistoryView()
             }
+            .sheet(isPresented: Binding<Bool>(
+                get: { usdzExportURL != nil },
+                set: { if !$0 { usdzExportURL = nil } }
+            )) {
+                if let usdzExportURL {
+                    ActivityShareSheet(items: [usdzExportURL])
+                }
+            }
         }
     }
 
@@ -197,8 +213,9 @@ struct ContentView: View {
             )
 
             ZStack(alignment: .topLeading) {
+                // Hit testing stays enabled so the Advanced disclosure's
+                // controls are usable; the panel only covers its own bounds.
                 recorderDiagnosticsPanel(width: recorderWidth)
-                    .allowsHitTesting(false)
                     .padding(.top, topInset)
                     .padding(.leading, leadingInset)
                     .frame(
@@ -266,24 +283,31 @@ struct ContentView: View {
                     TopDownSceneView(scene: scene)
                         .frame(width: inspectionWidth, height: inspectionHeight)
 
-                    Button {
-                        stoppedInspectionScene = nil
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundColor(.white)
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(Color.white.opacity(0.24), lineWidth: 1)
-                            )
-                            .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 3)
+                    HStack(alignment: .top) {
+                        Button {
+                            stoppedInspectionScene = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                                )
+                                .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 3)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Dismiss Mesh View")
+
+                        Spacer(minLength: 8)
+
+                        exportUSDZButton
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Dismiss Mesh View")
                     .padding(10)
+                    .frame(width: inspectionWidth, alignment: .topLeading)
                 }
                 .frame(width: inspectionWidth, height: inspectionHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -295,6 +319,59 @@ struct ContentView: View {
                 .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
             }
             .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        }
+    }
+
+    private var exportUSDZButton: some View {
+        Button(action: exportStoppedSceneAsUSDZ) {
+            HStack(spacing: 6) {
+                if isExportingUSDZ {
+                    ProgressView()
+                        .tint(.white)
+                } else {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                }
+                Text(isExportingUSDZ ? "Exporting…" : "Export USDZ")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.24), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 3)
+        }
+        .buttonStyle(.plain)
+        .disabled(isExportingUSDZ)
+        .accessibilityLabel("Export USDZ")
+    }
+
+    private func exportStoppedSceneAsUSDZ() {
+        guard let scene = stoppedInspectionScene, !isExportingUSDZ else { return }
+
+        isExportingUSDZ = true
+        let exportURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MapEverything-scan.usdz")
+
+        // USDZ export can take seconds on large meshes; keep it off the main thread.
+        Task.detached(priority: .userInitiated) {
+            try? FileManager.default.removeItem(at: exportURL)
+            let succeeded = scene.write(to: exportURL, options: nil, delegate: nil, progressHandler: nil)
+
+            await MainActor.run {
+                isExportingUSDZ = false
+                if succeeded {
+                    usdzExportURL = exportURL
+                } else {
+                    errorMessage = "Failed to export the scan as USDZ."
+                }
+            }
         }
     }
 
@@ -549,6 +626,8 @@ struct ContentView: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            advancedSettingsDisclosure
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -560,6 +639,73 @@ struct ContentView: View {
                 .stroke(Color.white.opacity(0.18), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.25), radius: 8, x: 0, y: 4)
+    }
+
+    private var advancedSettingsDisclosure: some View {
+        DisclosureGroup(isExpanded: $showAdvancedSettings) {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle(isOn: $resumeWorldMapEnabled) {
+                    Text("Resume previous scan area")
+                        .font(.caption2)
+                }
+                .controlSize(.mini)
+
+                Toggle(isOn: $cborTransportEnabled) {
+                    Text("CBOR transport (experimental)")
+                        .font(.caption2)
+                }
+                .controlSize(.mini)
+                .onChange(of: cborTransportEnabled) { enabled in
+                    UserDefaults.standard.set(
+                        enabled ? "cbor" : "json",
+                        forKey: "rosbridgePayloadEncoding"
+                    )
+                }
+
+                SecureField("rosauth secret", text: $rosauthSecretInput)
+                    .font(.caption2)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(6)
+                    .background(Color.black.opacity(0.18))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .onChange(of: rosauthSecretInput) { secret in
+                        RosbridgeAuthSecretStore.save(secret.isEmpty ? nil : secret)
+                    }
+
+                TextField("Recorder cert SHA-256 fingerprint", text: $recorderCertificateSHA256Fingerprint)
+                    .font(.caption2.monospaced())
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(6)
+                    .background(Color.black.opacity(0.18))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                if !diagnosticFileURLs.isEmpty {
+                    ShareLink(items: diagnosticFileURLs) {
+                        Label(
+                            "Share diagnostics (\(diagnosticFileURLs.count))",
+                            systemImage: "square.and.arrow.up"
+                        )
+                        .font(.caption2.weight(.medium))
+                    }
+                }
+
+                Text("Changes take effect on the next session start.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 6)
+            .onAppear {
+                diagnosticFileURLs = MetricKitDiagnostics.shared.savedDiagnosticFileURLs()
+            }
+        } label: {
+            Text("Advanced")
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(.secondary)
+        }
+        .tint(.secondary)
     }
 
     private func diagnosticsMetric(
@@ -1040,6 +1186,18 @@ struct LocalROS2BagSessionThumbnail: View {
         guard let url = session.preview?.thumbnailURL(relativeTo: session.directoryURL) else { return nil }
         return UIImage(contentsOfFile: url.path)
     }
+}
+
+/// Wraps `UIActivityViewController` so a share sheet can be presented
+/// programmatically once the USDZ export finishes.
+struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 struct TopDownSceneView: UIViewRepresentable {

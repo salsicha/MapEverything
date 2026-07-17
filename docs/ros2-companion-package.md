@@ -126,3 +126,17 @@ with a 12-byte stride, and `index_data` is packed little-endian `uint32` with a
 `device_pixel_y`, `tile_width`, `tile_height`, `pixel_origin`, and `pixel_units`
 as typed scalar fields so recorder-side code can place the phone inside each
 downloaded satellite or DEM tile without parsing nested JSON.
+
+## Foxglove Studio
+
+Foxglove Studio can connect directly to the same rosbridge WebSocket the
+recorder uses — no extra bridge process is needed. In Foxglove choose
+**Open connection → Rosbridge** and enter `ws://<phone-recorder-host>:9090`
+(the same host and port the MapEverything app publishes to).
+
+A starter layout is checked in at `ros2/foxglove/mapeverything-layout.json`;
+import it with **Layout → Import from file**. It opens a 3D panel subscribed to
+`/mapping/pointcloud/lidar`, `/mapping/pointcloud/depth_anything`, and
+`/mapping/map`, an Image panel on `/mapping/camera/image/compressed`, a Raw
+Messages panel on `/mapping/status`, and a Plot panel tracking
+`/mapping/imu.linear_acceleration.z`.

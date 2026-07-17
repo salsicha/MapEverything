@@ -4,6 +4,11 @@
 The script can run in dry-run mode to size payloads locally, or connect to a
 rosbridge WebSocket endpoint when the optional `websockets` package is
 installed.
+
+Payloads are encoded as rosbridge JSON text frames by default. Pass
+`--encoding cbor` to encode the same payload dicts with the optional `cbor2`
+package and send them as binary WebSocket frames; the target rosbridge server
+must support incoming CBOR frames.
 """
 
 from __future__ import annotations
@@ -194,16 +199,48 @@ def message_for(profile: TopicProfile, sequence: int) -> dict[str, Any]:
     }
 
 
-def publish_payload(profile: TopicProfile, sequence: int) -> str:
+def require_cbor2() -> Any:
+    try:
+        import cbor2
+    except ImportError:
+        print(
+            "The cbor encoding requires the optional `cbor2` package. "
+            "Install it with `python3 -m pip install cbor2` and retry.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return cbor2
+
+
+def encode_payload(payload: dict[str, Any], encoding: str) -> str | bytes:
+    """Encode a rosbridge payload dict.
+
+    JSON returns text (sent as a text WebSocket frame); CBOR returns bytes
+    (sent as a binary WebSocket frame).
+    """
+    if encoding == "cbor":
+        return require_cbor2().dumps(payload)
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def encoded_size(encoded: str | bytes) -> int:
+    if isinstance(encoded, bytes):
+        return len(encoded)
+    return len(encoded.encode("utf-8"))
+
+
+def publish_payload(profile: TopicProfile, sequence: int, encoding: str) -> str | bytes:
     payload = {
         "op": "publish",
         "topic": profile.topic,
         "msg": message_for(profile, sequence),
     }
-    return json.dumps(payload, separators=(",", ":"))
+    return encode_payload(payload, encoding)
 
 
-async def run_profile(websocket: Any, profile: TopicProfile, duration_seconds: float) -> dict[str, Any]:
+async def run_profile(
+    websocket: Any, profile: TopicProfile, duration_seconds: float, encoding: str
+) -> dict[str, Any]:
     start = time.perf_counter()
     next_send = start
     sent_messages = 0
@@ -212,19 +249,19 @@ async def run_profile(websocket: Any, profile: TopicProfile, duration_seconds: f
 
     if websocket is not None:
         await websocket.send(
-            json.dumps(
+            encode_payload(
                 {
                     "op": "advertise",
                     "topic": profile.topic,
                     "type": profile.message_type,
                 },
-                separators=(",", ":"),
+                encoding,
             )
         )
 
     while time.perf_counter() - start < duration_seconds:
-        encoded = publish_payload(profile, sent_messages)
-        sent_bytes += len(encoded.encode("utf-8"))
+        encoded = publish_payload(profile, sent_messages, encoding)
+        sent_bytes += encoded_size(encoded)
         if websocket is not None:
             await websocket.send(encoded)
         sent_messages += 1
@@ -233,16 +270,19 @@ async def run_profile(websocket: Any, profile: TopicProfile, duration_seconds: f
         await asyncio.sleep(max(0.0, sleep_until - time.perf_counter()))
 
     elapsed = time.perf_counter() - start
-    return {
+    result = {
         "profile": profile.name,
         "topic": profile.topic,
         "target_rate_hz": profile.rate_hz,
         "messages": sent_messages,
         "elapsed_seconds": round(elapsed, 3),
         "observed_rate_hz": round(sent_messages / elapsed, 3) if elapsed else 0,
-        "json_bytes": sent_bytes,
-        "json_mbps": round((sent_bytes * 8) / elapsed / 1_000_000, 3) if elapsed else 0,
+        "encoding": encoding,
     }
+    # Keep the historical json_* keys for JSON runs; label CBOR runs cbor_*.
+    result[f"{encoding}_bytes"] = sent_bytes
+    result[f"{encoding}_mbps"] = round((sent_bytes * 8) / elapsed / 1_000_000, 3) if elapsed else 0
+    return result
 
 
 async def run(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -264,7 +304,7 @@ async def run(args: argparse.Namespace) -> list[dict[str, Any]]:
     try:
         results = []
         for profile in selected:
-            results.append(await run_profile(websocket, profile, args.duration))
+            results.append(await run_profile(websocket, profile, args.duration, args.encoding))
         return results
     finally:
         if websocket is not None:
@@ -272,13 +312,15 @@ async def run(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def print_markdown(results: list[dict[str, Any]]) -> None:
-    print("| Profile | Topic | Target Hz | Observed Hz | Messages | JSON Mbit/s |")
+    encoding = results[0].get("encoding", "json") if results else "json"
+    label = "CBOR" if encoding == "cbor" else "JSON"
+    print(f"| Profile | Topic | Target Hz | Observed Hz | Messages | {label} Mbit/s |")
     print("| :--- | :--- | ---: | ---: | ---: | ---: |")
     for result in results:
         print(
             f"| {result['profile']} | `{result['topic']}` | "
             f"{result['target_rate_hz']} | {result['observed_rate_hz']} | "
-            f"{result['messages']} | {result['json_mbps']} |"
+            f"{result['messages']} | {result[f'{encoding}_mbps']} |"
         )
 
 
@@ -293,6 +335,16 @@ def parse_args() -> argparse.Namespace:
         default=[profile.name for profile in PROFILES],
         help="topic profiles to benchmark",
     )
+    parser.add_argument(
+        "--encoding",
+        choices=["json", "cbor"],
+        default="json",
+        help=(
+            "wire encoding for rosbridge payloads. json (default) sends text frames; "
+            "cbor requires the optional cbor2 package, sends binary WebSocket frames, "
+            "and the target rosbridge server must support incoming CBOR"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="size payloads without opening a WebSocket")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
     return parser.parse_args()
@@ -300,6 +352,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.encoding == "cbor":
+        require_cbor2()
     results = asyncio.run(run(args))
     if not results:
         return 2
