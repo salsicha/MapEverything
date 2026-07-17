@@ -67,7 +67,7 @@ class ROS2BridgeClient: ObservableObject {
     private let motionQueue = OperationQueue()
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) // Reuse to prevent allocation per frame
     private let topicRegistry: ROS2TopicRegistry
-    private let meshSnapshotConfiguration = MeshSnapshotPublishConfiguration.default
+    private let meshSnapshotConfiguration: MeshSnapshotPublishConfiguration
     private let streamPayloadMetrics = StreamPayloadMetricsStore.shared
     private let localBagRecorder: LocalROS2BagRecorder
     private let localSampleBuffer = LocalSampleBuffer()
@@ -112,10 +112,12 @@ class ROS2BridgeClient: ObservableObject {
         topicRegistry: ROS2TopicRegistry = .shared,
         localBagRecorder: LocalROS2BagRecorder = .shared,
         socketFactory: ROSBridgeSocketFactory? = nil,
-        reconnectDelay: TimeInterval = 3.0
+        reconnectDelay: TimeInterval = 3.0,
+        meshSnapshotConfiguration: MeshSnapshotPublishConfiguration = .default
     ) {
         self.topicRegistry = topicRegistry
         self.localBagRecorder = localBagRecorder
+        self.meshSnapshotConfiguration = meshSnapshotConfiguration
         self.socketFactory = socketFactory ?? { request in
             Self.socketSession.webSocketTask(with: request)
         }
@@ -1188,6 +1190,9 @@ class ROS2BridgeClient: ObservableObject {
 
         let markerTopic = topicRegistry.topic(.meshMarkers)
         let hasColor = snapshot.colors.count == snapshot.vertices.count
+        // One header for fitting and publishing: candidates must be measured
+        // with the real epoch digits or the fit underestimates the payload.
+        let markerHeader = createHeader(frameId: FrameID.map, timestamp: timestamp)
         let expanded = expandColoredTriangles(
             vertices: snapshot.vertices,
             indices: snapshot.indices,
@@ -1198,12 +1203,13 @@ class ROS2BridgeClient: ObservableObject {
             let fitted = fitColoredMarkerPoints(
                 points: expanded.points,
                 colors: expanded.colors,
+                header: markerHeader,
                 topic: markerTopic,
                 maxPayloadBytes: meshSnapshotConfiguration.maxPayloadBytes
             )
             if !fitted.points.isEmpty {
                 var marker: [String: Any] = [
-                    "header": createHeader(frameId: FrameID.map, timestamp: timestamp),
+                    "header": markerHeader,
                     "ns": "depth_mesh",
                     "id": 0,
                     "type": 11, // TRIANGLE_LIST
@@ -1335,6 +1341,7 @@ class ROS2BridgeClient: ObservableObject {
     nonisolated private func fitColoredMarkerPoints(
         points: [[String: Float]],
         colors: [[String: Float]],
+        header: [String: Any],
         topic: String,
         maxPayloadBytes: Int
     ) -> (points: [[String: Float]], colors: [[String: Float]]) {
@@ -1344,7 +1351,7 @@ class ROS2BridgeClient: ObservableObject {
 
         while !fittedPoints.isEmpty {
             var marker: [String: Any] = [
-                "header": ["stamp": ["sec": 0, "nanosec": 0], "frame_id": FrameID.map],
+                "header": header,
                 "ns": "depth_mesh",
                 "id": 0,
                 "type": 11,
