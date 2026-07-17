@@ -14,7 +14,7 @@ N:`, and this document is the source of truth for scope and encoding.
       (colored encoding named `float32_xyz_rgb8_le_base64` to match the
       existing `float32_xyz_le_base64` convention, not the `xyz_f32_rgb_u8`
       placeholder in the spec below)
-- [ ] Stage 3 — publish colored mesh snapshot + RViz marker
+- [x] Stage 3 — publish colored mesh snapshot + RViz marker
 - [ ] Stage 4 — colored local artifacts and inspection scene
 
 If you are picking this up mid-way: `git log --oneline | grep 'Colored mesh

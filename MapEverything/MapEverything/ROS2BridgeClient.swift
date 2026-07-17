@@ -1174,6 +1174,214 @@ class ROS2BridgeClient: ObservableObject {
         publishOrBufferLocalSample(kind: .mesh, topic: snapshotTopic, msg: snapshotMessage)
     }
 
+    // Publishes the Depth Anything overlay grid as a colored MeshSnapshot plus
+    // one colored TRIANGLE_LIST marker (ns "depth_mesh", stable id 0). The DA
+    // frame cadence (~2 Hz) already throttles this; no extra rate limit.
+    nonisolated func publishDepthAnythingMesh(
+        _ snapshot: MeshGenerator.DepthAnythingMeshSnapshot,
+        timestamp: TimeInterval
+    ) {
+        guard topicRegistry.isStreamEnabled(.mesh),
+              hasActivePublishTarget || shouldBufferWhileDisconnected,
+              snapshot.indices.count >= 3,
+              snapshot.vertices.count >= 3 else { return }
+
+        let markerTopic = topicRegistry.topic(.meshMarkers)
+        let hasColor = snapshot.colors.count == snapshot.vertices.count
+        let expanded = expandColoredTriangles(
+            vertices: snapshot.vertices,
+            indices: snapshot.indices,
+            colors: hasColor ? snapshot.colors : [],
+            maxPointCount: meshSnapshotConfiguration.maxTrianglePoints
+        )
+        if !expanded.points.isEmpty {
+            let fitted = fitColoredMarkerPoints(
+                points: expanded.points,
+                colors: expanded.colors,
+                topic: markerTopic,
+                maxPayloadBytes: meshSnapshotConfiguration.maxPayloadBytes
+            )
+            if !fitted.points.isEmpty {
+                var marker: [String: Any] = [
+                    "header": createHeader(frameId: FrameID.map, timestamp: timestamp),
+                    "ns": "depth_mesh",
+                    "id": 0,
+                    "type": 11, // TRIANGLE_LIST
+                    "action": 0, // ADD
+                    "pose": [
+                        "position": ["x": 0, "y": 0, "z": 0],
+                        "orientation": ["x": 0, "y": 0, "z": 0, "w": 1]
+                    ],
+                    "scale": ["x": 1.0, "y": 1.0, "z": 1.0],
+                    "color": ["r": 0.5, "g": 0.5, "b": 0.5, "a": 1.0],
+                    "points": fitted.points
+                ]
+                if !fitted.colors.isEmpty {
+                    marker["colors"] = fitted.colors
+                }
+                let markerMessage: [String: Any] = ["markers": [marker]]
+                if let encodedBytes = encodedPublishPayloadByteCount(topic: markerTopic, msg: markerMessage) {
+                    recordStreamPayloadMetric(
+                        stream: .mesh,
+                        originalBytes: expanded.points.count * 3 * MemoryLayout<Float>.size,
+                        encodedBytes: encodedBytes,
+                        compression: "visualization_marker_array_json"
+                    )
+                }
+                publishOrBufferLocalSample(kind: .mesh, topic: markerTopic, msg: markerMessage)
+            }
+        }
+
+        let snapshotTopic = topicRegistry.topic(.meshSnapshot)
+        let snapshotMessage = MeshSnapshotMessageBuilder.makeColoredGridMeshMessage(
+            header: createHeader(frameId: FrameID.map, timestamp: timestamp),
+            snapshotID: UUID().uuidString,
+            source: "calibrated_depthanything_grid",
+            frameID: FrameID.map,
+            vertices: snapshot.vertices,
+            indices: snapshot.indices,
+            colors: hasColor ? snapshot.colors : [],
+            maxTrianglePoints: meshSnapshotConfiguration.maxTrianglePoints,
+            maxPayloadBytes: meshSnapshotConfiguration.maxPayloadBytes,
+            metadata: [
+                "fallback_marker_topic": markerTopic,
+                "fallback_marker_ns": "depth_mesh",
+                "has_vertex_colors": hasColor
+            ],
+            topic: snapshotTopic
+        )
+        guard (snapshotMessage["triangle_count"] as? Int ?? 0) > 0 else { return }
+        let originalSnapshotBytes = snapshotMessage["original_payload_bytes"] as? Int ?? 0
+        let publishedSnapshotBytes = snapshotMessage["published_payload_bytes"] as? Int
+            ?? encodedPublishPayloadByteCount(topic: snapshotTopic, msg: snapshotMessage)
+            ?? 0
+        recordStreamPayloadMetric(
+            stream: .mesh,
+            originalBytes: originalSnapshotBytes,
+            encodedBytes: publishedSnapshotBytes,
+            compression: "mesh_snapshot_binary_base64"
+        )
+        publishOrBufferLocalSample(kind: .mesh, topic: snapshotTopic, msg: snapshotMessage)
+    }
+
+    // Deletes the depth-mesh overlay marker on scan stop so it does not ghost
+    // in RViz (markers default to infinite lifetime).
+    nonisolated func clearDepthMeshMarker(timestamp: TimeInterval) {
+        guard topicRegistry.isStreamEnabled(.mesh),
+              hasActivePublishTarget || shouldBufferWhileDisconnected else { return }
+
+        let marker: [String: Any] = [
+            "header": createHeader(frameId: FrameID.map, timestamp: timestamp),
+            "ns": "depth_mesh",
+            "id": 0,
+            "action": 2 // DELETE
+        ]
+        publishOrBufferLocalSample(
+            kind: .mesh,
+            topic: topicRegistry.topic(.meshMarkers),
+            msg: ["markers": [marker]]
+        )
+    }
+
+    // Expands an indexed, already-transformed grid mesh into a flat
+    // TRIANGLE_LIST point list (3 points per triangle) with a parallel
+    // ColorRGBA list when colors are present.
+    nonisolated private func expandColoredTriangles(
+        vertices: [SIMD3<Float>],
+        indices: [UInt32],
+        colors: [SIMD3<UInt8>],
+        maxPointCount: Int
+    ) -> (points: [[String: Float]], colors: [[String: Float]]) {
+        let hasColor = colors.count == vertices.count
+        let maxFaceCount = min(indices.count / 3, max(0, maxPointCount) / 3)
+        guard maxFaceCount > 0 else { return ([], []) }
+
+        var points: [[String: Float]] = []
+        var pointColors: [[String: Float]] = []
+        points.reserveCapacity(maxFaceCount * 3)
+        if hasColor {
+            pointColors.reserveCapacity(maxFaceCount * 3)
+        }
+
+        for faceIndex in 0..<maxFaceCount {
+            let baseIndex = faceIndex * 3
+            let triangle = [
+                Int(indices[baseIndex]),
+                Int(indices[baseIndex + 1]),
+                Int(indices[baseIndex + 2])
+            ]
+            guard triangle.allSatisfy({ vertices.indices.contains($0) }) else { continue }
+
+            for vertexIndex in triangle {
+                let position = vertices[vertexIndex]
+                points.append(["x": position.x, "y": position.y, "z": position.z])
+                if hasColor {
+                    let color = colors[vertexIndex]
+                    pointColors.append([
+                        "r": Float(color.x) / 255.0,
+                        "g": Float(color.y) / 255.0,
+                        "b": Float(color.z) / 255.0,
+                        "a": 1.0
+                    ])
+                }
+            }
+        }
+
+        return (points, pointColors)
+    }
+
+    // Trims trailing triangles (keeping points and per-point colors in
+    // lockstep, aligned to multiples of 3) until the marker fits the budget.
+    nonisolated private func fitColoredMarkerPoints(
+        points: [[String: Float]],
+        colors: [[String: Float]],
+        topic: String,
+        maxPayloadBytes: Int
+    ) -> (points: [[String: Float]], colors: [[String: Float]]) {
+        let hasColor = colors.count == points.count
+        var fittedPoints = points
+        var fittedColors = colors
+
+        while !fittedPoints.isEmpty {
+            var marker: [String: Any] = [
+                "header": ["stamp": ["sec": 0, "nanosec": 0], "frame_id": FrameID.map],
+                "ns": "depth_mesh",
+                "id": 0,
+                "type": 11,
+                "action": 0,
+                "pose": [
+                    "position": ["x": 0, "y": 0, "z": 0],
+                    "orientation": ["x": 0, "y": 0, "z": 0, "w": 1]
+                ],
+                "scale": ["x": 1.0, "y": 1.0, "z": 1.0],
+                "color": ["r": 0.5, "g": 0.5, "b": 0.5, "a": 1.0],
+                "points": fittedPoints
+            ]
+            if hasColor {
+                marker["colors"] = fittedColors
+            }
+            guard let byteCount = encodedPublishPayloadByteCount(topic: topic, msg: ["markers": [marker]]),
+                  byteCount > maxPayloadBytes else {
+                return (fittedPoints, fittedColors)
+            }
+
+            let estimatedCount = Int(Double(fittedPoints.count) * Double(maxPayloadBytes) / Double(byteCount))
+            let reducedCount = min(fittedPoints.count - 3, estimatedCount)
+            let alignedCount = max(0, reducedCount - (reducedCount % 3))
+
+            if alignedCount >= 3 {
+                fittedPoints = Array(fittedPoints.prefix(alignedCount))
+                if hasColor {
+                    fittedColors = Array(fittedColors.prefix(alignedCount))
+                }
+            } else {
+                return ([], [])
+            }
+        }
+
+        return ([], [])
+    }
+
     nonisolated private func meshTrianglePoints(for mesh: SafeARMesh, maxPointCount: Int) -> [[String: Float]] {
         let maxFaceCount = min(mesh.indices.count / 3, maxPointCount / 3)
         guard maxFaceCount > 0 else { return [] }

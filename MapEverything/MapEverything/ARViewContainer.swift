@@ -171,6 +171,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 } else {
                     saveWorldMapIfEnabled()
                     saveFinalRecordingArtifacts()
+                    ROS2BridgeClient.shared.clearDepthMeshMarker(
+                        timestamp: ProcessInfo.processInfo.systemUptime
+                    )
                     depthAnythingCalibrationCache.reset()
                     freezeCurrentMeshForInspection()
                     cancelMeshUpdateTasks()
@@ -1201,6 +1204,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     self.lastDepthMeshVisualizationTime = timestamp
                     self.updateLiveDepthMeshVisualization(with: meshSnapshot)
                 }
+                // Nonisolated publish; the DA cadence already throttles it.
+                ROS2BridgeClient.shared.publishDepthAnythingMesh(meshSnapshot, timestamp: timestamp)
             }
 
             if !newPoints.isEmpty {
