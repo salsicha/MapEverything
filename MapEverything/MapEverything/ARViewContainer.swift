@@ -625,6 +625,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
             capturedAt: Date(),
             vertices: snapshot.vertices,
             indices: snapshot.indices,
+            colors: snapshot.colors,
             metadata: [
                 "visualization_mode": currentMode.rawValue,
                 "lidar_usage": "calibration_only",
@@ -664,11 +665,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         let scene = SCNScene()
         let worldVertices = snapshot.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
+        let colors = snapshot.colors.count == snapshot.vertices.count ? snapshot.colors : nil
         scene.rootNode.addChildNode(SCNNode(
             geometry: makeLitInspectionGeometry(
                 vertices: worldVertices,
                 indices: snapshot.indices,
-                tint: .systemTeal
+                tint: .systemTeal,
+                vertexColors: colors
             )
         ))
         return scene
@@ -677,7 +680,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private func makeLitInspectionGeometry(
         vertices: [SCNVector3],
         indices: [UInt32],
-        tint: UIColor
+        tint: UIColor,
+        vertexColors: [SIMD3<UInt8>]? = nil
     ) -> SCNGeometry {
         let vertexSource = SCNGeometrySource(vertices: vertices)
         let normalSource = SCNGeometrySource(normals: inspectionNormals(for: vertices, indices: indices))
@@ -688,12 +692,41 @@ class ARViewController: UIViewController, ARSessionDelegate {
             primitiveCount: indices.count / 3,
             bytesPerIndex: MemoryLayout<UInt32>.size
         )
-        let geometry = SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
+
+        var sources = [vertexSource, normalSource]
+        let usesVertexColors = (vertexColors?.count == vertices.count) && !(vertexColors?.isEmpty ?? true)
+        if usesVertexColors, let vertexColors {
+            let colorFloats = vertexColors.map {
+                SIMD3<Float>(Float($0.x) / 255.0, Float($0.y) / 255.0, Float($0.z) / 255.0)
+            }
+            let colorData = colorFloats.withUnsafeBytes { Data($0) }
+            sources.append(
+                SCNGeometrySource(
+                    data: colorData,
+                    semantic: .color,
+                    vectorCount: colorFloats.count,
+                    usesFloatComponents: true,
+                    componentsPerVector: 3,
+                    bytesPerComponent: MemoryLayout<Float>.size,
+                    dataOffset: 0,
+                    dataStride: MemoryLayout<SIMD3<Float>>.stride
+                )
+            )
+        }
+
+        let geometry = SCNGeometry(sources: sources, elements: [element])
         let material = SCNMaterial()
-        material.diffuse.contents = tint.withAlphaComponent(0.9)
-        material.ambient.contents = tint.withAlphaComponent(0.24)
+        if usesVertexColors {
+            // SceneKit multiplies vertex color by diffuse; white lets the
+            // per-vertex camera colors show while normals still light it.
+            material.diffuse.contents = UIColor.white
+            material.ambient.contents = UIColor.white.withAlphaComponent(0.3)
+        } else {
+            material.diffuse.contents = tint.withAlphaComponent(0.9)
+            material.ambient.contents = tint.withAlphaComponent(0.24)
+            material.emission.contents = tint.withAlphaComponent(0.035)
+        }
         material.specular.contents = UIColor.white.withAlphaComponent(0.36)
-        material.emission.contents = tint.withAlphaComponent(0.035)
         material.shininess = 0.42
         material.lightingModel = .blinn
         material.isDoubleSided = true

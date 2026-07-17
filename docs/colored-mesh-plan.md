@@ -15,7 +15,14 @@ N:`, and this document is the source of truth for scope and encoding.
       existing `float32_xyz_le_base64` convention, not the `xyz_f32_rgb_u8`
       placeholder in the spec below)
 - [x] Stage 3 — publish colored mesh snapshot + RViz marker
-- [ ] Stage 4 — colored local artifacts and inspection scene
+- [x] Stage 4 — colored local artifacts and inspection scene
+
+**Tier 1 complete.** All stages landed and pushed; 86 unit tests pass and the
+release checker stays at 30 pass / 0 fail. The Depth Anything overlay mesh now
+carries camera color end to end: generation → ROS (schema v3 snapshot +
+colored RViz marker) → local OBJ artifact (`v x y z r g b`) and the stopped-
+scan inspection/USDZ scene. Remaining coloring work (ARKit reconstruction
+mesh, TSDF) is Tier 2/3, out of scope here.
 
 If you are picking this up mid-way: `git log --oneline | grep 'Colored mesh
 stage'` shows what landed; the unchecked stages above are the remaining work.

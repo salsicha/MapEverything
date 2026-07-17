@@ -46,7 +46,28 @@ nonisolated struct LocalOverlayMeshArtifact: Sendable {
     let capturedAt: Date
     let vertices: [SIMD3<Float>]
     let indices: [UInt32]
+    // Per-vertex camera colors; empty = uncolored. When non-empty, count
+    // matches vertices and the OBJ carries the `v x y z r g b` extension.
+    let colors: [SIMD3<UInt8>]
     let metadata: [String: String]
+
+    init(
+        source: String,
+        coordinateFrame: String,
+        capturedAt: Date,
+        vertices: [SIMD3<Float>],
+        indices: [UInt32],
+        colors: [SIMD3<UInt8>] = [],
+        metadata: [String: String]
+    ) {
+        self.source = source
+        self.coordinateFrame = coordinateFrame
+        self.capturedAt = capturedAt
+        self.vertices = vertices
+        self.indices = indices
+        self.colors = colors
+        self.metadata = metadata
+    }
 
     var triangleCount: Int {
         validTriangles.count
@@ -56,7 +77,12 @@ nonisolated struct LocalOverlayMeshArtifact: Sendable {
         vertices.isEmpty || triangleCount == 0
     }
 
+    var hasVertexColors: Bool {
+        !colors.isEmpty && colors.count == vertices.count
+    }
+
     func objString() -> String {
+        let colored = hasVertexColors
         var lines: [String] = [
             "# MapEverything final overlay mesh",
             "# source: \(source)",
@@ -64,12 +90,23 @@ nonisolated struct LocalOverlayMeshArtifact: Sendable {
             "# captured_at: \(ISO8601DateFormatter().string(from: capturedAt))",
             "# vertex_count: \(vertices.count)",
             "# triangle_count: \(triangleCount)",
+            "# has_vertex_colors: \(colored)",
             "o final_overlay_mesh"
         ]
 
         lines.reserveCapacity(lines.count + vertices.count + validTriangles.count)
-        for vertex in vertices {
-            lines.append("v \(Self.format(vertex.x)) \(Self.format(vertex.y)) \(Self.format(vertex.z))")
+        for (index, vertex) in vertices.enumerated() {
+            let position = "v \(Self.format(vertex.x)) \(Self.format(vertex.y)) \(Self.format(vertex.z))"
+            if colored {
+                // Widely supported vertex-color OBJ extension: rgb as 0-1
+                // floats appended to the position line.
+                let color = colors[index]
+                lines.append(
+                    "\(position) \(Self.formatColor(color.x)) \(Self.formatColor(color.y)) \(Self.formatColor(color.z))"
+                )
+            } else {
+                lines.append(position)
+            }
         }
 
         for triangle in validTriangles {
@@ -87,7 +124,8 @@ nonisolated struct LocalOverlayMeshArtifact: Sendable {
             "coordinate_frame": coordinateFrame,
             "captured_at": ISO8601DateFormatter().string(from: capturedAt),
             "vertex_count": vertices.count,
-            "triangle_count": triangleCount
+            "triangle_count": triangleCount,
+            "has_vertex_colors": hasVertexColors
         ]
         if !metadata.isEmpty {
             payload["metadata"] = metadata
@@ -115,6 +153,10 @@ nonisolated struct LocalOverlayMeshArtifact: Sendable {
     private static func format(_ value: Float) -> String {
         let finiteValue = value.isFinite ? value : 0
         return String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), Double(finiteValue))
+    }
+
+    private static func formatColor(_ channel: UInt8) -> String {
+        String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), Double(channel) / 255.0)
     }
 }
 
