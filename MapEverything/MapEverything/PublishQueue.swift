@@ -5,7 +5,7 @@
 
 import Foundation
 
-struct PublishQueueStats: Equatable {
+nonisolated struct PublishQueueStats: Equatable, Sendable {
     let capacity: Int
     let depth: Int
     let inFlight: Int
@@ -39,7 +39,7 @@ struct PublishQueueStats: Equatable {
     }
 }
 
-enum PublishQueueTransportError: LocalizedError {
+nonisolated enum PublishQueueTransportError: LocalizedError {
     case disconnected
 
     var errorDescription: String? {
@@ -50,7 +50,7 @@ enum PublishQueueTransportError: LocalizedError {
     }
 }
 
-enum PublishQueueEncodingError: LocalizedError {
+nonisolated enum PublishQueueEncodingError: LocalizedError {
     case invalidJSONObject
 
     var errorDescription: String? {
@@ -61,12 +61,14 @@ enum PublishQueueEncodingError: LocalizedError {
     }
 }
 
-final class PublishQueue {
-    enum DropPolicy {
+// All mutable state is confined to the serial `queue`; every public entry
+// point immediately hops onto it, which is what makes the type Sendable.
+nonisolated final class PublishQueue: @unchecked Sendable {
+    enum DropPolicy: Sendable {
         case dropOldestPublish
     }
 
-    struct Configuration {
+    struct Configuration: Sendable {
         let capacity: Int
         let maxRetries: Int
         let retryDelayMilliseconds: Int
@@ -80,15 +82,16 @@ final class PublishQueue {
         )
     }
 
-    typealias SendHandler = (Data, @escaping (Error?) -> Void) -> Void
+    typealias SendHandler = @Sendable (Data, @escaping @Sendable (Error?) -> Void) -> Void
 
-    var onStatsChange: ((PublishQueueStats) -> Void)?
+    // Set once during owner setup, before any traffic; read on the queue.
+    var onStatsChange: (@Sendable (PublishQueueStats) -> Void)?
 
     var capacity: Int {
         configuration.capacity
     }
 
-    private struct Entry {
+    private struct Entry: Sendable {
         let op: String
         let topic: String
         let data: Data
@@ -181,18 +184,19 @@ final class PublishQueue {
     private func drainIfNeeded() {
         guard !isSending, !pending.isEmpty else { return }
 
-        var entry = pending.removeFirst()
+        let entry = pending.removeFirst()
         isSending = true
         publishStats()
 
         sendHandler(entry.data) { [weak self] error in
-            self?.queue.async {
-                self?.handleCompletion(entry: &entry, error: error)
+            guard let self else { return }
+            self.queue.async {
+                self.handleCompletion(entry: entry, error: error)
             }
         }
     }
 
-    private func handleCompletion(entry: inout Entry, error: Error?) {
+    private func handleCompletion(entry: Entry, error: Error?) {
         guard entry.generation == generation else { return }
 
         isSending = false
@@ -201,10 +205,11 @@ final class PublishQueue {
             recordError("Failed to publish \(entry.topic): \(error.localizedDescription)")
 
             if shouldRetry(error: error), entry.attempts < configuration.maxRetries {
-                entry.attempts += 1
+                var updatedEntry = entry
+                updatedEntry.attempts += 1
                 retriedMessages += 1
                 let retryGeneration = entry.generation
-                let retryEntry = entry
+                let retryEntry = updatedEntry
 
                 queue.asyncAfter(deadline: .now() + .milliseconds(configuration.retryDelayMilliseconds)) {
                     guard retryGeneration == self.generation else { return }
