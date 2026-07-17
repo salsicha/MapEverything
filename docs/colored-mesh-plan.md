@@ -9,7 +9,7 @@ N:`, and this document is the source of truth for scope and encoding.
 ## Status
 
 - [x] Stage 0 — this plan (committed before implementation began)
-- [ ] Stage 1 — per-vertex colors in mesh generation
+- [x] Stage 1 — per-vertex colors in mesh generation
 - [ ] Stage 2 — MeshSnapshot schema v3 with colored vertex encoding
 - [ ] Stage 3 — publish colored mesh snapshot + RViz marker
 - [ ] Stage 4 — colored local artifacts and inspection scene

@@ -804,7 +804,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 calibration: calibration,
                 intrinsics: intrinsics,
                 imageResolution: imageResolution,
-                transform: transform
+                transform: transform,
+                cameraImage: cameraImage
             )
             : nil
 

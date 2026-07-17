@@ -316,17 +316,53 @@ nonisolated struct PointCloudProcessor {
             return SIMD3<UInt8>(255, 255, 255)
         }
 
-        let yVal = Float(yPlane[sample.yIndex])
-        let cbVal = Float(cbcrPlane[sample.uvIndex]) - 128.0
-        let crVal = Float(cbcrPlane[sample.uvIndex + 1]) - 128.0
-        let r = yVal + 1.402 * crVal
-        let g = yVal - 0.344136 * cbVal - 0.714136 * crVal
-        let b = yVal + 1.772 * cbVal
+        return convertYCbCr(
+            y: Float(yPlane[sample.yIndex]),
+            cb: Float(cbcrPlane[sample.uvIndex]) - 128.0,
+            cr: Float(cbcrPlane[sample.uvIndex + 1]) - 128.0
+        )
+    }
+
+    /// Single source of truth for the BT.601 conversion; the Metal kernel
+    /// mirrors these constants and MetalDepthParityTests guards the pair.
+    @inline(__always)
+    static func convertYCbCr(y yVal: Float, cb: Float, cr: Float) -> SIMD3<UInt8> {
+        let r = yVal + 1.402 * cr
+        let g = yVal - 0.344136 * cb - 0.714136 * cr
+        let b = yVal + 1.772 * cb
 
         return SIMD3<UInt8>(
             UInt8(max(0, min(255, r))),
             UInt8(max(0, min(255, g))),
             UInt8(max(0, min(255, b)))
+        )
+    }
+
+    /// Samples the camera color for a depth-grid pixel with the same
+    /// truncate-then-clamp index math as the projection table, so mesh
+    /// vertices and point-cloud points colorize identically.
+    @inline(__always)
+    static func sampleCameraColor(
+        depthX: Int,
+        depthY: Int,
+        depthWidth: Int,
+        depthHeight: Int,
+        imageWidth: Int,
+        imageHeight: Int,
+        yPlane: UnsafePointer<UInt8>,
+        yBytesPerRow: Int,
+        cbcrPlane: UnsafePointer<UInt8>,
+        cbcrBytesPerRow: Int
+    ) -> SIMD3<UInt8> {
+        let imageX = min(imageWidth - 1, max(0, Int((Float(depthX) / Float(depthWidth)) * Float(imageWidth))))
+        let imageY = min(imageHeight - 1, max(0, Int((Float(depthY) / Float(depthHeight)) * Float(imageHeight))))
+        let yIndex = imageY * yBytesPerRow + imageX
+        let uvIndex = (imageY / 2) * cbcrBytesPerRow + (imageX / 2) * 2
+
+        return convertYCbCr(
+            y: Float(yPlane[yIndex]),
+            cb: Float(cbcrPlane[uvIndex]) - 128.0,
+            cr: Float(cbcrPlane[uvIndex + 1]) - 128.0
         )
     }
 

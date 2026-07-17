@@ -36,6 +36,9 @@ nonisolated enum MeshGenerator {
         let descriptor: MeshDescriptor
         let vertices: [SIMD3<Float>]
         let indices: [UInt32]
+        // Per-vertex camera colors; empty when no camera buffer was supplied
+        // at generation time. When non-empty, count == vertices.count.
+        let colors: [SIMD3<UInt8>]
     }
 
     static func createDescriptor(from geometry: ARMeshGeometry) -> MeshDescriptor {
@@ -111,7 +114,8 @@ nonisolated enum MeshGenerator {
         intrinsics: simd_float3x3,
         imageResolution resolution: CGSize,
         transform: simd_float4x4,
-        configuration: DepthAnythingMeshConfiguration = .overlay
+        configuration: DepthAnythingMeshConfiguration = .overlay,
+        cameraImage: CVPixelBuffer? = nil
     ) -> DepthAnythingMeshSnapshot? {
         let depthWidth = relativeDepthMap.width
         let depthHeight = relativeDepthMap.height
@@ -139,15 +143,50 @@ nonisolated enum MeshGenerator {
             return nil
         }
 
+        // The camera planes stay locked for the whole generation pass so the
+        // per-vertex color sampling reads a stable buffer.
+        var lockedCameraImage: CVPixelBuffer?
+        var yPlane: UnsafePointer<UInt8>?
+        var cbcrPlane: UnsafePointer<UInt8>?
+        var yBytesPerRow = 0
+        var cbcrBytesPerRow = 0
+        var imageWidth = 0
+        var imageHeight = 0
+        if let cameraImage, CVPixelBufferGetPlaneCount(cameraImage) >= 2 {
+            CVPixelBufferLockBaseAddress(cameraImage, .readOnly)
+            if let yBase = CVPixelBufferGetBaseAddressOfPlane(cameraImage, 0),
+               let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(cameraImage, 1) {
+                lockedCameraImage = cameraImage
+                yPlane = UnsafePointer(yBase.assumingMemoryBound(to: UInt8.self))
+                cbcrPlane = UnsafePointer(cbcrBase.assumingMemoryBound(to: UInt8.self))
+                yBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(cameraImage, 0)
+                cbcrBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(cameraImage, 1)
+                imageWidth = CVPixelBufferGetWidth(cameraImage)
+                imageHeight = CVPixelBufferGetHeight(cameraImage)
+            } else {
+                CVPixelBufferUnlockBaseAddress(cameraImage, .readOnly)
+            }
+        }
+        defer {
+            if let lockedCameraImage {
+                CVPixelBufferUnlockBaseAddress(lockedCameraImage, .readOnly)
+            }
+        }
+        let samplesColor = yPlane != nil && cbcrPlane != nil && imageWidth > 0 && imageHeight > 0
+
         return relativeDepthMap.withReadAccess { reader in
             let columns = sampledIndices(length: depthWidth, step: step)
             let rows = sampledIndices(length: depthHeight, step: step)
             guard columns.count > 1, rows.count > 1 else { return nil }
 
             var positions: [SIMD3<Float>] = []
+            var colors: [SIMD3<UInt8>] = []
             var gridIndices = [Int32](repeating: -1, count: rows.count * columns.count)
             var gridDepths = [Float](repeating: .nan, count: rows.count * columns.count)
             positions.reserveCapacity(rows.count * columns.count)
+            if samplesColor {
+                colors.reserveCapacity(rows.count * columns.count)
+            }
 
             for (rowIndex, y) in rows.enumerated() {
                 for (columnIndex, x) in columns.enumerated() {
@@ -172,6 +211,23 @@ nonisolated enum MeshGenerator {
                     gridIndices[gridIndex] = Int32(positions.count)
                     gridDepths[gridIndex] = depth
                     positions.append(SIMD3<Float>(pointWorld.x, pointWorld.y, pointWorld.z))
+
+                    if samplesColor, let yPlane, let cbcrPlane {
+                        colors.append(
+                            PointCloudProcessor.sampleCameraColor(
+                                depthX: x,
+                                depthY: y,
+                                depthWidth: depthWidth,
+                                depthHeight: depthHeight,
+                                imageWidth: imageWidth,
+                                imageHeight: imageHeight,
+                                yPlane: yPlane,
+                                yBytesPerRow: yBytesPerRow,
+                                cbcrPlane: cbcrPlane,
+                                cbcrBytesPerRow: cbcrBytesPerRow
+                            )
+                        )
+                    }
                 }
             }
 
@@ -228,7 +284,8 @@ nonisolated enum MeshGenerator {
             return DepthAnythingMeshSnapshot(
                 descriptor: descriptor,
                 vertices: positions,
-                indices: indices
+                indices: indices,
+                colors: colors
             )
         }
     }
