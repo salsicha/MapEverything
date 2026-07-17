@@ -5,11 +5,11 @@
 
 import Foundation
 
-enum ROS2BridgeTransportKind: String, Codable {
+nonisolated enum ROS2BridgeTransportKind: String, Codable, Sendable {
     case rosbridgeWebSocket = "rosbridge_websocket"
 }
 
-struct ROS2BridgeTransportProfile: Codable, Equatable {
+nonisolated struct ROS2BridgeTransportProfile: Codable, Equatable, Sendable {
     let kind: ROS2BridgeTransportKind
     let displayName: String
     let messageEncoding: String

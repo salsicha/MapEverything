@@ -43,7 +43,7 @@ struct MapEverythingApp: App {
             ContentView()
         }
         .modelContainer(sharedModelContainer)
-        .onChange(of: scenePhase) { phase in
+        .onChange(of: scenePhase) { _, phase in
             // A background termination discards the in-memory write batch;
             // flush it while iOS still allows work.
             if phase == .background {

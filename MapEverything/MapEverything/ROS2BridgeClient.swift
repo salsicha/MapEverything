@@ -44,7 +44,7 @@ class ROS2BridgeClient: ObservableObject {
         static let defaultsKey = "rosbridgePayloadEncoding"
     }
 
-    static let shared = ROS2BridgeClient()
+    nonisolated static let shared = ROS2BridgeClient()
     nonisolated private static let pinningDelegate = RecorderCertificatePinningDelegate()
     nonisolated private static let socketSession = URLSession(
         configuration: .default,
@@ -108,7 +108,7 @@ class ROS2BridgeClient: ObservableObject {
         maxMeshSamples: LocalSampleBufferConfiguration.default.maxMeshSamples
     )
 
-    init(
+    nonisolated init(
         topicRegistry: ROS2TopicRegistry = .shared,
         localBagRecorder: LocalROS2BagRecorder = .shared,
         socketFactory: ROSBridgeSocketFactory? = nil,
@@ -732,7 +732,7 @@ class ROS2BridgeClient: ObservableObject {
         ]
     }
     
-    static func makeCameraInfoMessage(
+    nonisolated static func makeCameraInfoMessage(
         header: [String: Any],
         intrinsics: simd_float3x3,
         imageResolution: CGSize
@@ -786,7 +786,7 @@ class ROS2BridgeClient: ObservableObject {
         )
     }
 
-    func publishImage(
+    nonisolated func publishImage(
         pixelBuffer: CVPixelBuffer,
         intrinsics: simd_float3x3,
         imageResolution: CGSize,
@@ -822,15 +822,15 @@ class ROS2BridgeClient: ObservableObject {
         send(op: "publish", topic: topicRegistry.topic(.cameraInfo), msg: cameraInfo)
     }
     
-    func publishLiDARPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
+    nonisolated func publishLiDARPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
         publishPointCloud(points, topicID: .lidarPointCloud, frameID: FrameID.map, timestamp: timestamp)
     }
 
-    func publishDepthAnythingPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
+    nonisolated func publishDepthAnythingPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
         publishPointCloud(points, topicID: .depthAnythingPointCloud, frameID: FrameID.map, timestamp: timestamp)
     }
 
-    func publishDepthAnythingCalibration(
+    nonisolated func publishDepthAnythingCalibration(
         _ calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
         relativeDepthSize: CGSize,
         imageResolution: CGSize,
@@ -863,11 +863,11 @@ class ROS2BridgeClient: ObservableObject {
         )
     }
 
-    func publishPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
+    nonisolated func publishPointCloud(_ points: [ColoredPoint], timestamp: TimeInterval) {
         publishDepthAnythingPointCloud(points, timestamp: timestamp)
     }
 
-    private func publishPointCloud(
+    nonisolated private func publishPointCloud(
         _ points: [ColoredPoint],
         topicID: ROS2TopicID,
         frameID: String,
@@ -898,7 +898,7 @@ class ROS2BridgeClient: ObservableObject {
         )
     }
 
-    static func makeDepthAnythingCalibrationMessage(
+    nonisolated static func makeDepthAnythingCalibrationMessage(
         calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
         header: [String: Any],
         relativeDepthSize: CGSize,
@@ -947,7 +947,7 @@ class ROS2BridgeClient: ObservableObject {
         ]
     }
 
-    static func makeColoredPointCloudMessage(
+    nonisolated static func makeColoredPointCloudMessage(
         points: [ColoredPoint],
         header: [String: Any]
     ) -> [String: Any] {
@@ -987,7 +987,7 @@ class ROS2BridgeClient: ObservableObject {
         ]
     }
 
-    static func makeSurfelPointCloudMessage(
+    nonisolated static func makeSurfelPointCloudMessage(
         surfels: [ColoredSurfel],
         header: [String: Any]
     ) -> [String: Any] {
@@ -1079,7 +1079,7 @@ class ROS2BridgeClient: ObservableObject {
         )
     }
 
-    func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
+    nonisolated func publishSurfels(_ surfels: [ColoredSurfel], timestamp: TimeInterval) {
         // Surfels remain an internal reconstruction/export format. ROS output
         // uses source-specific /mapping/pointcloud/... PointCloud2 topics.
     }
@@ -1088,7 +1088,7 @@ class ROS2BridgeClient: ObservableObject {
         publishMap(safeMeshes: MeshGenerator.extractSafeMeshes(from: meshAnchors), timestamp: timestamp)
     }
 
-    func publishMap(safeMeshes: [SafeARMesh], timestamp: TimeInterval) {
+    nonisolated func publishMap(safeMeshes: [SafeARMesh], timestamp: TimeInterval) {
         guard topicRegistry.isStreamEnabled(.mesh),
               hasActivePublishTarget || shouldBufferWhileDisconnected,
               !safeMeshes.isEmpty else { return }
@@ -1174,7 +1174,7 @@ class ROS2BridgeClient: ObservableObject {
         publishOrBufferLocalSample(kind: .mesh, topic: snapshotTopic, msg: snapshotMessage)
     }
 
-    private func meshTrianglePoints(for mesh: SafeARMesh, maxPointCount: Int) -> [[String: Float]] {
+    nonisolated private func meshTrianglePoints(for mesh: SafeARMesh, maxPointCount: Int) -> [[String: Float]] {
         let maxFaceCount = min(mesh.indices.count / 3, maxPointCount / 3)
         guard maxFaceCount > 0 else { return [] }
 
@@ -1266,7 +1266,7 @@ class ROS2BridgeClient: ObservableObject {
         return points
     }
 
-    private func fitMeshMarkersToPayloadLimit(
+    nonisolated private func fitMeshMarkersToPayloadLimit(
         _ markers: [[String: Any]],
         topic: String,
         maxPayloadBytes: Int
@@ -1297,7 +1297,7 @@ class ROS2BridgeClient: ObservableObject {
         return fittedMarkers
     }
 
-    private func encodedPublishPayloadByteCount(topic: String, msg: [String: Any]) -> Int? {
+    nonisolated private func encodedPublishPayloadByteCount(topic: String, msg: [String: Any]) -> Int? {
         let payload: [String: Any] = [
             "op": "publish",
             "topic": topic,
@@ -1306,7 +1306,7 @@ class ROS2BridgeClient: ObservableObject {
         return try? JSONSerialization.data(withJSONObject: payload, options: []).count
     }
 
-    private func recordStreamPayloadMetric(
+    nonisolated private func recordStreamPayloadMetric(
         stream: MappingSensorStream,
         originalBytes: Int,
         encodedBytes: Int,

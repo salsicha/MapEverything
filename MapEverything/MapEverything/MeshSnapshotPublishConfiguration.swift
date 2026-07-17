@@ -5,7 +5,7 @@
 
 import Foundation
 
-struct MeshSnapshotPublishConfiguration {
+nonisolated struct MeshSnapshotPublishConfiguration: Sendable {
     let publishInterval: TimeInterval
     let maxPayloadBytes: Int
     let maxTrianglePoints: Int

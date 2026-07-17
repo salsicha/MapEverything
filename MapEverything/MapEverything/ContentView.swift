@@ -140,10 +140,10 @@ struct ContentView: View {
                 syncROSBridgeHostInput()
                 mountARViewAfterStartupPaint()
             }
-            .onChange(of: ros2WebSocketURL) { _ in
+            .onChange(of: ros2WebSocketURL) {
                 syncROSBridgeHostInput()
             }
-            .onChange(of: isScanning) { scanning in
+            .onChange(of: isScanning) { _, scanning in
                 UIApplication.shared.isIdleTimerDisabled = scanning
                 // Paths that clear isScanning without going through the stop
                 // button (e.g. the scan limit) must still end the session, or
@@ -153,7 +153,7 @@ struct ContentView: View {
                     mappingSession.stop()
                 }
             }
-            .onChange(of: ros2Enabled) { enabled in
+            .onChange(of: ros2Enabled) { _, enabled in
                 commitROSBridgeHostInput(reconnectIfActive: false)
                 mappingSession.configure(
                     recorderURL: ros2WebSocketURL,
@@ -359,10 +359,12 @@ struct ContentView: View {
         let exportURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MapEverything-scan.usdz")
 
-        // USDZ export can take seconds on large meshes; keep it off the main thread.
+        // USDZ export can take seconds on large meshes; keep it off the main
+        // thread. The scene is handed off for the duration of the write.
+        let sceneBox = UncheckedSendable(scene)
         Task.detached(priority: .userInitiated) {
             try? FileManager.default.removeItem(at: exportURL)
-            let succeeded = scene.write(to: exportURL, options: nil, delegate: nil, progressHandler: nil)
+            let succeeded = sceneBox.value.write(to: exportURL, options: nil, delegate: nil, progressHandler: nil)
 
             await MainActor.run {
                 isExportingUSDZ = false
@@ -655,7 +657,7 @@ struct ContentView: View {
                         .font(.caption2)
                 }
                 .controlSize(.mini)
-                .onChange(of: cborTransportEnabled) { enabled in
+                .onChange(of: cborTransportEnabled) { _, enabled in
                     UserDefaults.standard.set(
                         enabled ? "cbor" : "json",
                         forKey: "rosbridgePayloadEncoding"
@@ -669,7 +671,7 @@ struct ContentView: View {
                     .padding(6)
                     .background(Color.black.opacity(0.18))
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .onChange(of: rosauthSecretInput) { secret in
+                    .onChange(of: rosauthSecretInput) { _, secret in
                         RosbridgeAuthSecretStore.save(secret.isEmpty ? nil : secret)
                     }
 

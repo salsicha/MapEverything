@@ -5,7 +5,7 @@
 
 import Foundation
 
-struct StreamPayloadMetricSnapshot: Equatable {
+nonisolated struct StreamPayloadMetricSnapshot: Equatable, Sendable {
     let streamID: String
     let messageCount: Int
     let originalBytesTotal: Int
@@ -37,7 +37,7 @@ struct StreamPayloadMetricSnapshot: Equatable {
     }
 }
 
-struct StreamPayloadMetricAccumulator: Equatable {
+nonisolated struct StreamPayloadMetricAccumulator: Equatable, Sendable {
     let streamID: String
     private(set) var messageCount = 0
     private(set) var originalBytesTotal = 0
@@ -85,7 +85,7 @@ struct StreamPayloadMetricAccumulator: Equatable {
     }
 }
 
-final class StreamPayloadMetricsStore {
+nonisolated final class StreamPayloadMetricsStore: @unchecked Sendable {
     static let shared = StreamPayloadMetricsStore()
 
     private let lock = NSLock()

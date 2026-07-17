@@ -5,7 +5,7 @@
 
 import Foundation
 
-enum GeoTileOptionalProviderID: String, CaseIterable, Codable, Hashable {
+nonisolated enum GeoTileOptionalProviderID: String, CaseIterable, Codable, Hashable, Sendable {
     case copernicusDataSpace = "copernicus_data_space"
     case openTopography = "open_topography"
     case usgsEROS = "usgs_eros_earthdata"
@@ -78,7 +78,7 @@ enum GeoTileOptionalProviderID: String, CaseIterable, Codable, Hashable {
     }
 }
 
-struct GeoTileOptionalProviderConfiguration: Codable, Hashable, Identifiable {
+nonisolated struct GeoTileOptionalProviderConfiguration: Codable, Hashable, Identifiable, Sendable {
     let id: GeoTileOptionalProviderID
     var isEnabled: Bool
     var endpointURL: String
@@ -143,7 +143,7 @@ struct GeoTileOptionalProviderConfiguration: Codable, Hashable, Identifiable {
     }
 }
 
-enum GeoTileProviderConfigurationStore {
+nonisolated enum GeoTileProviderConfigurationStore {
     static func load(from userDefaults: UserDefaults = .standard) -> [GeoTileOptionalProviderConfiguration] {
         GeoTileOptionalProviderID.allCases.map { providerID in
             GeoTileOptionalProviderConfiguration(

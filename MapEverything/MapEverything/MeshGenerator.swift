@@ -6,16 +6,16 @@
 
 import Foundation
 import ARKit
-import RealityKit
+@preconcurrency import RealityKit
 
-struct SafeARMesh {
+nonisolated struct SafeARMesh: @unchecked Sendable {
     let identifier: UUID
     let vertices: [SIMD3<Float>]
     let indices: [UInt32]
     let transform: simd_float4x4
 }
 
-enum MeshGenerator {
+nonisolated enum MeshGenerator {
     struct DepthAnythingMeshConfiguration {
         let step: Int
         let minimumDepth: Float
@@ -32,7 +32,7 @@ enum MeshGenerator {
         )
     }
 
-    struct DepthAnythingMeshSnapshot {
+    struct DepthAnythingMeshSnapshot: @unchecked Sendable {
         let descriptor: MeshDescriptor
         let vertices: [SIMD3<Float>]
         let indices: [UInt32]
@@ -269,7 +269,7 @@ enum MeshGenerator {
     }
 
     /// Generates a RealityKit MeshResource from an ARKit ARMeshGeometry
-    static func generateMeshResource(from geometry: ARMeshGeometry) throws -> MeshResource {
+    @MainActor static func generateMeshResource(from geometry: ARMeshGeometry) throws -> MeshResource {
         let desc = createDescriptor(from: geometry)
         return try MeshResource.generate(from: [desc])
     }

@@ -6,7 +6,7 @@
 import Foundation
 import simd
 
-struct MeshSnapshotMessageField: Identifiable, Codable, Hashable {
+nonisolated struct MeshSnapshotMessageField: Identifiable, Codable, Hashable, Sendable {
     let name: String
     let type: String
     let description: String
@@ -24,7 +24,8 @@ struct MeshSnapshotMessageField: Identifiable, Codable, Hashable {
     }
 }
 
-final class MeshSnapshotMessageSchema {
+// Immutable schema description; safe to read from any thread.
+nonisolated final class MeshSnapshotMessageSchema: @unchecked Sendable {
     static let shared = MeshSnapshotMessageSchema()
 
     let messageType = "mapeverything_msgs/msg/MeshSnapshot"
@@ -210,7 +211,7 @@ final class MeshSnapshotMessageSchema {
     ]
 }
 
-enum MeshSnapshotMessageBuilder {
+nonisolated enum MeshSnapshotMessageBuilder {
     static func makeSafeMeshMessage(
         header: [String: Any],
         snapshotID: String,

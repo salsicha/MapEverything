@@ -109,7 +109,7 @@ nonisolated final class ROS2TopicRegistry: @unchecked Sendable {
         definitions
     }
 
-    private static let defaultEnabledStreams: Set<MappingSensorStream> = [
+    nonisolated private static let defaultEnabledStreams: Set<MappingSensorStream> = [
         .pose,
         .camera,
         .pointCloud,
@@ -118,7 +118,7 @@ nonisolated final class ROS2TopicRegistry: @unchecked Sendable {
         .dem
     ]
 
-    private static let defaultDefinitions: [ROS2TopicDefinition] = [
+    nonisolated private static let defaultDefinitions: [ROS2TopicDefinition] = [
         ROS2TopicDefinition(
             id: .pose,
             stream: .pose,

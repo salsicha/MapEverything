@@ -6,7 +6,7 @@
 import Combine
 import Foundation
 
-struct RecorderEndpointProbeSample: Equatable {
+nonisolated struct RecorderEndpointProbeSample: Equatable, Sendable {
     let recorderURL: String
     let roundTripTimeMilliseconds: Double
     let throughputBytesPerSecond: Double
@@ -32,6 +32,7 @@ struct RecorderEndpointProbeSample: Equatable {
     }
 }
 
+@MainActor
 final class RecorderEndpointProbeManager: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     struct Configuration {
         let probeInterval: TimeInterval
@@ -204,30 +205,34 @@ final class RecorderEndpointProbeManager: NSObject, ObservableObject, URLSession
 
     // Fail fast on refused connections and handshake errors instead of
     // waiting for the probe timeout.
-    func urlSession(
+    nonisolated func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
         guard let error else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  let probeID = self.activeProbeID,
-                  task === self.activeTask else { return }
-            self.failProbeIfActive(probeID, message: "Recorder endpoint probe failed: \(error.localizedDescription)")
+            MainActor.assumeIsolated {
+                guard let self,
+                      let probeID = self.activeProbeID,
+                      task === self.activeTask else { return }
+                self.failProbeIfActive(probeID, message: "Recorder endpoint probe failed: \(error.localizedDescription)")
+            }
         }
     }
 
-    func urlSession(
+    nonisolated func urlSession(
         _ session: URLSession,
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol protocolName: String?
     ) {
         DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  let probeID = self.activeProbeID,
-                  webSocketTask === self.activeTask else { return }
-            self.sendPing(task: webSocketTask, probeID: probeID)
+            MainActor.assumeIsolated {
+                guard let self,
+                      let probeID = self.activeProbeID,
+                      webSocketTask === self.activeTask else { return }
+                self.sendPing(task: webSocketTask, probeID: probeID)
+            }
         }
     }
 
@@ -398,13 +403,15 @@ final class RecorderEndpointProbeManager: NSObject, ObservableObject, URLSession
         payload: Data,
         task: URLSessionWebSocketTask,
         probeID: UUID,
-        completion: @escaping (Error?) -> Void
+        completion: @escaping @MainActor (Error?) -> Void
     ) {
         guard activeProbeID == probeID else { return }
 
         task.send(.data(payload)) { error in
             DispatchQueue.main.async {
-                completion(error)
+                MainActor.assumeIsolated {
+                    completion(error)
+                }
             }
         }
     }

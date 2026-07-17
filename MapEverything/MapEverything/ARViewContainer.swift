@@ -146,12 +146,12 @@ protocol ARViewControllerDelegate: AnyObject {
 }
 
 class ARViewController: UIViewController, ARSessionDelegate {
-    private struct SurfelPreviewMesh {
+    nonisolated private struct SurfelPreviewMesh: @unchecked Sendable {
         let descriptor: MeshDescriptor
         let colorAtlas: CGImage
     }
 
-    private struct DepthAnythingMappingFrame {
+    nonisolated private struct DepthAnythingMappingFrame: @unchecked Sendable {
         let calibratedPoints: [ColoredPoint]
         let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
         let relativeDepthSize: CGSize
@@ -183,7 +183,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private let pointManager = PointCloudManager()
     private let surfelMap = ColoredSurfelMap()
     private let pointCloudProcessor = PointCloudProcessor()
-    private var depthAnythingProcessor: DepthAnythingProcessor?
+    // Written once by the preload task before scanning starts.
+    nonisolated(unsafe) private var depthAnythingProcessor: DepthAnythingProcessor?
     private let depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
     private var depthAnythingPreloadTask: Task<Void, Never>?
     private var lastEnhancedFrameTime: TimeInterval = 0
@@ -264,7 +265,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
     deinit {
         depthAnythingPreloadTask?.cancel()
         finalPointCloudArtifactTask?.cancel()
-        arView?.session.pause()
+        // The AR session is paused by the stop flow / view teardown; touching
+        // the MainActor-isolated ARView from deinit is not allowed.
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -361,9 +363,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 return
             }
 
+            let worldMapBox = UncheckedSendable(worldMap)
             Task.detached(priority: .utility) { [weak self] in
                 do {
-                    let data = try NSKeyedArchiver.archivedData(withRootObject: worldMap, requiringSecureCoding: true)
+                    let data = try NSKeyedArchiver.archivedData(withRootObject: worldMapBox.value, requiringSecureCoding: true)
                     try data.write(to: fileURL, options: [.atomic])
                 } catch {
                     await MainActor.run {
@@ -750,7 +753,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         return true
     }
 
-    private func processDepthAnythingMappingFrame(
+    nonisolated private func processDepthAnythingMappingFrame(
         timestamp: TimeInterval,
         cameraImage: CVPixelBuffer,
         lidarDepthMap: CVPixelBuffer,
@@ -1091,14 +1094,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
         if shouldPublishCameraImage {
             lastCameraImagePublishTime = timestamp
             isPublishingCameraImage = true
-            Task.detached(priority: .utility) { [weak self, cameraImage, intrinsics, imageResolution, timestamp] in
+            let cameraImageBox = UncheckedSendable(cameraImage)
+            Task.detached(priority: .utility) { [weak self, intrinsics, imageResolution, timestamp] in
                 defer {
-                    Task { @MainActor in
+                    Task { @MainActor [weak self] in
                         self?.isPublishingCameraImage = false
                     }
                 }
                 ROS2BridgeClient.shared.publishImage(
-                    pixelBuffer: cameraImage,
+                    pixelBuffer: cameraImageBox.value,
                     intrinsics: intrinsics,
                     imageResolution: imageResolution,
                     timestamp: timestamp
@@ -1106,8 +1110,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
             }
         }
 
+        let cameraImageBox = UncheckedSendable(cameraImage)
+        let lidarDepthMapBox = UncheckedSendable(lidarDepthMap)
+        let lidarConfidenceMapBox = UncheckedSendable(lidarConfidenceMap)
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
+            let cameraImage = cameraImageBox.value
+            let lidarDepthMap = lidarDepthMapBox.value
+            let lidarConfidenceMap = lidarConfidenceMapBox.value
 
             let mappingFrame: DepthAnythingMappingFrame?
             if shouldUseDepthAnythingDepth {
