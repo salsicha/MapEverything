@@ -114,7 +114,7 @@ struct MappingSessionHistoryDetailView: View {
                     .onSubmit {
                         saveNotes()
                     }
-                    .onChange(of: session.notes) { _ in
+                    .onChange(of: session.notes) { _, _ in
                         saveNotes()
                     }
             }

@@ -23,8 +23,16 @@ PROJECT = ROOT / "MapEverything" / "MapEverything.xcodeproj"
 PBXPROJ = PROJECT / "project.pbxproj"
 INFO_PLIST = ROOT / "MapEverything" / "MapEverything" / "Info.plist"
 ENTITLEMENTS = ROOT / "MapEverything" / "MapEverything" / "MapEverything.entitlements"
+PRIVACY_MANIFEST = ROOT / "MapEverything" / "MapEverything" / "PrivacyInfo.xcprivacy"
 ASSETS = ROOT / "MapEverything" / "MapEverything" / "Assets.xcassets"
 EXPORT_OPTIONS = ROOT / "tools" / "app-store-export-options.plist"
+
+EXPECTED_PRIVACY_REASONS = {
+    "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
+    "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
+    "NSPrivacyAccessedAPICategorySystemBootTime": {"35F9.1"},
+    "NSPrivacyAccessedAPICategoryDiskSpace": {"E174.1"},
+}
 
 REQUIRED_USAGE_STRINGS = {
     "NSCameraUsageDescription": "camera and AR capture",
@@ -34,6 +42,9 @@ REQUIRED_USAGE_STRINGS = {
 }
 
 REQUIRED_DOCS = [
+    "PRIVACY.md",
+    "SUPPORT.md",
+    "docs/app-store-metadata.md",
     "docs/app-store-publishing-plan.md",
     "docs/validation-plan.md",
     "docs/geospatial-provider-decision.md",
@@ -143,6 +154,38 @@ def collect_checks() -> list[Check]:
     else:
         add(checks, "WARN", "entitlements", "Wi-Fi info entitlement", "Confirm entitlement is approved or disable current Wi-Fi telemetry for App Store release")
 
+    if PRIVACY_MANIFEST.exists():
+        privacy_manifest = read_plist(PRIVACY_MANIFEST)
+        add(checks, "PASS", "privacy", "Privacy manifest", "Found PrivacyInfo.xcprivacy")
+    else:
+        privacy_manifest = {}
+        add(checks, "FAIL", "privacy", "Privacy manifest", "Missing PrivacyInfo.xcprivacy")
+
+    if privacy_manifest.get("NSPrivacyTracking") is False:
+        add(checks, "PASS", "privacy", "Privacy manifest tracking", "Tracking is disabled")
+    else:
+        add(checks, "FAIL", "privacy", "Privacy manifest tracking", "NSPrivacyTracking must be false")
+
+    if privacy_manifest.get("NSPrivacyCollectedDataTypes") == []:
+        add(checks, "PASS", "privacy", "Privacy manifest collection", "No developer-collected data types are declared")
+    else:
+        add(checks, "FAIL", "privacy", "Privacy manifest collection", "Expected an empty NSPrivacyCollectedDataTypes array")
+
+    actual_privacy_reasons = {
+        entry.get("NSPrivacyAccessedAPIType"): set(entry.get("NSPrivacyAccessedAPITypeReasons", []))
+        for entry in privacy_manifest.get("NSPrivacyAccessedAPITypes", [])
+    }
+    if actual_privacy_reasons == EXPECTED_PRIVACY_REASONS:
+        add(checks, "PASS", "privacy", "Required-reason APIs", "All four expected API categories and reasons are declared")
+    else:
+        add(
+            checks,
+            "FAIL",
+            "privacy",
+            "Required-reason APIs",
+            f"Expected {EXPECTED_PRIVACY_REASONS}, found {actual_privacy_reasons}",
+        )
+
     check_file_exists(checks, ASSETS / "AppIcon.appiconset" / "MapEverythingAppIcon.png", "assets", "App icon")
     check_file_exists(checks, ASSETS / "MapEverythingLogo.imageset" / "MapEverythingLogo.png", "assets", "Launch logo")
 
@@ -191,9 +234,6 @@ def collect_checks() -> list[Check]:
     else:
         add(checks, "WARN", "compatibility", "iOS deployment target", "No IPHONEOS_DEPLOYMENT_TARGET found")
 
-    if not list(ROOT.glob("**/PrivacyInfo.xcprivacy")):
-        add(checks, "WARN", "privacy", "Privacy manifest", "No PrivacyInfo.xcprivacy found; confirm whether required-reason APIs or third-party SDKs require one")
-
     account_side_items = [
         ("Privacy policy URL", "Add a live privacy policy URL in App Store Connect"),
         ("Privacy labels", "Declare camera/depth, location, BLE/Wi-Fi, diagnostics, local storage, and optional provider data practices"),
@@ -217,12 +257,12 @@ def archive_commands() -> list[str]:
         "-scheme MapEverything "
         "-configuration Release "
         "-destination generic/platform=iOS "
-        "-archivePath build/AppStore/MapEverything.xcarchive "
+        "-archivePath build/AppStore/MapEverything-1.0-2.xcarchive "
         "-allowProvisioningUpdates",
         "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -exportArchive "
-        "-archivePath build/AppStore/MapEverything.xcarchive "
+        "-archivePath build/AppStore/MapEverything-1.0-2.xcarchive "
         "-exportOptionsPlist tools/app-store-export-options.plist "
-        "-exportPath build/AppStore",
+        "-exportPath build/AppStore/1.0-2",
     ]
 
 

@@ -871,8 +871,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
             do {
                 guard let previewMesh = Self.makeSurfelPreviewMesh(from: displayedSurfels) else { return }
                 let resource = try await MeshResource(from: [previewMesh.descriptor])
-                let texture = try TextureResource.generate(
-                    from: previewMesh.colorAtlas,
+                let texture = try await TextureResource(
+                    image: previewMesh.colorAtlas,
                     options: TextureResource.CreateOptions(semantic: .color, mipmapsMode: .none)
                 )
                 var material = UnlitMaterial()

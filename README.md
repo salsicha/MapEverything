@@ -4,7 +4,7 @@
   <img src="MapEverything/MapEverything/Assets.xcassets/MapEverythingLogo.imageset/MapEverythingLogo.png" alt="MapEverything logo" width="180">
 </p>
 
-![iOS](https://img.shields.io/badge/iOS-17.0+-blue.svg?style=for-the-badge&logo=apple)
+![iOS](https://img.shields.io/badge/iOS-26.4+-blue.svg?style=for-the-badge&logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange.svg?style=for-the-badge&logo=swift)
 ![ARKit](https://img.shields.io/badge/ARKit-LiDAR-black.svg?style=for-the-badge&logo=arkit)
 ![ROS2](https://img.shields.io/badge/ROS2-Humble%2FIron-green.svg?style=for-the-badge&logo=ros)
@@ -67,7 +67,7 @@ Local bag storage is off by default and controlled from the main recording surfa
 ## 🛠️ Step-by-Step Operator Guide
 
 ### Core App Setup
-1. Download, build, and run the app from **Xcode 15+** on a LiDAR-equipped iOS device (e.g., iPhone 12 Pro or newer, iPad Pro 2020 or newer).
+1. Download, build, and run the app from **Xcode 26.4 or later** on a LiDAR-equipped iOS device (e.g., iPhone 12 Pro or newer, iPad Pro 2020 or newer).
 2. Authorize **Camera Permissions** on launch.
 3. Enter the recorder workstation address in the **ROS bridge IP** field. The app builds a `ws://<host>:9090` rosbridge URL unless you enter a full WebSocket URL.
 4. Toggle **ROS** on when publishing to a remote rosbridge recorder. Leave it off when using only local SQLite bag capture.

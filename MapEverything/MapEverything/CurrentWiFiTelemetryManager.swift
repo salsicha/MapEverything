@@ -223,25 +223,36 @@ final class CurrentWiFiTelemetryManager: NSObject, ObservableObject, CLLocationM
         lastError = "Current Wi-Fi telemetry is unavailable in the iOS Simulator."
         #else
         NEHotspotNetwork.fetchCurrent { [weak self] network in
+            let networkSnapshot = network.map {
+                (
+                    ssid: $0.ssid,
+                    bssid: $0.bssid,
+                    signalStrength: $0.signalStrength,
+                    isSecure: $0.isSecure,
+                    didAutoJoin: $0.didAutoJoin,
+                    didJustJoin: $0.didJustJoin
+                )
+            }
+
             DispatchQueue.main.async {
                 guard let self else { return }
 
                 let timestamp = Date()
                 self.lastFetchAt = timestamp
 
-                guard let network else {
+                guard let networkSnapshot else {
                     self.lastSample = nil
                     self.lastError = "No current Wi-Fi network was reported by iOS."
                     return
                 }
 
                 self.lastSample = CurrentWiFiTelemetrySample(
-                    ssid: network.ssid,
-                    bssid: network.bssid,
-                    signalStrength: network.signalStrength,
-                    isSecure: network.isSecure,
-                    didAutoJoin: network.didAutoJoin,
-                    didJustJoin: network.didJustJoin,
+                    ssid: networkSnapshot.ssid,
+                    bssid: networkSnapshot.bssid,
+                    signalStrength: networkSnapshot.signalStrength,
+                    isSecure: networkSnapshot.isSecure,
+                    didAutoJoin: networkSnapshot.didAutoJoin,
+                    didJustJoin: networkSnapshot.didJustJoin,
                     timestamp: timestamp
                 )
                 self.lastError = nil

@@ -2,32 +2,39 @@
 
 This plan turns MapEverything from local developer builds into a reviewable App Store release while preserving the robotics workflow: a LiDAR iPhone or iPad publishes `/mapping/...` ROS2 topics to an external recorder, with optional local SQLite bag fallback.
 
-## Release Status — 2026-07-16
+## Release Status — 2026-08-15
 
-Everything that can be completed from the repository is done. `tools/app-store-release-check.py` reports **30 pass, 0 fail**; the remaining warnings are App Store Connect account work listed under "Your remaining steps" below.
+Repository-side preparation targets version `1.0` build `2`. The readiness
+checker, Release build, full unit-test target, dry-run recorder/throughput
+tools, and fresh archive all pass with Xcode 26.6. The release archive is at
+`build/AppStore/MapEverything-1.0-2.xcarchive`; detailed evidence is recorded
+in `docs/release-validation-1.0-2.md`. It has not been exported or uploaded.
 
 ### Completed in the repository
 
 - Info.plist release metadata: display name, all privacy usage strings (camera, location when-in-use plus temporary precise-location purpose, Bluetooth, local network), portrait-only iPhone, launch screen, app icon.
-- **Privacy manifest** (`MapEverything/MapEverything/PrivacyInfo.xcprivacy`): declares no tracking and no developer data collection, and the three required-reason API categories the app actually uses — UserDefaults (CA92.1), file timestamps of its own bag files (C617.1), and system boot time for ROS header timestamps (35F9.1).
+- **Privacy manifest** (`MapEverything/MapEverything/PrivacyInfo.xcprivacy`): declares no tracking and no developer data collection, and the four required-reason API categories the app actually uses — UserDefaults (CA92.1), file timestamps of its own bag files (C617.1), system boot time for ROS header timestamps (35F9.1), and disk-space checks for the local bag store (E174.1).
 - **Export compliance key**: `ITSAppUsesNonExemptEncryption = false`. The app uses only Apple's standard TLS (HTTPS tile fetches, optional `wss://`) and no custom cryptography, which is exempt. This suppresses the per-build encryption questionnaire. Revisit if custom cryptography is ever added.
 - **Device requirements**: `UIRequiredDeviceCapabilities` now includes `arkit` so the App Store only offers the app to ARKit-capable devices. LiDAR itself has no capability key — state it in the description and review notes (the app already degrades gracefully without LiDAR).
-- Signing configuration: automatic signing, team `4D5JPBFXSA`, bundle `com.salsicha.MapEverything`, version `1.0` build `1`.
-- Full unit-test suite green (47/47) and a clean Release archive built at `build/AppStore/MapEverything.xcarchive` (signed with the local *Apple Development* identity; the upload step re-signs with *Apple Distribution* automatically).
+- Signing configuration: automatic signing, team `4D5JPBFXSA`, bundle `com.salsicha.MapEverything`, version `1.0` build `2`.
+- Public privacy policy, support copy, and App Store field values live in `PRIVACY.md`, `SUPPORT.md`, and `docs/app-store-metadata.md`.
+- The historical build `1` archive must not be uploaded. The current local candidate is `build/AppStore/MapEverything-1.0-2.xcarchive`.
+- Local release verification completed on 2026-08-15: 37 readiness checks passed with 0 failures, the Release build passed, the full `MapEverythingTests` target passed, and the build `2` archive passed inspection.
 - Note: the iOS 26.4 deployment target is intentional — every LiDAR-equipped device runs iOS 26.
 
 ### Your remaining steps (in order)
 
-Each step below requires your Apple ID, your App Store Connect account, or a real device — none can be done from the repository.
+Each step below requires your Apple ID, your App Store Connect account, a public GitHub push, or a real device — none should be performed as an unapproved local-only repository action.
 
 1. **Apple Developer Program**: confirm team `4D5JPBFXSA` has an active membership and that the latest agreements are accepted (App Store Connect → Business). A free account cannot upload to App Store Connect.
 2. **Sign into Xcode**: Xcode → Settings → Accounts → add your Apple ID. Your keychain currently has only an *Apple Development* certificate; the first Distribute/upload will create the *Apple Distribution* certificate automatically.
-3. **Create the app record**: App Store Connect → My Apps → "+" → New App. Platform iOS, bundle ID `com.salsicha.MapEverything`, SKU e.g. `mapeverything-001`, primary language English. The public App Store name must be unique — "Mapping" is almost certainly taken, so have alternates ready (e.g. "MapEverything", "MapEverything ROS2 Mapper"). The on-device name stays "Mapping" regardless (CFBundleDisplayName).
-4. **Host two URLs** (GitHub Pages on this repo works fine):
-   - *Privacy policy URL*: state that the developer collects no data; sensor data (camera, depth, location, radio telemetry) is published only to a recorder the user configures on their own network and/or stored on device under user control; tile requests send location-derived tile coordinates to the public imagery/DEM providers (NASA GIBS, USGS 3DEP, Mapzen/AWS); no ads, no tracking, no third-party analytics.
-   - *Support URL*: the GitHub repo or an issues/contact page.
+3. **Create the app record**: App Store Connect → My Apps → "+" → New App. Platform iOS, name `MapEverything ROS2 Mapper`, bundle ID `com.salsicha.MapEverything`, SKU `mapeverything-001`, primary language English (U.S.), and Full Access. If the primary name is unavailable, use `MapEverything LiDAR Mapper`. The on-device name stays "Mapping" regardless (CFBundleDisplayName).
+4. **Publish and verify the two checked-in URLs** after pushing the release commit:
+   - *Privacy policy URL*: `https://github.com/salsicha/MapEverything/blob/main/PRIVACY.md`
+   - *Support URL*: `https://github.com/salsicha/MapEverything/blob/main/SUPPORT.md`
+   Open both in a signed-out browser before entering them in App Store Connect.
 5. **Upload the build**: open Xcode → Window → Organizer → select the archive (or re-archive with the command in "Release Flow" step 4) → Distribute App → App Store Connect → Upload. Command-line alternative:
-   `xcodebuild -exportArchive -archivePath build/AppStore/MapEverything.xcarchive -exportOptionsPlist tools/app-store-export-options.plist -exportPath build/AppStore`
+   `xcodebuild -exportArchive -archivePath build/AppStore/MapEverything-1.0-2.xcarchive -exportOptionsPlist tools/app-store-export-options.plist -exportPath build/AppStore/1.0-2`
    Wait for App Store Connect to finish processing (email arrives when done).
 6. **Privacy labels** (App Store Connect → App Privacy): recommended declaration — *Location* → "App Functionality", not linked to identity, not used for tracking (because tile requests reveal coarse location to public providers). Everything else (camera frames, depth, radio telemetry) never leaves the user's own devices/network, so it is not "collected" in Apple's sense. Answer "no" to tracking.
 7. **Age rating**: complete the questionnaire (expect 4+).
@@ -40,6 +47,7 @@ Each step below requires your Apple ID, your App Store Connect account, or a rea
 
 - App Store display name: `Mapping`.
 - Internal product and repository name: `MapEverything`.
+- Release candidate: version `1.0` build `2`.
 - Bundle identifier: `com.salsicha.MapEverything`.
 - Distribution channels: local developer builds first, then TestFlight, then App Store. GitHub releases carry source artifacts for the ROS2 companion package, RViz config, validation notes, and recorder scripts.
 - Required hardware for meaningful validation: a LiDAR-equipped iPhone or iPad Pro, a ROS2 recorder workstation, and a shared local network for rosbridge.
@@ -109,7 +117,7 @@ It uses the current `xcodebuild` `app-store-connect` export method and `upload` 
   -scheme MapEverything \
   -configuration Release \
   -destination generic/platform=iOS \
-  -archivePath build/AppStore/MapEverything.xcarchive \
+  -archivePath build/AppStore/MapEverything-1.0-2.xcarchive \
   -allowProvisioningUpdates
 ```
 
@@ -118,9 +126,9 @@ It uses the current `xcodebuild` `app-store-connect` export method and `upload` 
 
 ```bash
 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -exportArchive \
-  -archivePath build/AppStore/MapEverything.xcarchive \
+  -archivePath build/AppStore/MapEverything-1.0-2.xcarchive \
   -exportOptionsPlist tools/app-store-export-options.plist \
-  -exportPath build/AppStore
+  -exportPath build/AppStore/1.0-2
 ```
 
 6. TestFlight.
@@ -130,11 +138,12 @@ It uses the current `xcodebuild` `app-store-connect` export method and `upload` 
    - Include beta review notes that explain required LiDAR hardware, ROS bridge setup, local network behavior, and optional local SQLite bag fallback.
 
 7. App Store Connect metadata.
-   - App name: `Mapping`.
-   - Subtitle: `ROS2 mapping payload`.
-   - Category: choose the final primary category in App Store Connect after reviewing competing robotics, developer, and productivity tools.
+   - App name: `MapEverything ROS2 Mapper` (fallback: `MapEverything LiDAR Mapper`).
+   - Subtitle: `LiDAR mapping for ROS2`.
+   - Primary category: Developer Tools. Secondary category: Utilities.
    - Description should state that the app is for field mapping with LiDAR-capable devices and a ROS2 recorder, not a consumer navigation or surveying replacement.
    - Screenshots should show the record screen, ROS bridge panel, local bag browser/share flow, RViz replay, and App Store privacy-relevant permission prompts.
+   - Copy every product, privacy, age-rating, TestFlight, and review field from `docs/app-store-metadata.md`.
    - Support URL and privacy policy URL must be live before review.
 
 8. Privacy and compliance.
