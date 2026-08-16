@@ -118,9 +118,12 @@ struct ContentView: View {
                 }
 
                 mapperStartupOverlay
-                stoppedMapInspectionOverlay
                 rosPublishingPanel
                 topControlsOverlay
+                // Presented above the top controls so the preview's close
+                // button stays tappable — otherwise the Recorder panel's
+                // "Advanced" disclosure draws over it and swallows the tap.
+                stoppedMapInspectionOverlay
             }
             .navigationBarHidden(true)
             .alert("AR Session Error", isPresented: Binding<Bool>(
