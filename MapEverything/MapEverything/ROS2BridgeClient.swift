@@ -269,6 +269,9 @@ class ROS2BridgeClient: ObservableObject {
 
     func disconnect(after delay: TimeInterval = 0) {
         stopSessionPublishers()
+        // A new scan may connect before the delayed close runs. Discard the
+        // previous scan's replay buffer now, even if that close is superseded.
+        clearBufferedLocalSamples()
 
         // Cancel any pending auto-reconnect immediately; if it fired inside
         // the delay window it would bump the generation and void this
@@ -410,16 +413,15 @@ class ROS2BridgeClient: ObservableObject {
         // is what the local bag records regardless of the wire encoding.
         guard let jsonData = encodeRosbridgePayload(payload, topic: topic) else { return }
 
-        if op == "publish", let msg {
-            recordLocalBagPublish(topic: topic, msg: msg, encodedData: jsonData)
-        }
+        let encodedWireData = wireData(payload: payload, jsonData: jsonData)
+        ScanWorkSession.commitPublication {
+            if op == "publish", let msg {
+                recordLocalBagPublish(topic: topic, msg: msg, encodedData: jsonData)
+            }
 
-        if isConnectedForPublishing {
-            publishQueue.enqueueEncodedPayload(
-                wireData(payload: payload, jsonData: jsonData),
-                op: op,
-                topic: topic
-            )
+            if isConnectedForPublishing {
+                publishQueue.enqueueEncodedPayload(encodedWireData, op: op, topic: topic)
+            }
         }
     }
 
@@ -442,13 +444,14 @@ class ROS2BridgeClient: ObservableObject {
         ]
 
         guard let jsonData = encodeRosbridgePayload(payload, topic: topic) else { return }
-        recordLocalBagPublish(topic: topic, msg: msg, encodedData: jsonData)
-
         let wireData = wireData(payload: payload, jsonData: jsonData)
-        if isConnectedForPublishing {
-            publishQueue.enqueueEncodedPayload(wireData, op: "publish", topic: topic)
-        } else if shouldBufferWhileDisconnected {
-            bufferLocalSample(kind: kind, topic: topic, data: wireData)
+        ScanWorkSession.commitPublication {
+            recordLocalBagPublish(topic: topic, msg: msg, encodedData: jsonData)
+            if isConnectedForPublishing {
+                publishQueue.enqueueEncodedPayload(wireData, op: "publish", topic: topic)
+            } else if shouldBufferWhileDisconnected {
+                bufferLocalSample(kind: kind, topic: topic, data: wireData)
+            }
         }
     }
 

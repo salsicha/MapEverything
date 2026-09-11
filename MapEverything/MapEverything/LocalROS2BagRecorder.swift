@@ -1152,7 +1152,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         formatter.dateFormat = "yyyyMMdd_HHmmss"
 
         let sessionSuffix = sessionID?.uuidString.prefix(8).lowercased() ?? UUID().uuidString.prefix(8).lowercased()
-        return "mapeverything_\(formatter.string(from: date))_\(sessionSuffix)"
+        // A session can toggle local recording several times within a second.
+        // Each segment needs fresh tables and IDs, even for the same session.
+        return "mapeverything_\(formatter.string(from: date))_\(sessionSuffix)_\(UUID().uuidString.lowercased())"
     }
 
     private func resetBagState() {
@@ -1210,10 +1212,15 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     private func closeCurrentBag(writeMetadata: Bool) {
-        do {
-            try flushPendingWrites(publishStatsAfterFlush: false)
-        } catch {
-            noteError("Failed to flush local rosbag: \(error.localizedDescription)")
+        // Stop/start must drain a retained batch too; closing after the first
+        // transient failure would defeat recovery at the session boundary.
+        for _ in 0..<Self.maxConsecutiveFlushFailures {
+            do {
+                try flushPendingWrites(publishStatsAfterFlush: false)
+                break
+            } catch {
+                noteError("Failed to flush local rosbag: \(error.localizedDescription)")
+            }
         }
         finalizeCurrentChunk()
         closeDatabase()
@@ -1295,6 +1302,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         let writes = pendingWrites
         pendingWrites.removeAll()
         pendingWriteBytes = 0
+        var committedWriteCount = 0
 
         var transactionOpen = false
         var messageStatement: OpaquePointer?
@@ -1342,6 +1350,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             }
             topicsInsertedInCurrentChunk.formUnion(txInsertedTopics)
             nextMessageID = txNextMessageID
+            committedWriteCount += txMessageCount
 
             txMessageCount = 0
             txBytes = 0
@@ -1414,6 +1423,10 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             }
         } catch {
             rollbackTransaction()
+            // Chunk rotation may have committed a prefix of this batch. Only
+            // replay the uncommitted suffix, otherwise records are duplicated.
+            pendingWrites = Array(writes.dropFirst(committedWriteCount)) + pendingWrites
+            pendingWriteBytes = pendingWrites.reduce(0) { $0 + $1.data.count }
             throw error
         }
     }
@@ -1623,6 +1636,11 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             return
         }
         noteError(message)
+        // Retry even if no more sensor samples arrive. The consecutive-failure
+        // limit bounds retries and stops recording on a persistent error.
+        if acceptsRecords, !pendingWrites.isEmpty {
+            schedulePendingFlush()
+        }
     }
 
     private func recordFailure(_ message: String) {

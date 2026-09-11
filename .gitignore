@@ -3,6 +3,6 @@ ros2/build/
 ros2/install/
 ros2/log/
 graphify-out/
-tools/__pycache__/
+__pycache__/
 build/
 bags/

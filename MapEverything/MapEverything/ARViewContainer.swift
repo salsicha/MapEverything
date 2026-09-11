@@ -165,10 +165,25 @@ class ARViewController: UIViewController, ARSessionDelegate {
         didSet {
             if oldValue != isScanning {
                 if isScanning {
+                    cancelFrameWork()
+                    scanWorkSession = ScanWorkSession()
+                    // Old tasks retain their own actors/cache, so a suspended
+                    // mutation cannot repopulate the next scan's map.
+                    pointManager = PointCloudManager()
+                    surfelMap = ColoredSurfelMap()
+                    depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
+                    let pointManager = pointManager
+                    let surfelMap = surfelMap
+                    let voxelSize = voxelSize
+                    Task {
+                        await pointManager.setVoxelSize(voxelSize)
+                        await surfelMap.configure(voxelSize: max(0.02, voxelSize * 0.8))
+                    }
                     delegate?.didUpdateStoppedInspectionScene(nil)
                     depthAnythingCalibrationCache.reset()
                     resumeWorldTrackingSession()
                 } else {
+                    cancelFrameWork()
                     saveWorldMapIfEnabled()
                     saveFinalRecordingArtifacts()
                     ROS2BridgeClient.shared.clearDepthMeshMarker(
@@ -183,12 +198,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
             }
         }
     }
-    private let pointManager = PointCloudManager()
-    private let surfelMap = ColoredSurfelMap()
+    private var pointManager = PointCloudManager()
+    private var surfelMap = ColoredSurfelMap()
     private let pointCloudProcessor = PointCloudProcessor()
     // Written once by the preload task before scanning starts.
     nonisolated(unsafe) private var depthAnythingProcessor: DepthAnythingProcessor?
-    private let depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
+    private var depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
     private var depthAnythingPreloadTask: Task<Void, Never>?
     private var lastEnhancedFrameTime: TimeInterval = 0
     private let enhancedFrameInterval: TimeInterval = 0.5 // Run Depth Anything at ~2 fps
@@ -207,9 +222,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var lastSurfelVisualizationTime: TimeInterval = 0
     private var isProcessingFrame = false
     private var cumulativePointCount = 0
-    // Bumped on scan restart so in-flight frame tasks from the previous scan
-    // cannot write pre-reset voxels into the freshly cleared map.
-    private var scanGeneration = 0
+    private var scanWorkSession = ScanWorkSession()
+    private var frameProcessingTask: Task<Void, Never>?
+    private var cameraImageTask: Task<Void, Never>?
+    private var mapPublishTask: Task<Void, Never>?
     var maxPointLimit: Int = 2_000_000
     var boundingBoxSize: Float = 20.0
     var voxelSize: Float = 0.05 {
@@ -266,6 +282,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
     
     deinit {
+        scanWorkSession.cancel()
+        frameProcessingTask?.cancel()
+        cameraImageTask?.cancel()
+        mapPublishTask?.cancel()
         depthAnythingPreloadTask?.cancel()
         finalPointCloudArtifactTask?.cancel()
         // The AR session is paused by the stop flow / view teardown; touching
@@ -274,7 +294,25 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     @objc private func handleWillStopMapping() {
+        // This notification also precedes a recorder restart while AR tracking
+        // stays active (for example, toggling remote streaming).
+        cancelFrameWork()
         saveFinalRecordingArtifacts()
+    }
+
+    private func cancelFrameWork() {
+        scanWorkSession.cancel()
+        frameProcessingTask?.cancel()
+        cameraImageTask?.cancel()
+        mapPublishTask?.cancel()
+        liveSurfelUpdateTask?.cancel()
+        liveDepthMeshUpdateTask?.cancel()
+        frameProcessingTask = nil
+        cameraImageTask = nil
+        mapPublishTask = nil
+        isProcessingFrame = false
+        isPublishingCameraImage = false
+        isRunningEnhancedInference = false
     }
     
     private func setupViews() {
@@ -337,8 +375,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
         depthAnythingCalibrationCache.reset()
         cumulativePointCount = 0
-        scanGeneration += 1
-        Task { await pointManager.clear() }
         clearLiveMeshEntities()
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         updateVisualizationMode(currentMode)
@@ -797,13 +833,16 @@ class ARViewController: UIViewController, ARSessionDelegate {
         intrinsics: simd_float3x3,
         imageResolution: CGSize,
         transform: simd_float4x4,
+        workSession: ScanWorkSession,
+        calibrationCache: DepthAnythingCalibrationCache,
         shouldBuildMesh: Bool
     ) async -> DepthAnythingMappingFrame? {
         // Rate-limit so the model only runs at ~enhancedFrameInterval. A skipped
         // frame leaves the current Depth Anything mesh in place instead of falling
         // back to LiDAR-derived visual mapping.
         let canRun: Bool = await MainActor.run {
-            guard timestamp - lastEnhancedFrameTime >= enhancedFrameInterval,
+            guard workSession.isActive, isScanning,
+                  timestamp - lastEnhancedFrameTime >= enhancedFrameInterval,
                   !isRunningEnhancedInference else { return false }
             lastEnhancedFrameTime = timestamp
             isRunningEnhancedInference = true
@@ -812,13 +851,17 @@ class ARViewController: UIViewController, ARSessionDelegate {
         guard canRun else { return nil }
 
         defer {
-            Task { @MainActor in self.isRunningEnhancedInference = false }
+            Task { @MainActor in
+                guard self.scanWorkSession === workSession else { return }
+                self.isRunningEnhancedInference = false
+            }
         }
 
         guard let processor = depthAnythingProcessor else { return nil }
 
         guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
-        guard let calibration = depthAnythingCalibrationCache.calibration(
+        guard workSession.isActive, !Task.isCancelled else { return nil }
+        guard let calibration = calibrationCache.calibration(
             relative: relative,
             lidarDepthMap: lidarDepthMap,
             lidarConfidenceMap: lidarConfidenceMap,
@@ -1074,7 +1117,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
     
     // MARK: - ARSessionDelegate
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        guard isScanning else { return }
+        guard isScanning, MappingSessionManager.shared.isActive else { return }
+        if !scanWorkSession.isActive {
+            // A recorder-only restart leaves the AR scan and its map intact.
+            scanWorkSession = ScanWorkSession()
+        }
 
         MapGeoreferencer.shared.updateMapPose(frame.camera.transform, timestamp: frame.timestamp)
 
@@ -1095,7 +1142,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         let transform = frame.camera.transform
         let timestamp = frame.timestamp
-        let frameScanGeneration = scanGeneration
+        let workSession = scanWorkSession
+        let pointManager = pointManager
+        let surfelMap = surfelMap
+        let calibrationCache = depthAnythingCalibrationCache
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else {
             isProcessingFrame = false
             return
@@ -1132,26 +1182,37 @@ class ARViewController: UIViewController, ARSessionDelegate {
             lastCameraImagePublishTime = timestamp
             isPublishingCameraImage = true
             let cameraImageBox = UncheckedSendable(cameraImage)
-            Task.detached(priority: .utility) { [weak self, intrinsics, imageResolution, timestamp] in
+            cameraImageTask = Task.detached(priority: .utility) { [weak self, intrinsics, imageResolution, timestamp] in
                 defer {
                     Task { @MainActor [weak self] in
-                        self?.isPublishingCameraImage = false
+                        guard let self, self.scanWorkSession === workSession else { return }
+                        self.isPublishingCameraImage = false
                     }
                 }
-                ROS2BridgeClient.shared.publishImage(
-                    pixelBuffer: cameraImageBox.value,
-                    intrinsics: intrinsics,
-                    imageResolution: imageResolution,
-                    timestamp: timestamp
-                )
+                guard workSession.isActive, !Task.isCancelled else { return }
+                workSession.withPublishing {
+                    ROS2BridgeClient.shared.publishImage(
+                        pixelBuffer: cameraImageBox.value,
+                        intrinsics: intrinsics,
+                        imageResolution: imageResolution,
+                        timestamp: timestamp
+                    )
+                }
             }
         }
 
         let cameraImageBox = UncheckedSendable(cameraImage)
         let lidarDepthMapBox = UncheckedSendable(lidarDepthMap)
         let lidarConfidenceMapBox = UncheckedSendable(lidarConfidenceMap)
-        Task.detached(priority: .userInitiated) { [weak self] in
+        frameProcessingTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
+            defer {
+                Task { @MainActor in
+                    guard self.scanWorkSession === workSession else { return }
+                    self.isProcessingFrame = false
+                }
+            }
+            guard workSession.isActive, !Task.isCancelled else { return }
             let cameraImage = cameraImageBox.value
             let lidarDepthMap = lidarDepthMapBox.value
             let lidarConfidenceMap = lidarConfidenceMapBox.value
@@ -1166,11 +1227,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     intrinsics: intrinsics,
                     imageResolution: imageResolution,
                     transform: transform,
+                    workSession: workSession,
+                    calibrationCache: calibrationCache,
                     shouldBuildMesh: shouldRefreshDepthMeshVisualization
                 )
             } else {
                 mappingFrame = nil
             }
+            guard workSession.isActive, !Task.isCancelled else { return }
 
             let depthAnythingPointCloud = mappingFrame?.calibratedPoints ?? []
             let newPoints = mappingFrame?.calibratedPoints ?? []
@@ -1194,22 +1258,25 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 let sparseLiDARPoints = self.pointCloudProcessor.voxelGridFilter(points: lidarPointCloud, voxelSize: 0.1)
                 let fullResolutionDepthAnythingPoints = depthAnythingPointCloud
 
-                if !sparseLiDARPoints.isEmpty {
-                    ROS2BridgeClient.shared.publishLiDARPointCloud(sparseLiDARPoints, timestamp: timestamp)
-                }
-                if !fullResolutionDepthAnythingPoints.isEmpty {
-                    ROS2BridgeClient.shared.publishDepthAnythingPointCloud(fullResolutionDepthAnythingPoints, timestamp: timestamp)
-                }
-                if let mappingFrame {
-                    ROS2BridgeClient.shared.publishDepthAnythingCalibration(
-                        mappingFrame.calibration,
-                        relativeDepthSize: mappingFrame.relativeDepthSize,
-                        imageResolution: imageResolution,
-                        timestamp: timestamp
-                    )
+                workSession.withPublishing {
+                    if !sparseLiDARPoints.isEmpty {
+                        ROS2BridgeClient.shared.publishLiDARPointCloud(sparseLiDARPoints, timestamp: timestamp)
+                    }
+                    if !fullResolutionDepthAnythingPoints.isEmpty {
+                        ROS2BridgeClient.shared.publishDepthAnythingPointCloud(fullResolutionDepthAnythingPoints, timestamp: timestamp)
+                    }
+                    if let mappingFrame {
+                        ROS2BridgeClient.shared.publishDepthAnythingCalibration(
+                            mappingFrame.calibration,
+                            relativeDepthSize: mappingFrame.relativeDepthSize,
+                            imageResolution: imageResolution,
+                            timestamp: timestamp
+                        )
+                    }
                 }
                 if !sparseLiDARPoints.isEmpty || !fullResolutionDepthAnythingPoints.isEmpty || mappingFrame != nil {
                     await MainActor.run {
+                        guard workSession.isActive, self.isScanning else { return }
                         self.lastPointCloudPublishTime = timestamp
                     }
                 }
@@ -1218,11 +1285,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
             if !lidarPointCloud.isEmpty {
                 // The scan limit bounds accumulated unique voxels, not the
                 // per-frame counts of transient Depth Anything clouds.
-                let isCurrentScan = await MainActor.run { self.scanGeneration == frameScanGeneration }
-                if isCurrentScan {
-                    let voxelTotal = await self.pointManager.addAndFilter(newPoints: lidarPointCloud)
+                if workSession.isActive, !Task.isCancelled {
+                    let voxelTotal = await pointManager.addAndFilter(newPoints: lidarPointCloud)
                     await MainActor.run {
-                        guard self.scanGeneration == frameScanGeneration else { return }
+                        guard workSession.isActive, self.isScanning else { return }
                         self.cumulativePointCount = voxelTotal
                         self.delegate?.didUpdatePointCount(voxelTotal)
                         if voxelTotal >= self.maxPointLimit {
@@ -1234,36 +1300,34 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
             if let meshSnapshot = mappingFrame?.meshSnapshot {
                 await MainActor.run {
+                    guard workSession.isActive, self.isScanning else { return }
                     self.lastDepthMeshVisualizationTime = timestamp
                     self.updateLiveDepthMeshVisualization(with: meshSnapshot)
                 }
                 // Nonisolated publish; the DA cadence already throttles it.
-                ROS2BridgeClient.shared.publishDepthAnythingMesh(meshSnapshot, timestamp: timestamp)
+                workSession.withPublishing {
+                    ROS2BridgeClient.shared.publishDepthAnythingMesh(meshSnapshot, timestamp: timestamp)
+                }
             }
 
             if !newPoints.isEmpty {
                 await MainActor.run {
+                    guard workSession.isActive, self.isScanning else { return }
                     self.latestDepthAnythingPointCloud = newPoints
                 }
-                if shouldRefreshSurfelVisualization {
-                    _ = await self.surfelMap.fuse(
+                if shouldRefreshSurfelVisualization, workSession.isActive, !Task.isCancelled {
+                    _ = await surfelMap.fuse(
                         points: newPoints,
                         observerPosition: cameraPosition,
                         timestamp: timestamp
                     )
-                    let surfelSnapshot = await self.surfelMap.snapshot(maxCount: self.maxDisplayedSurfels)
+                    let surfelSnapshot = await surfelMap.snapshot(maxCount: self.maxDisplayedSurfels)
                     let previewSurfels = Array(surfelSnapshot.prefix(self.maxDisplayedSurfels))
                     await MainActor.run {
+                        guard workSession.isActive, self.isScanning else { return }
                         self.lastSurfelVisualizationTime = timestamp
                         self.updateLiveSurfelVisualization(with: previewSurfels)
                     }
-                }
-                await MainActor.run {
-                    self.isProcessingFrame = false
-                }
-            } else {
-                await MainActor.run {
-                    self.isProcessingFrame = false
                 }
             }
         }
@@ -1281,6 +1345,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
     
     private func publishMapToROS2IfNeeded(anchors: [ARAnchor]) {
+        guard MappingSessionManager.shared.isActive, scanWorkSession.isActive else { return }
         guard ROS2TopicRegistry.shared.isStreamEnabled(.mesh) else { return }
         guard ROS2BridgeClient.shared.hasPublishOrBufferTarget else { return }
         
@@ -1291,9 +1356,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
             let timestamp = ProcessInfo.processInfo.systemUptime
             let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
             let safeMeshes = MeshGenerator.extractSafeMeshes(from: meshAnchors)
-            Task.detached(priority: .background) {
-                if !safeMeshes.isEmpty {
-                    ROS2BridgeClient.shared.publishMap(safeMeshes: safeMeshes, timestamp: timestamp)
+            let workSession = scanWorkSession
+            mapPublishTask?.cancel()
+            mapPublishTask = Task.detached(priority: .background) {
+                if !safeMeshes.isEmpty, workSession.isActive, !Task.isCancelled {
+                    workSession.withPublishing {
+                        ROS2BridgeClient.shared.publishMap(safeMeshes: safeMeshes, timestamp: timestamp)
+                    }
                 }
             }
         }

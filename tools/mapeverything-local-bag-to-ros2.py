@@ -425,6 +425,17 @@ def convert(
     force: bool,
     verbose: bool,
 ) -> int:
+    # Resolve aliases before any destructive operation, including symlinks and
+    # '..'. Replacing an input directory would destroy the source recording.
+    resolved_output = output.resolve()
+    for db_file in db_files:
+        resolved_input = db_file.resolve()
+        if resolved_output == resolved_input or resolved_output in resolved_input.parents:
+            raise BagConversionError(
+                f"Output contains an input chunk: {output} ({db_file}). "
+                "Choose a separate output directory."
+            )
+
     try:
         from rclpy.serialization import serialize_message
     except ImportError as exc:

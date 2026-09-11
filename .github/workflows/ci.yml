@@ -15,6 +15,9 @@ jobs:
       - name: Byte-compile Python tools
         run: python3 -m py_compile tools/*.py
 
+      - name: Test Python tools
+        run: python3 -m unittest discover -s tools/tests
+
       - name: Syntax-check shell tools
         run: bash -n tools/*.sh
 
