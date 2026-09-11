@@ -446,10 +446,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             configuration.sceneReconstruction = .mesh
         }
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            configuration.frameSemantics.insert(.smoothedSceneDepth)
-        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics.insert(.sceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
         } else {
             DispatchQueue.main.async {
                 self.delegate?.didFailWithError(NSError(domain: "MapEverything", code: 1, userInfo: [NSLocalizedDescriptionKey: "LiDAR sensor not detected. Point cloud scanning requires a LiDAR-equipped device (iPhone/iPad Pro)."]))
@@ -971,7 +971,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let timestamp = frame.timestamp
         let workSession = scanWorkSession
         let surfelMap = surfelMap
-        guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else {
+        // Calibrate this image against its unsmoothed measurement when
+        // available, avoiding temporal depth averaging during camera motion.
+        guard let sceneDepth = frame.sceneDepth ?? frame.smoothedSceneDepth else {
             depthMappingFeedback = "Depth unavailable. Include shaded, nearby surfaces."
             publishTrackingFeedback()
             isProcessingFrame = false

@@ -34,17 +34,10 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
     struct MaximumLikelihoodCalibration: Sendable {
         let scale: Float
         let offset: Float
-        let support: DepthCalibrationSupport?
-
-        init(scale: Float, offset: Float, support: DepthCalibrationSupport? = nil) {
-            self.scale = scale
-            self.offset = offset
-            self.support = support
-        }
     }
 
-    /// The reciprocal model has a pole as fitted inverse depth approaches zero;
-    /// depths past this bound carry no monocular signal and would dominate the map.
+    /// Numerical/export guard shared by the mesh and CPU/Metal point clouds.
+    /// LiDAR range and calibration-sample spread do not clip predicted pixels.
     static let maximumCalibratedDepth: Float = 100.0
 
     /// Below this bound the monocular depth is inside the sensor's blind range.
@@ -263,10 +256,6 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
 
         let inverseDepth = calibration.scale * relativeDepth + calibration.offset
         guard inverseDepth.isFinite, inverseDepth > 0 else { return nil }
-        if let support = calibration.support,
-           !support.accepts(relative: relativeDepth, inverseDepth: inverseDepth) {
-            return nil
-        }
 
         let monocularDepth = 1.0 / inverseDepth
         guard monocularDepth > Self.minimumCalibratedDepth,
@@ -349,12 +338,12 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
                 for x in stride(from: 0, to: lidarWidth, by: step) {
                     let depth = lidarBase[y * lidarFloatsPerRow + x]
                     guard Self.isValidLiDARDepth(depth) else { continue }
-                    let nx = Float(x) / Float(max(lidarWidth - 1, 1))
-                    let ny = Float(y) / Float(max(lidarHeight - 1, 1))
+                    let nx = Float(x) / Float(lidarWidth)
+                    let ny = Float(y) / Float(lidarHeight)
                     let confidence = Self.lidarConfidenceWeight(confidenceSampling.value(normalizedX: nx, normalizedY: ny))
                     guard confidence > 0 else { continue }
-                    let r = relativeReader.value(atX: Int(nx * Float(max(relative.width - 1, 1))),
-                                                 y: Int(ny * Float(max(relative.height - 1, 1))))
+                    let r = relativeReader.value(atX: min(relative.width - 1, Int((nx * Float(relative.width)).rounded())),
+                                                 y: min(relative.height - 1, Int((ny * Float(relative.height)).rounded())))
                     guard r.isFinite, r > 0 else { continue }
                     let sigma = Self.lidarStandardDeviation(depth: depth) / (depth * depth)
                     samples.append(DepthCalibrationSample(relative: Double(r), depth: Double(depth),
@@ -373,8 +362,8 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
 
         func value(normalizedX: Float, normalizedY: Float) -> UInt8? {
             guard let base, width > 0, height > 0 else { return nil }
-            let x = min(width - 1, max(0, Int(normalizedX * Float(max(width - 1, 1)))))
-            let y = min(height - 1, max(0, Int(normalizedY * Float(max(height - 1, 1)))))
+            let x = min(width - 1, max(0, Int((normalizedX * Float(width)).rounded())))
+            let y = min(height - 1, max(0, Int((normalizedY * Float(height)).rounded())))
             return base[y * bytesPerRow + x]
         }
     }

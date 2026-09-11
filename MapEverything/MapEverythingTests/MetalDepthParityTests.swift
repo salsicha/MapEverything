@@ -54,8 +54,8 @@ struct MetalDepthParityTests {
         return pixelBuffer
     }
 
-    @Test("Metal kernel matches the CPU depth pipeline with and without calibration support", arguments: [false, true])
-    func testMetalMatchesCPUPath(withSupport: Bool) throws {
+    @Test("Metal kernel matches the CPU depth pipeline within float tolerance")
+    func testMetalMatchesCPUPath() throws {
         guard let metal = DepthPointCloudMetalProcessor() else {
             // No Metal device in this environment; the CPU fallback is the
             // only live path, so there is nothing to compare.
@@ -77,10 +77,7 @@ struct MetalDepthParityTests {
             }
         }
         let relativeDepthMap = RelativeDepthMap(width: depthWidth, height: depthHeight, data: depthData)
-        let calibration = DepthAnythingProcessor.MaximumLikelihoodCalibration(
-            scale: 0.5, offset: 0.001,
-            support: withSupport ? .init(relativeMean: 0.5, relativeVariance: 0.04, inverseErrorVariance: 0.0001) : nil
-        )
+        let calibration = DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 0.5, offset: 0.001)
 
         let imageWidth = 64
         let imageHeight = 48

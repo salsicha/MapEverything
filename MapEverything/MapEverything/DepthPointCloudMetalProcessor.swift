@@ -19,7 +19,7 @@ import simd
 /// zero-copy through a CVMetalTextureCache.
 nonisolated final class DepthPointCloudMetalProcessor: @unchecked Sendable {
     // Must mirror the MSL DepthPointUniforms layout exactly: the float4x4
-    // first (16-byte aligned), then sixteen 4-byte scalars.
+    // first (16-byte aligned), then twelve 4-byte scalars.
     private struct Uniforms {
         var transform: simd_float4x4
         var fx: Float
@@ -30,10 +30,6 @@ nonisolated final class DepthPointCloudMetalProcessor: @unchecked Sendable {
         var offset: Float
         var minDepth: Float
         var maxDepth: Float
-        var relativeMean: Float
-        var relativeVariance: Float
-        var inverseErrorVariance: Float
-        var inverseErrorBudgetSquared: Float
         var depthWidth: UInt32
         var depthHeight: UInt32
         var imageWidth: UInt32
@@ -58,10 +54,6 @@ nonisolated final class DepthPointCloudMetalProcessor: @unchecked Sendable {
         float offset;
         float minDepth;
         float maxDepth;
-        float relativeMean;
-        float relativeVariance;
-        float inverseErrorVariance;
-        float inverseErrorBudgetSquared;
         uint depthWidth;
         uint depthHeight;
         uint imageWidth;
@@ -96,17 +88,6 @@ nonisolated final class DepthPointCloudMetalProcessor: @unchecked Sendable {
         float inverseDepth = u.scale * r + u.offset;
         if (!isfinite(inverseDepth) || !(inverseDepth > 0.0f)) {
             return;
-        }
-        // A zero error budget denotes an explicitly supplied legacy fit
-        // without a support envelope. Live fitted calibrations always have one.
-        if (u.inverseErrorBudgetSquared > 0.0f) {
-            float delta = r - u.relativeMean;
-            float errorVariance = u.inverseErrorVariance * (1.0f + delta * delta / u.relativeVariance);
-            if (!(u.relativeVariance > 0.0f) || !(u.inverseErrorVariance > 0.0f)
-                || !isfinite(errorVariance)
-                || !(errorVariance <= inverseDepth * inverseDepth * u.inverseErrorBudgetSquared)) {
-                return;
-            }
         }
         float depth = 1.0f / inverseDepth;
         if (!(depth > u.minDepth) || !(depth < u.maxDepth)) {
@@ -251,10 +232,6 @@ nonisolated final class DepthPointCloudMetalProcessor: @unchecked Sendable {
             offset: calibration.offset,
             minDepth: DepthAnythingProcessor.minimumCalibratedDepth,
             maxDepth: DepthAnythingProcessor.maximumCalibratedDepth,
-            relativeMean: calibration.support?.relativeMean ?? 0,
-            relativeVariance: calibration.support?.relativeVariance ?? 1,
-            inverseErrorVariance: calibration.support?.inverseErrorVariance ?? 0,
-            inverseErrorBudgetSquared: calibration.support == nil ? 0 : DepthCalibrationSupport.inverseErrorBudgetSquared,
             depthWidth: UInt32(depthWidth),
             depthHeight: UInt32(depthHeight),
             imageWidth: UInt32(imageWidth),
