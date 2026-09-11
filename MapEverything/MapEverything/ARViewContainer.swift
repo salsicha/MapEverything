@@ -91,6 +91,7 @@ struct ARViewContainer: UIViewControllerRepresentable {
     
     class Coordinator: NSObject, ARViewControllerDelegate {
         var parent: ARViewContainer
+        private var inspectionUpdateGeneration = 0
         
         init(_ parent: ARViewContainer) {
             self.parent = parent
@@ -122,7 +123,11 @@ struct ARViewContainer: UIViewControllerRepresentable {
         }
 
         func didUpdateStoppedInspectionScene(_ scene: SCNScene?) {
+            inspectionUpdateGeneration += 1
+            let generation = inspectionUpdateGeneration
             DispatchQueue.main.async {
+                guard self.inspectionUpdateGeneration == generation else { return }
+                guard scene == nil || !self.parent.isScanning else { return }
                 self.parent.stoppedInspectionScene = scene
             }
         }
@@ -525,9 +530,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     private func currentSceneMeshes() -> [SafeARMesh] {
-        if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }) {
-            updateSceneMeshes(MeshGenerator.extractSafeMeshes(from: anchors))
-        }
+        // Only use geometry collected by this scan's anchor callbacks. After
+        // reset/pause, ARKit's currentFrame may still belong to the last scan.
         return sceneMeshesByID.values.sorted { $0.identifier.uuidString < $1.identifier.uuidString }
     }
 

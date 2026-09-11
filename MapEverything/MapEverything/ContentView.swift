@@ -1210,10 +1210,23 @@ struct TopDownSceneView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
-        scnView.scene = scene
         scnView.allowsCameraControl = true
         scnView.autoenablesDefaultLighting = false
         scnView.backgroundColor = .secondarySystemBackground
+        updateScene(in: scnView)
+        return scnView
+    }
+
+    func updateUIView(_ uiView: SCNView, context: Context) {
+        updateScene(in: uiView)
+    }
+
+    func updateScene(in scnView: SCNView) {
+        // SwiftUI may reuse the SCNView while a newly stopped scan replaces
+        // its scene. Reframe only on replacement, preserving touch navigation
+        // during ordinary UI updates for the same scene.
+        guard scnView.scene !== scene else { return }
+        scnView.scene = scene
 
         removeExistingInspectionViewerNodes(from: scene)
 
@@ -1251,14 +1264,11 @@ struct TopDownSceneView: UIViewRepresentable {
         floor.materials = [floorMaterial]
         let floorNode = SCNNode(geometry: floor)
         floorNode.name = "inspection_floor"
-        floorNode.position = SCNVector3(0, minBound.y - 0.001, 0)
+        floorNode.position = SCNVector3(center.x, minBound.y - 0.001, center.z)
         floorNode.eulerAngles.x = -.pi / 2
         scene.rootNode.addChildNode(floorNode)
 
-        return scnView
     }
-
-    func updateUIView(_ uiView: SCNView, context: Context) {}
 
     private func removeExistingInspectionViewerNodes(from scene: SCNScene) {
         [
