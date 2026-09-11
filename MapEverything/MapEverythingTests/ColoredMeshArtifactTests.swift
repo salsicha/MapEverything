@@ -9,6 +9,29 @@ import simd
 @testable import MapEverything
 
 struct ColoredMeshArtifactTests {
+    @Test("A completed scan's colored export finishes after local saving is disabled")
+    func testDeferredExportKeepsCapturedDestination() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let recorder = LocalROS2BagRecorder(baseDirectoryURL: root)
+        defer {
+            recorder.stopAndWait()
+            try? FileManager.default.removeItem(at: root)
+        }
+        recorder.start(sessionID: UUID(), configuration: .init(isEnabled: true, maxChunkBytes: 8 * 1_048_576))
+        let destination = try #require(recorder.currentArtifactDirectoryURL)
+        recorder.stopAndWait()
+        recorder.start(sessionID: UUID(), configuration: .init(isEnabled: false, maxChunkBytes: 8 * 1_048_576))
+        #expect(recorder.currentArtifactDirectoryURL == nil)
+        let artifact = LocalOverlayMeshArtifact(
+            source: "test", coordinateFrame: "map", capturedAt: Date(),
+            vertices: vertices, indices: indices, colors: colors, metadata: [:]
+        )
+        recorder.recordFinalOverlayMesh(artifact, in: destination)
+        recorder.flushAndWait()
+        let saved = try String(contentsOf: destination.appendingPathComponent(LocalOverlayMeshArtifact.objFileName), encoding: .utf8)
+        #expect(saved == artifact.objString())
+    }
+
     private let vertices = [
         SIMD3<Float>(0, 0, 0),
         SIMD3<Float>(1, 0, 0),

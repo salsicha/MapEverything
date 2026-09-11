@@ -793,7 +793,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         guard !artifact.isEmpty else { return }
 
         queue.async {
-            guard self.configuration.isEnabled,
+            // An explicit destination belongs to an already-recorded scan.
+            // Its background finalization can outlive the Save Local setting.
+            guard directoryURL != nil || self.configuration.isEnabled,
                   let targetDirectoryURL = directoryURL ?? self.bagDirectoryURL else { return }
 
             do {
@@ -811,7 +813,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         guard !artifact.isEmpty else { return }
 
         queue.async {
-            guard self.configuration.isEnabled,
+            guard directoryURL != nil || self.configuration.isEnabled,
                   let targetDirectoryURL = directoryURL ?? self.bagDirectoryURL else { return }
 
             do {

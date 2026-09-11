@@ -13,6 +13,10 @@ nonisolated struct SafeARMesh: @unchecked Sendable {
     let vertices: [SIMD3<Float>]
     let indices: [UInt32]
     let transform: simd_float4x4
+    // A new anchor extraction gets a new revision; asynchronous coloring must
+    // never replace geometry from a more recent update.
+    var revision = UUID()
+    var colors: [SIMD3<UInt8>] = []
 }
 
 nonisolated enum MeshGenerator {

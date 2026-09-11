@@ -388,7 +388,8 @@ nonisolated struct PointCloudProcessor {
         cameraImage pixelBuffer: CVPixelBuffer,
         intrinsics: simd_float3x3,
         imageResolution resolution: CGSize,
-        transform: simd_float4x4
+        transform: simd_float4x4,
+        sampleStep: Int = 4
     ) -> [ColoredPoint] {
         var processedPoints: [ColoredPoint] = []
 
@@ -421,7 +422,7 @@ nonisolated struct PointCloudProcessor {
         let yPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
         let cbcrPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
         
-        let step = 4 // Process every 4th depth pixel for performance
+        let step = max(1, sampleStep)
         let table = Self.projectionTable(
             depthWidth: depthWidth,
             depthHeight: depthHeight,

@@ -178,6 +178,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     surfelMap = ColoredSurfelMap()
                     depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
                     sceneMeshesByID.removeAll()
+                    sceneMeshColorizer = SceneMeshColorizer()
+                    sceneScanID = UUID()
+                    sceneMeshColorQueue.removeAll()
+                    queuedSceneMeshIDs.removeAll()
                     clearDepthAnythingMeshSnapshot()
                     let pointManager = pointManager
                     let surfelMap = surfelMap
@@ -255,6 +259,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
     // Retain the latest geometry for every observed anchor, including areas
     // outside the final camera view. Cleared only when a new AR scan starts.
     private var sceneMeshesByID: [UUID: SafeARMesh] = [:]
+    private var sceneMeshColorizer = SceneMeshColorizer()
+    private var sceneScanID = UUID()
+    private var sceneMeshColorQueue: [UUID] = []
+    private var queuedSceneMeshIDs: Set<UUID> = []
     private var latestDepthAnythingPointCloud: [ColoredPoint] = []
     private var finalPointCloudArtifactTask: Task<Void, Never>?
     private let depthMeshVisualizationInterval: TimeInterval = 0.5
@@ -508,7 +516,17 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     private func freezeCurrentMeshForInspection() {
-        delegate?.didUpdateStoppedInspectionScene(makeStoppedInspectionScene())
+        let meshes = currentSceneMeshes()
+        let colorizer = sceneMeshColorizer
+        let scanID = sceneScanID
+        Task { [weak self] in
+            // Most chunks already have colors. Finish only the latest pending
+            // revisions before presenting, without blocking the stop button.
+            let colored = await colorizer.colorize(meshes, refresh: false)
+            guard let self, self.sceneScanID == scanID, !self.isScanning else { return }
+            self.applyColoredSceneMeshes(colored)
+            self.delegate?.didUpdateStoppedInspectionScene(self.makeStoppedInspectionScene())
+        }
     }
 
     func makeStoppedInspectionScene() -> SCNScene? {
@@ -526,7 +544,39 @@ class ARViewController: UIViewController, ARSessionDelegate {
     func updateSceneMeshes(_ meshes: [SafeARMesh]) {
         for mesh in meshes where !mesh.vertices.isEmpty && mesh.indices.count >= 3 {
             sceneMeshesByID[mesh.identifier] = mesh
+            if queuedSceneMeshIDs.insert(mesh.identifier).inserted {
+                sceneMeshColorQueue.append(mesh.identifier)
+            }
         }
+    }
+
+    func applyColoredSceneMeshes(_ meshes: [SafeARMesh]) {
+        for mesh in meshes where sceneMeshesByID[mesh.identifier]?.revision == mesh.revision {
+            sceneMeshesByID[mesh.identifier] = mesh
+        }
+    }
+
+    private func takeSceneMeshesForColoring() -> [SafeARMesh] {
+        // Revisit stable chunks too: camera coverage can improve even when
+        // ARKit has not changed their geometry. Limit work per capture frame.
+        if sceneMeshColorQueue.isEmpty {
+            sceneMeshColorQueue = sceneMeshesByID.keys.sorted { $0.uuidString < $1.uuidString }
+            queuedSceneMeshIDs = Set(sceneMeshColorQueue)
+        }
+        var meshes: [SafeARMesh] = []
+        var vertexCount = 0
+        var consumed = 0
+        for id in sceneMeshColorQueue {
+            if vertexCount >= 50_000 { break }
+            consumed += 1
+            queuedSceneMeshIDs.remove(id)
+            if let mesh = sceneMeshesByID[id] {
+                meshes.append(mesh)
+                vertexCount += mesh.vertices.count
+            }
+        }
+        sceneMeshColorQueue.removeFirst(consumed)
+        return meshes
     }
 
     private func currentSceneMeshes() -> [SafeARMesh] {
@@ -539,14 +589,24 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let recorder = LocalROS2BagRecorder.shared
         guard let targetDirectoryURL = recorder.currentArtifactDirectoryURL else { return }
 
-        let meshArtifact = currentFinalOverlayMeshArtifact()
-        if let meshArtifact {
-            recorder.recordFinalOverlayMesh(meshArtifact, in: targetDirectoryURL)
-        }
-
-        finalPointCloudArtifactTask?.cancel()
+        let meshes = currentSceneMeshes()
+        let colorizer = sceneMeshColorizer
+        let mode = currentMode
+        let fallbackArtifact = meshes.isEmpty
+            ? latestDepthAnythingMeshSnapshot.flatMap { makeFinalOverlayMeshArtifact(from: $0) }
+            : nil
         let depthAnythingPoints = latestDepthAnythingPointCloud
+        // Let prior destinations finish saving even if another recording
+        // segment ends before their background work has completed.
         finalPointCloudArtifactTask = Task { [pointManager] in
+            // Capture this scan and destination before awaiting; a new scan or
+            // recorder segment must not change which mesh gets saved here.
+            let colored = await colorizer.colorize(meshes, refresh: false)
+            guard !Task.isCancelled else { return }
+            let meshArtifact = makeFinalOverlayMeshArtifact(from: colored, mode: mode) ?? fallbackArtifact
+            if let meshArtifact {
+                recorder.recordFinalOverlayMesh(meshArtifact, in: targetDirectoryURL)
+            }
             let cleanedPoints = await pointManager.getCleanedPoints(maxDistance: .greatestFiniteMagnitude)
             let artifact: LocalPointCloudArtifact?
 
@@ -578,10 +638,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     source: "\(meshArtifact.source)_vertices",
                     coordinateFrame: meshArtifact.coordinateFrame,
                     capturedAt: meshArtifact.capturedAt,
-                    points: meshArtifact.vertices.map { vertex in
+                    points: meshArtifact.vertices.enumerated().map { index, vertex in
                         LocalPointCloudArtifact.Point(
                             position: vertex,
-                            color: SIMD3<UInt8>(255, 255, 255)
+                            color: meshArtifact.colors.count == meshArtifact.vertices.count
+                                ? meshArtifact.colors[index] : SIMD3<UInt8>(255, 255, 255)
                         )
                     },
                     metadata: [
@@ -609,9 +670,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
         return nil
     }
 
-    private func makeFinalOverlayMeshArtifact(from safeMeshes: [SafeARMesh]) -> LocalOverlayMeshArtifact? {
+    private func makeFinalOverlayMeshArtifact(from safeMeshes: [SafeARMesh], mode: VisualizationMode? = nil) -> LocalOverlayMeshArtifact? {
         var vertices: [SIMD3<Float>] = []
         var indices: [UInt32] = []
+        var colors: [SIMD3<UInt8>] = []
 
         for mesh in safeMeshes {
             guard !mesh.vertices.isEmpty, mesh.indices.count >= 3 else { continue }
@@ -619,6 +681,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
             guard vertexOffset <= Int(UInt32.max) else { break }
 
             vertices.reserveCapacity(vertices.count + mesh.vertices.count)
+            colors.append(contentsOf: mesh.colors.count == mesh.vertices.count
+                ? mesh.colors
+                : Array(repeating: SceneMeshColorizer.unobservedColor, count: mesh.vertices.count))
             for vertex in mesh.vertices {
                 let transformed = simd_mul(mesh.transform, SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1))
                 vertices.append(SIMD3<Float>(transformed.x, transformed.y, transformed.z))
@@ -640,9 +705,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
             capturedAt: Date(),
             vertices: vertices,
             indices: indices,
+            colors: colors,
             metadata: [
-                "visualization_mode": currentMode.rawValue,
-                "mesh_count": "\(safeMeshes.count)"
+                "visualization_mode": (mode ?? currentMode).rawValue,
+                "mesh_count": "\(safeMeshes.count)",
+                "color_source": "accumulated_camera_lidar_samples"
             ]
         )
         return artifact.isEmpty ? nil : artifact
@@ -683,7 +750,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 geometry: makeLitInspectionGeometry(
                     vertices: worldVertices,
                     indices: mesh.indices,
-                    tint: .systemCyan
+                    tint: .lightGray,
+                    vertexColors: mesh.colors.count == mesh.vertices.count ? mesh.colors : nil
                 )
             ))
             hasGeometry = true
@@ -1157,6 +1225,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let cameraImageBox = UncheckedSendable(cameraImage)
         let lidarDepthMapBox = UncheckedSendable(lidarDepthMap)
         let lidarConfidenceMapBox = UncheckedSendable(lidarConfidenceMap)
+        let meshColorizer = sceneMeshColorizer
+        let meshesToColor = takeSceneMeshesForColoring()
         frameProcessingTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
             defer {
@@ -1169,6 +1239,26 @@ class ARViewController: UIViewController, ARSessionDelegate {
             let cameraImage = cameraImageBox.value
             let lidarDepthMap = lidarDepthMapBox.value
             let lidarConfidenceMap = lidarConfidenceMapBox.value
+
+            // Collect real camera colors regardless of ROS, saving, or live
+            // visualization settings. Do this before the slower AI work.
+            let lidarPointCloud = autoreleasepool {
+                self.pointCloudProcessor.processPointCloud(
+                    depthMap: lidarDepthMap,
+                    cameraImage: cameraImage,
+                    intrinsics: intrinsics,
+                    imageResolution: imageResolution,
+                    transform: transform,
+                    sampleStep: 2
+                )
+            }
+            await meshColorizer.integrate(lidarPointCloud)
+            let coloredMeshes = await meshColorizer.colorize(meshesToColor)
+            await MainActor.run {
+                guard workSession.isActive, self.isScanning else { return }
+                self.applyColoredSceneMeshes(coloredMeshes)
+            }
+            guard workSession.isActive, !Task.isCancelled else { return }
 
             let mappingFrame: DepthAnythingMappingFrame?
             if shouldUseDepthAnythingDepth {
@@ -1191,20 +1281,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
             let depthAnythingPointCloud = mappingFrame?.calibratedPoints ?? []
             let newPoints = mappingFrame?.calibratedPoints ?? []
-            let lidarPointCloud: [ColoredPoint]
-            if shouldPublishPointCloud || newPoints.isEmpty {
-                lidarPointCloud = autoreleasepool {
-                    self.pointCloudProcessor.processPointCloud(
-                        depthMap: lidarDepthMap,
-                        cameraImage: cameraImage,
-                        intrinsics: intrinsics,
-                        imageResolution: imageResolution,
-                        transform: transform
-                    )
-                }
-            } else {
-                lidarPointCloud = []
-            }
 
             if shouldPublishPointCloud {
                 // Keep the calibrated Depth Anything payload full-resolution; LiDAR stays sparse.
