@@ -474,6 +474,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
 
     // Assigned only on the main queue for SwiftUI observation.
     @MainActor @Published private(set) var stats = LocalROS2BagRecorderStats()
+    @MainActor @Published private(set) var libraryRevision = 0
 
     private struct TopicInfo {
         let id: Int64
@@ -511,8 +512,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     private static let flushesPerFreeSpaceCheck = 64
     private static let insertMessageSQL = "INSERT INTO messages(id, topic_id, timestamp, data) VALUES (?, ?, ?, ?)"
 
-    private let queue = DispatchQueue(label: "com.mapeverything.localROS2BagRecorder", qos: .utility)
-    private let previewQueue = DispatchQueue(label: "com.mapeverything.localROS2BagPreviewScanner", qos: .utility)
+    private let queue: DispatchQueue
+    private let previewQueue: DispatchQueue
+    private let listingQueue = DispatchQueue(label: "com.mapeverything.localROS2BagListing", qos: .utility)
     private let fileManager: FileManager
     private let baseDirectoryURL: URL?
     private var database: OpaquePointer?
@@ -538,15 +540,23 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     // so publisher threads can check acceptance without hopping onto the queue.
     private let acceptanceFlagLock = NSLock()
     private var acceptingRecordsFlag = false
+    private var artifactDirectorySnapshot: URL?
     private var consecutiveFlushFailures = 0
     private var successfulFlushCount = 0
     private var pendingWrites: [PendingWrite] = []
     private var pendingWriteBytes = 0
     private var pendingFlushWorkItem: DispatchWorkItem?
 
-    init(fileManager: FileManager = .default, baseDirectoryURL: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        baseDirectoryURL: URL? = nil,
+        recordingQueue: DispatchQueue = DispatchQueue(label: "com.mapeverything.localROS2BagRecorder", qos: .utility),
+        previewQueue: DispatchQueue = DispatchQueue(label: "com.mapeverything.localROS2BagPreviewScanner", qos: .utility)
+    ) {
         self.fileManager = fileManager
         self.baseDirectoryURL = baseDirectoryURL
+        self.queue = recordingQueue
+        self.previewQueue = previewQueue
     }
 
     @MainActor var sessionMetadata: [String: Any] {
@@ -577,18 +587,24 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
 
     private func refreshAcceptanceFlag() {
         let value = acceptsRecords && configuration.isEnabled && database != nil
-        acceptanceFlagLock.withLock { acceptingRecordsFlag = value }
+        acceptanceFlagLock.withLock {
+            acceptingRecordsFlag = value
+            artifactDirectorySnapshot = configuration.isEnabled ? bagDirectoryURL : nil
+        }
     }
 
     var currentArtifactDirectoryURL: URL? {
-        queue.sync {
-            configuration.isEnabled ? bagDirectoryURL : nil
-        }
+        // Stop notifications run on the UI thread while a previous export
+        // may occupy the writer. Reading its destination must never join it.
+        acceptanceFlagLock.withLock { artifactDirectorySnapshot }
     }
 
     func start(sessionID: UUID?, configuration: LocalROS2BagRecorderConfiguration = .load()) {
         queue.sync {
-            defer { self.refreshAcceptanceFlag() }
+            defer {
+                self.refreshAcceptanceFlag()
+                self.publishLibraryChange()
+            }
             self.acceptsRecords = false
             self.closeCurrentBag(writeMetadata: true)
             self.configuration = configuration
@@ -641,6 +657,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             self.stoppedAt = Date()
             self.closeCurrentBag(writeMetadata: true)
             self.publishStats(isRecording: false)
+            self.publishLibraryChange()
         }
     }
 
@@ -651,6 +668,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             self.stoppedAt = Date()
             self.closeCurrentBag(writeMetadata: true)
             self.publishStats(isRecording: false)
+            self.publishLibraryChange()
         }
     }
 
@@ -694,7 +712,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         previewLoadingMode: LocalROS2BagPreviewLoadingMode = .cachedOnly
     ) async throws -> [LocalROS2BagSession] {
         try await withCheckedThrowingContinuation { continuation in
-            previewQueue.async {
+            // A slow thumbnail scan must not delay the first list of bags.
+            let workQueue = previewLoadingMode == .cachedOnly ? listingQueue : previewQueue
+            workQueue.async {
                 do {
                     continuation.resume(returning: try self.listBagSessions(previewLoadingMode: previewLoadingMode))
                 } catch {
@@ -705,17 +725,15 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     func bagSessionWithPreviewScan(_ session: LocalROS2BagSession) async throws -> LocalROS2BagSession {
-        // Scanning the chunk the recorder is actively writing holds a SHARED
-        // lock that makes the writer's COMMITs fail with SQLITE_BUSY, so the
-        // active session is never scanned; it gets a preview after it stops.
-        let isActiveSession = queue.sync {
-            (self.acceptsRecords || self.database != nil)
-                && self.bagDirectoryURL?.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path
-        }
-        let loadingMode: LocalROS2BagPreviewLoadingMode = isActiveSession ? .cachedOnly : .scanIfNeeded
-
         return try await withCheckedThrowingContinuation { continuation in
             previewQueue.async {
+                // Wait off the UI thread for queued writes/stop to finish.
+                // Never scan a chunk while the recorder is still writing it.
+                let isActiveSession = self.queue.sync {
+                    (self.acceptsRecords || self.database != nil)
+                        && self.bagDirectoryURL?.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path
+                }
+                let loadingMode: LocalROS2BagPreviewLoadingMode = isActiveSession ? .cachedOnly : .scanIfNeeded
                 do {
                     continuation.resume(
                         returning: try self.bagSession(
@@ -745,6 +763,26 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         }
 
         try fileManager.removeItem(at: session.directoryURL)
+        publishLibraryChange()
+    }
+
+    func deleteBagSessionAsync(_ session: LocalROS2BagSession) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            listingQueue.async {
+                do {
+                    try self.deleteBagSession(session)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func publishLibraryChange() {
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { self.libraryRevision += 1 }
+        }
     }
 
     func recordPublishedTopic(topic: String, messageType: String, msg: [String: Any]) {
@@ -790,9 +828,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     func recordFinalOverlayMesh(_ artifact: LocalOverlayMeshArtifact, in directoryURL: URL? = nil) {
-        guard !artifact.isEmpty else { return }
-
         queue.async {
+            guard !artifact.isEmpty else { return }
+            defer { self.publishLibraryChange() }
             // An explicit destination belongs to an already-recorded scan.
             // Its background finalization can outlive the Save Local setting.
             guard directoryURL != nil || self.configuration.isEnabled,
@@ -810,9 +848,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     func recordFinalPointCloud(_ artifact: LocalPointCloudArtifact, in directoryURL: URL? = nil) {
-        guard !artifact.isEmpty else { return }
-
         queue.async {
+            guard !artifact.isEmpty else { return }
+            defer { self.publishLibraryChange() }
             guard directoryURL != nil || self.configuration.isEnabled,
                   let targetDirectoryURL = directoryURL ?? self.bagDirectoryURL else { return }
 

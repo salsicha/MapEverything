@@ -906,6 +906,8 @@ struct LocalROS2BagBrowserView: View {
     @ObservedObject private var recorder = LocalROS2BagRecorder.shared
     @Environment(\.dismiss) private var dismiss
     @State private var sessions: [LocalROS2BagSession] = []
+    @State private var isLoading = true
+    @State private var reloadID = UUID()
     @State private var pendingDeletion: LocalROS2BagSession?
     @State private var errorMessage: String?
     @State private var previewScanTask: Task<Void, Never>?
@@ -913,7 +915,9 @@ struct LocalROS2BagBrowserView: View {
     var body: some View {
         NavigationStack {
             List {
-                if sessions.isEmpty {
+                if sessions.isEmpty && isLoading {
+                    ProgressView("Loading saved scans…")
+                } else if sessions.isEmpty {
                     ContentUnavailableView(
                         "No Local Bags",
                         systemImage: "externaldrive",
@@ -957,13 +961,14 @@ struct LocalROS2BagBrowserView: View {
                     .accessibilityLabel("Refresh")
                 }
             }
-            .task {
+            .task(id: recorder.libraryRevision) {
                 await reload()
             }
             .refreshable {
                 await reload()
             }
             .onDisappear {
+                reloadID = UUID()
                 previewScanTask?.cancel()
                 previewScanTask = nil
             }
@@ -1025,15 +1030,22 @@ struct LocalROS2BagBrowserView: View {
 
     @MainActor
     private func reload() async {
+        let requestID = UUID()
+        reloadID = requestID
+        isLoading = true
         previewScanTask?.cancel()
         previewScanTask = nil
+        defer {
+            if reloadID == requestID { isLoading = false }
+        }
 
         do {
             let loadedSessions = try await recorder.listBagSessionsAsync(previewLoadingMode: .cachedOnly)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, reloadID == requestID else { return }
             sessions = loadedSessions
             scanMissingPreviews(for: loadedSessions)
         } catch {
+            guard !Task.isCancelled, reloadID == requestID else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -1072,12 +1084,14 @@ struct LocalROS2BagBrowserView: View {
 
     private func deletePendingSession() {
         guard let pendingDeletion else { return }
-        do {
-            try recorder.deleteBagSession(pendingDeletion)
-            self.pendingDeletion = nil
-            Task { await reload() }
-        } catch {
-            errorMessage = error.localizedDescription
+        self.pendingDeletion = nil
+        Task {
+            do {
+                try await recorder.deleteBagSessionAsync(pendingDeletion)
+                await reload()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 

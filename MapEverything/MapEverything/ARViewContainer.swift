@@ -177,6 +177,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     surfelMap = ColoredSurfelMap()
                     accumulatedDepthMesh = AccumulatedDepthMesh(voxelSize: voxelSize, maximumVertices: maxPointLimit)
                     sceneScanID = UUID()
+                    exportedScanDirectories.removeAll()
                     depthMappingFeedback = ""
                     trackingStateFeedback = ""
                     publishTrackingFeedback()
@@ -248,6 +249,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var accumulatedDepthMesh = AccumulatedDepthMesh()
     private var sceneScanID = UUID()
     private var finalPointCloudArtifactTask: Task<Void, Never>?
+    private var exportedScanDirectories: Set<URL> = []
     private var coachingOverlay: ARCoachingOverlayView?
     private var trackingStateFeedback = ""
     private var depthMappingFeedback = ""
@@ -514,14 +516,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
     private func saveFinalRecordingArtifacts() {
         let recorder = LocalROS2BagRecorder.shared
-        guard let targetDirectoryURL = recorder.currentArtifactDirectoryURL else { return }
+        guard let targetDirectoryURL = recorder.currentArtifactDirectoryURL,
+              exportedScanDirectories.insert(targetDirectoryURL).inserted else { return }
         let accumulator = accumulatedDepthMesh
         let mode = currentMode
         // Capture this scan and its destination. A later scan or Save Local
         // toggle must not substitute another mesh or cancel this export.
-        finalPointCloudArtifactTask = Task {
+        finalPointCloudArtifactTask = Task.detached(priority: .utility) {
             let mesh = await accumulator.snapshot()
-            guard let artifact = makeFinalOverlayMeshArtifact(from: mesh, mode: mode) else { return }
+            guard let artifact = Self.makeFinalOverlayMeshArtifact(from: mesh, mode: mode) else { return }
             recorder.recordFinalOverlayMesh(artifact, in: targetDirectoryURL)
             recorder.recordFinalPointCloud(LocalPointCloudArtifact(
                 source: artifact.source + "_vertices", coordinateFrame: artifact.coordinateFrame,
@@ -535,10 +538,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     func currentFinalOverlayMeshArtifact() async -> LocalOverlayMeshArtifact? {
-        makeFinalOverlayMeshArtifact(from: await accumulatedDepthMesh.snapshot(), mode: currentMode)
+        Self.makeFinalOverlayMeshArtifact(from: await accumulatedDepthMesh.snapshot(), mode: currentMode)
     }
 
-    private func makeFinalOverlayMeshArtifact(from mesh: ColoredSceneMesh, mode: VisualizationMode) -> LocalOverlayMeshArtifact? {
+    nonisolated private static func makeFinalOverlayMeshArtifact(from mesh: ColoredSceneMesh, mode: VisualizationMode) -> LocalOverlayMeshArtifact? {
         guard !mesh.isEmpty else { return nil }
         return LocalOverlayMeshArtifact(
             source: "accumulated_depth_anything_lidar_calibrated",
