@@ -13,10 +13,6 @@ nonisolated struct SafeARMesh: @unchecked Sendable {
     let vertices: [SIMD3<Float>]
     let indices: [UInt32]
     let transform: simd_float4x4
-    // A new anchor extraction gets a new revision; asynchronous coloring must
-    // never replace geometry from a more recent update.
-    var revision = UUID()
-    var colors: [SIMD3<UInt8>] = []
 }
 
 nonisolated enum MeshGenerator {
@@ -29,6 +25,16 @@ nonisolated enum MeshGenerator {
 
         static let overlay = DepthAnythingMeshConfiguration(
             step: 1,
+            minimumDepth: 0.1,
+            maximumDepth: .greatestFiniteMagnitude,
+            maximumDepthDiscontinuity: 0.45,
+            maximumTriangleCount: 600_000
+        )
+
+        // Sample every other depth pixel for the persistent scene. Spatial
+        // welding then removes sub-voxel geometry and repeated triangles.
+        static let accumulatedScene = DepthAnythingMeshConfiguration(
+            step: 2,
             minimumDepth: 0.1,
             maximumDepth: .greatestFiniteMagnitude,
             maximumDepthDiscontinuity: 0.45,

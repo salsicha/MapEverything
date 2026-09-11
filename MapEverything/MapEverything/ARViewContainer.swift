@@ -174,20 +174,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     scanWorkSession = ScanWorkSession()
                     // Old tasks retain their own actors/cache, so a suspended
                     // mutation cannot repopulate the next scan's map.
-                    pointManager = PointCloudManager()
                     surfelMap = ColoredSurfelMap()
                     depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
-                    sceneMeshesByID.removeAll()
-                    sceneMeshColorizer = SceneMeshColorizer()
+                    accumulatedDepthMesh = AccumulatedDepthMesh(voxelSize: voxelSize, maximumVertices: maxPointLimit)
                     sceneScanID = UUID()
-                    sceneMeshColorQueue.removeAll()
-                    queuedSceneMeshIDs.removeAll()
-                    clearDepthAnythingMeshSnapshot()
-                    let pointManager = pointManager
                     let surfelMap = surfelMap
                     let voxelSize = voxelSize
                     Task {
-                        await pointManager.setVoxelSize(voxelSize)
                         await surfelMap.configure(voxelSize: max(0.02, voxelSize * 0.8))
                     }
                     delegate?.didUpdateStoppedInspectionScene(nil)
@@ -209,7 +202,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
             }
         }
     }
-    private var pointManager = PointCloudManager()
     private var surfelMap = ColoredSurfelMap()
     private let pointCloudProcessor = PointCloudProcessor()
     // Written once by the preload task before scanning starts.
@@ -241,7 +233,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
     var boundingBoxSize: Float = 20.0
     var voxelSize: Float = 0.05 {
         didSet {
-            Task { await pointManager.setVoxelSize(voxelSize) }
             Task { await surfelMap.configure(voxelSize: max(0.02, voxelSize * 0.8)) }
         }
     }
@@ -255,18 +246,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var liveSurfelAnchor: AnchorEntity?
     private var liveSurfelEntity: ModelEntity?
     private var liveSurfelUpdateTask: Task<Void, Never>?
-    private var latestDepthAnythingMeshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
-    // Retain the latest geometry for every observed anchor, including areas
-    // outside the final camera view. Cleared only when a new AR scan starts.
-    private var sceneMeshesByID: [UUID: SafeARMesh] = [:]
-    private var sceneMeshColorizer = SceneMeshColorizer()
+    private var accumulatedDepthMesh = AccumulatedDepthMesh()
     private var sceneScanID = UUID()
-    private var sceneMeshColorQueue: [UUID] = []
-    private var queuedSceneMeshIDs: Set<UUID> = []
-    private var latestDepthAnythingPointCloud: [ColoredPoint] = []
     private var finalPointCloudArtifactTask: Task<Void, Never>?
-    private let depthMeshVisualizationInterval: TimeInterval = 0.5
-    private var lastDepthMeshVisualizationTime: TimeInterval = 0
     private var coachingOverlay: ARCoachingOverlayView?
     
     override func viewDidLoad() {
@@ -339,8 +321,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         liveSurfelUpdateTask = nil
         liveSurfelEntity = nil
         liveSurfelAnchor = nil
-        latestDepthAnythingMeshSnapshot = nil
-        latestDepthAnythingPointCloud = []
         coachingOverlay = nil
         
         let av = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
@@ -507,273 +487,74 @@ class ARViewController: UIViewController, ARSessionDelegate {
         anchorEntities.values.forEach { arView?.scene.removeAnchor($0) }
         meshEntities.removeAll()
         anchorEntities.removeAll()
-        clearDepthAnythingMeshSnapshot()
-    }
-
-    private func clearDepthAnythingMeshSnapshot() {
-        latestDepthAnythingMeshSnapshot = nil
-        latestDepthAnythingPointCloud = []
     }
 
     private func freezeCurrentMeshForInspection() {
-        let meshes = currentSceneMeshes()
-        let colorizer = sceneMeshColorizer
+        let accumulator = accumulatedDepthMesh
         let scanID = sceneScanID
         Task { [weak self] in
-            // Most chunks already have colors. Finish only the latest pending
-            // revisions before presenting, without blocking the stop button.
-            let colored = await colorizer.colorize(meshes, refresh: false)
+            let mesh = await accumulator.snapshot()
             guard let self, self.sceneScanID == scanID, !self.isScanning else { return }
-            self.applyColoredSceneMeshes(colored)
-            self.delegate?.didUpdateStoppedInspectionScene(self.makeStoppedInspectionScene())
+            self.delegate?.didUpdateStoppedInspectionScene(self.makeInspectionScene(from: mesh))
         }
     }
 
-    func makeStoppedInspectionScene() -> SCNScene? {
-        // A Depth Anything snapshot covers one camera frame. The accumulated
-        // ARKit reconstruction must take precedence for whole-scan inspection.
-        if let scene = makeInspectionScene(from: currentSceneMeshes()) {
-            return scene
-        }
-        if let latestDepthAnythingMeshSnapshot {
-            return makeInspectionScene(from: latestDepthAnythingMeshSnapshot)
-        }
-        return nil
+    func makeStoppedInspectionScene() async -> SCNScene? {
+        makeInspectionScene(from: await accumulatedDepthMesh.snapshot())
     }
 
-    func updateSceneMeshes(_ meshes: [SafeARMesh]) {
-        for mesh in meshes where !mesh.vertices.isEmpty && mesh.indices.count >= 3 {
-            sceneMeshesByID[mesh.identifier] = mesh
-            if queuedSceneMeshIDs.insert(mesh.identifier).inserted {
-                sceneMeshColorQueue.append(mesh.identifier)
-            }
-        }
-    }
-
-    func applyColoredSceneMeshes(_ meshes: [SafeARMesh]) {
-        for mesh in meshes where sceneMeshesByID[mesh.identifier]?.revision == mesh.revision {
-            sceneMeshesByID[mesh.identifier] = mesh
-        }
-    }
-
-    private func takeSceneMeshesForColoring() -> [SafeARMesh] {
-        // Revisit stable chunks too: camera coverage can improve even when
-        // ARKit has not changed their geometry. Limit work per capture frame.
-        if sceneMeshColorQueue.isEmpty {
-            sceneMeshColorQueue = sceneMeshesByID.keys.sorted { $0.uuidString < $1.uuidString }
-            queuedSceneMeshIDs = Set(sceneMeshColorQueue)
-        }
-        var meshes: [SafeARMesh] = []
-        var vertexCount = 0
-        var consumed = 0
-        for id in sceneMeshColorQueue {
-            if vertexCount >= 50_000 { break }
-            consumed += 1
-            queuedSceneMeshIDs.remove(id)
-            if let mesh = sceneMeshesByID[id] {
-                meshes.append(mesh)
-                vertexCount += mesh.vertices.count
-            }
-        }
-        sceneMeshColorQueue.removeFirst(consumed)
-        return meshes
-    }
-
-    private func currentSceneMeshes() -> [SafeARMesh] {
-        // Only use geometry collected by this scan's anchor callbacks. After
-        // reset/pause, ARKit's currentFrame may still belong to the last scan.
-        return sceneMeshesByID.values.sorted { $0.identifier.uuidString < $1.identifier.uuidString }
+    @discardableResult
+    func accumulateDepthAnythingMeshSnapshot(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot) async -> AccumulatedDepthMesh.Statistics {
+        await accumulatedDepthMesh.integrate(mesh)
     }
 
     private func saveFinalRecordingArtifacts() {
         let recorder = LocalROS2BagRecorder.shared
         guard let targetDirectoryURL = recorder.currentArtifactDirectoryURL else { return }
-
-        let meshes = currentSceneMeshes()
-        let colorizer = sceneMeshColorizer
+        let accumulator = accumulatedDepthMesh
         let mode = currentMode
-        let fallbackArtifact = meshes.isEmpty
-            ? latestDepthAnythingMeshSnapshot.flatMap { makeFinalOverlayMeshArtifact(from: $0) }
-            : nil
-        let depthAnythingPoints = latestDepthAnythingPointCloud
-        // Let prior destinations finish saving even if another recording
-        // segment ends before their background work has completed.
-        finalPointCloudArtifactTask = Task { [pointManager] in
-            // Capture this scan and destination before awaiting; a new scan or
-            // recorder segment must not change which mesh gets saved here.
-            let colored = await colorizer.colorize(meshes, refresh: false)
-            guard !Task.isCancelled else { return }
-            let meshArtifact = makeFinalOverlayMeshArtifact(from: colored, mode: mode) ?? fallbackArtifact
-            if let meshArtifact {
-                recorder.recordFinalOverlayMesh(meshArtifact, in: targetDirectoryURL)
-            }
-            let cleanedPoints = await pointManager.getCleanedPoints(maxDistance: .greatestFiniteMagnitude)
-            let artifact: LocalPointCloudArtifact?
-
-            if !cleanedPoints.isEmpty {
-                artifact = LocalPointCloudArtifact(
-                    source: "accumulated_lidar_pointcloud",
-                    coordinateFrame: "map",
-                    capturedAt: Date(),
-                    points: cleanedPoints.map { point in
-                        LocalPointCloudArtifact.Point(position: point.position, color: point.color)
-                    },
-                    metadata: ["point_count_source": "point_manager"]
-                )
-            } else if !depthAnythingPoints.isEmpty {
-                artifact = LocalPointCloudArtifact(
-                    source: "depth_anything_lidar_calibrated_full_resolution",
-                    coordinateFrame: "map",
-                    capturedAt: Date(),
-                    points: depthAnythingPoints.map { point in
-                        LocalPointCloudArtifact.Point(position: point.position, color: point.color)
-                    },
-                    metadata: [
-                        "point_count_source": "latest_full_depthanything_frame",
-                        "lidar_usage": "calibration_only"
-                    ]
-                )
-            } else if let meshArtifact {
-                artifact = LocalPointCloudArtifact(
-                    source: "\(meshArtifact.source)_vertices",
-                    coordinateFrame: meshArtifact.coordinateFrame,
-                    capturedAt: meshArtifact.capturedAt,
-                    points: meshArtifact.vertices.enumerated().map { index, vertex in
-                        LocalPointCloudArtifact.Point(
-                            position: vertex,
-                            color: meshArtifact.colors.count == meshArtifact.vertices.count
-                                ? meshArtifact.colors[index] : SIMD3<UInt8>(255, 255, 255)
-                        )
-                    },
-                    metadata: [
-                        "point_count_source": "overlay_mesh_vertices"
-                    ]
-                )
-            } else {
-                artifact = nil
-            }
-
-            guard !Task.isCancelled, let artifact else { return }
-            recorder.recordFinalPointCloud(artifact, in: targetDirectoryURL)
+        // Capture this scan and its destination. A later scan or Save Local
+        // toggle must not substitute another mesh or cancel this export.
+        finalPointCloudArtifactTask = Task {
+            let mesh = await accumulator.snapshot()
+            guard let artifact = makeFinalOverlayMeshArtifact(from: mesh, mode: mode) else { return }
+            recorder.recordFinalOverlayMesh(artifact, in: targetDirectoryURL)
+            recorder.recordFinalPointCloud(LocalPointCloudArtifact(
+                source: artifact.source + "_vertices", coordinateFrame: artifact.coordinateFrame,
+                capturedAt: artifact.capturedAt,
+                points: zip(mesh.vertices, mesh.colors).map {
+                    LocalPointCloudArtifact.Point(position: $0.0, color: $0.1)
+                },
+                metadata: ["point_count_source": "accumulated_depthanything_mesh"]
+            ), in: targetDirectoryURL)
         }
     }
 
-    func currentFinalOverlayMeshArtifact() -> LocalOverlayMeshArtifact? {
-        if let artifact = makeFinalOverlayMeshArtifact(from: currentSceneMeshes()) {
-            return artifact
-        }
-        if let latestDepthAnythingMeshSnapshot,
-           let artifact = makeFinalOverlayMeshArtifact(from: latestDepthAnythingMeshSnapshot) {
-            return artifact
-        }
-
-        return nil
+    func currentFinalOverlayMeshArtifact() async -> LocalOverlayMeshArtifact? {
+        makeFinalOverlayMeshArtifact(from: await accumulatedDepthMesh.snapshot(), mode: currentMode)
     }
 
-    private func makeFinalOverlayMeshArtifact(from safeMeshes: [SafeARMesh], mode: VisualizationMode? = nil) -> LocalOverlayMeshArtifact? {
-        var vertices: [SIMD3<Float>] = []
-        var indices: [UInt32] = []
-        var colors: [SIMD3<UInt8>] = []
-
-        for mesh in safeMeshes {
-            guard !mesh.vertices.isEmpty, mesh.indices.count >= 3 else { continue }
-            let vertexOffset = vertices.count
-            guard vertexOffset <= Int(UInt32.max) else { break }
-
-            vertices.reserveCapacity(vertices.count + mesh.vertices.count)
-            colors.append(contentsOf: mesh.colors.count == mesh.vertices.count
-                ? mesh.colors
-                : Array(repeating: SceneMeshColorizer.unobservedColor, count: mesh.vertices.count))
-            for vertex in mesh.vertices {
-                let transformed = simd_mul(mesh.transform, SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1))
-                vertices.append(SIMD3<Float>(transformed.x, transformed.y, transformed.z))
-            }
-
-            indices.reserveCapacity(indices.count + mesh.indices.count)
-            for index in mesh.indices {
-                let localIndex = Int(index)
-                guard localIndex >= 0, localIndex < mesh.vertices.count else { continue }
-                let combinedIndex = vertexOffset + localIndex
-                guard combinedIndex <= Int(UInt32.max) else { continue }
-                indices.append(UInt32(combinedIndex))
-            }
-        }
-
-        let artifact = LocalOverlayMeshArtifact(
-            source: "arkit_scene_reconstruction",
-            coordinateFrame: "map",
-            capturedAt: Date(),
-            vertices: vertices,
-            indices: indices,
-            colors: colors,
+    private func makeFinalOverlayMeshArtifact(from mesh: ColoredSceneMesh, mode: VisualizationMode) -> LocalOverlayMeshArtifact? {
+        guard !mesh.isEmpty else { return nil }
+        return LocalOverlayMeshArtifact(
+            source: "accumulated_depth_anything_lidar_calibrated",
+            coordinateFrame: "map", capturedAt: Date(),
+            vertices: mesh.vertices, indices: mesh.indices, colors: mesh.colors,
             metadata: [
-                "visualization_mode": (mode ?? currentMode).rawValue,
-                "mesh_count": "\(safeMeshes.count)",
-                "color_source": "accumulated_camera_lidar_samples"
-            ]
-        )
-        return artifact.isEmpty ? nil : artifact
-    }
-
-    private func makeFinalOverlayMeshArtifact(
-        from snapshot: MeshGenerator.DepthAnythingMeshSnapshot
-    ) -> LocalOverlayMeshArtifact? {
-        let artifact = LocalOverlayMeshArtifact(
-            source: "depth_anything_lidar_calibrated_overlay",
-            coordinateFrame: "map",
-            capturedAt: Date(),
-            vertices: snapshot.vertices,
-            indices: snapshot.indices,
-            colors: snapshot.colors,
-            metadata: [
-                "visualization_mode": currentMode.rawValue,
+                "visualization_mode": mode.rawValue,
                 "lidar_usage": "calibration_only",
-                "point_source": "full_resolution_depthanything"
+                "color_source": "same_camera_frame_as_depth_inference"
             ]
         )
-        return artifact.isEmpty ? nil : artifact
     }
 
-    private func makeInspectionScene(from safeMeshes: [SafeARMesh]) -> SCNScene? {
+    private func makeInspectionScene(from mesh: ColoredSceneMesh) -> SCNScene? {
+        guard !mesh.isEmpty else { return nil }
         let scene = SCNScene()
-        var hasGeometry = false
-
-        for mesh in safeMeshes {
-            guard !mesh.vertices.isEmpty, mesh.indices.count >= 3 else { continue }
-
-            let worldVertices = mesh.vertices.map { vertex in
-                let transformed = simd_mul(mesh.transform, SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1))
-                return SCNVector3(transformed.x, transformed.y, transformed.z)
-            }
-
-            scene.rootNode.addChildNode(SCNNode(
-                geometry: makeLitInspectionGeometry(
-                    vertices: worldVertices,
-                    indices: mesh.indices,
-                    tint: .lightGray,
-                    vertexColors: mesh.colors.count == mesh.vertices.count ? mesh.colors : nil
-                )
-            ))
-            hasGeometry = true
-        }
-
-        return hasGeometry ? scene : nil
-    }
-
-    private func makeInspectionScene(from snapshot: MeshGenerator.DepthAnythingMeshSnapshot) -> SCNScene? {
-        guard !snapshot.vertices.isEmpty, snapshot.indices.count >= 3 else { return nil }
-
-        let scene = SCNScene()
-        let worldVertices = snapshot.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
-        let colors = snapshot.colors.count == snapshot.vertices.count ? snapshot.colors : nil
-        scene.rootNode.addChildNode(SCNNode(
-            geometry: makeLitInspectionGeometry(
-                vertices: worldVertices,
-                indices: snapshot.indices,
-                tint: .systemTeal,
-                vertexColors: colors
-            )
-        ))
+        scene.rootNode.addChildNode(SCNNode(geometry: makeLitInspectionGeometry(
+            vertices: mesh.vertices.map { SCNVector3($0.x, $0.y, $0.z) },
+            indices: mesh.indices, tint: .white, vertexColors: mesh.colors
+        )))
         return scene
     }
 
@@ -899,7 +680,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
         transform: simd_float4x4,
         workSession: ScanWorkSession,
         calibrationCache: DepthAnythingCalibrationCache,
-        shouldBuildMesh: Bool
+        shouldBuildPointCloud: Bool,
+        meshConfiguration: MeshGenerator.DepthAnythingMeshConfiguration
     ) async -> DepthAnythingMappingFrame? {
         // Rate-limit so the model only runs at ~enhancedFrameInterval. A skipped
         // frame leaves the current Depth Anything mesh in place instead of falling
@@ -933,24 +715,30 @@ class ARViewController: UIViewController, ARSessionDelegate {
             cameraTransform: transform
         ) else { return nil }
 
-        let calibratedPoints = pointCloudProcessor.processDepthAnythingPointCloud(
-            cameraImage: cameraImage,
-            intrinsics: intrinsics,
-            imageResolution: imageResolution,
-            transform: transform,
-            relativeDepthMap: relative,
-            calibration: calibration
+        // The retained cameraImage is both the inference input above and the
+        // RGB source below. Never fetch currentFrame after inference finishes.
+        let meshSnapshot = MeshGenerator.createDepthAnythingMeshSnapshot(
+            from: relative, calibration: calibration, intrinsics: intrinsics,
+            imageResolution: imageResolution, transform: transform,
+            configuration: meshConfiguration, cameraImage: cameraImage
         )
-        let meshSnapshot = shouldBuildMesh
-            ? MeshGenerator.createDepthAnythingMeshSnapshot(
-                from: relative,
-                calibration: calibration,
-                intrinsics: intrinsics,
-                imageResolution: imageResolution,
-                transform: transform,
-                cameraImage: cameraImage
+        let calibratedPoints: [ColoredPoint]
+        if shouldBuildPointCloud, let meshSnapshot,
+           meshSnapshot.colors.count == meshSnapshot.vertices.count {
+            // Reuse projection and RGB sampling already done by mesh creation.
+            calibratedPoints = zip(meshSnapshot.vertices, meshSnapshot.colors).map {
+                ColoredPoint(position: $0.0, color: $0.1)
+            }
+        } else if shouldBuildPointCloud {
+            // An isolated valid depth point can exist without any valid faces.
+            calibratedPoints = pointCloudProcessor.processDepthAnythingPointCloud(
+                cameraImage: cameraImage, intrinsics: intrinsics,
+                imageResolution: imageResolution, transform: transform,
+                relativeDepthMap: relative, calibration: calibration
             )
-            : nil
+        } else {
+            calibratedPoints = []
+        }
 
         guard !calibratedPoints.isEmpty || meshSnapshot != nil else { return nil }
         return DepthAnythingMappingFrame(
@@ -1013,12 +801,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 print("Failed to create surfel preview mesh: \(error)")
             }
         }
-    }
-
-    // Keep depth geometry for recording/fallback inspection, but never add its
-    // dense, blue overlay to the camera scene. ARKit supplies the live wireframe.
-    func updateDepthAnythingMeshSnapshot(with snapshot: MeshGenerator.DepthAnythingMeshSnapshot?) {
-        latestDepthAnythingMeshSnapshot = snapshot
     }
 
     private static func makeSurfelPreviewMesh(from surfels: [ColoredSurfel]) -> SurfelPreviewMesh? {
@@ -1164,7 +946,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let transform = frame.camera.transform
         let timestamp = frame.timestamp
         let workSession = scanWorkSession
-        let pointManager = pointManager
         let surfelMap = surfelMap
         let calibrationCache = depthAnythingCalibrationCache
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else {
@@ -1196,8 +977,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
             && !isPublishingCameraImage
         let shouldRefreshSurfelVisualization = currentMode == .surfels
             && timestamp - lastSurfelVisualizationTime >= surfelVisualizationInterval
-        let shouldRefreshDepthMeshVisualization = currentMode == .solidMesh
-            && timestamp - lastDepthMeshVisualizationTime >= depthMeshVisualizationInterval
+        let shouldPublishDepthMesh = topicRegistry.isStreamEnabled(.mesh) && bridge.hasPublishOrBufferTarget
 
         if shouldPublishCameraImage {
             lastCameraImagePublishTime = timestamp
@@ -1225,8 +1005,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let cameraImageBox = UncheckedSendable(cameraImage)
         let lidarDepthMapBox = UncheckedSendable(lidarDepthMap)
         let lidarConfidenceMapBox = UncheckedSendable(lidarConfidenceMap)
-        let meshColorizer = sceneMeshColorizer
-        let meshesToColor = takeSceneMeshesForColoring()
+        let accumulator = accumulatedDepthMesh
         frameProcessingTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
             defer {
@@ -1240,25 +1019,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
             let lidarDepthMap = lidarDepthMapBox.value
             let lidarConfidenceMap = lidarConfidenceMapBox.value
 
-            // Collect real camera colors regardless of ROS, saving, or live
-            // visualization settings. Do this before the slower AI work.
-            let lidarPointCloud = autoreleasepool {
+            // LiDAR RGB processing is only needed by its requested ROS stream;
+            // the accumulated scene consumes calibrated Depth Anything only.
+            let lidarPointCloud: [ColoredPoint] = shouldPublishPointCloud ? autoreleasepool {
                 self.pointCloudProcessor.processPointCloud(
-                    depthMap: lidarDepthMap,
-                    cameraImage: cameraImage,
-                    intrinsics: intrinsics,
-                    imageResolution: imageResolution,
-                    transform: transform,
-                    sampleStep: 2
+                    depthMap: lidarDepthMap, cameraImage: cameraImage,
+                    intrinsics: intrinsics, imageResolution: imageResolution, transform: transform
                 )
-            }
-            await meshColorizer.integrate(lidarPointCloud)
-            let coloredMeshes = await meshColorizer.colorize(meshesToColor)
-            await MainActor.run {
-                guard workSession.isActive, self.isScanning else { return }
-                self.applyColoredSceneMeshes(coloredMeshes)
-            }
-            guard workSession.isActive, !Task.isCancelled else { return }
+            } : []
 
             let mappingFrame: DepthAnythingMappingFrame?
             if shouldUseDepthAnythingDepth {
@@ -1272,12 +1040,28 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     transform: transform,
                     workSession: workSession,
                     calibrationCache: calibrationCache,
-                    shouldBuildMesh: shouldRefreshDepthMeshVisualization
+                    shouldBuildPointCloud: shouldPublishPointCloud || shouldRefreshSurfelVisualization,
+                    meshConfiguration: shouldPublishDepthMesh || shouldPublishPointCloud ? .overlay : .accumulatedScene
                 )
             } else {
                 mappingFrame = nil
             }
             guard workSession.isActive, !Task.isCancelled else { return }
+
+            if let meshSnapshot = mappingFrame?.meshSnapshot {
+                let stats = await accumulator.integrate(meshSnapshot)
+                await MainActor.run {
+                    guard workSession.isActive, self.isScanning else { return }
+                    self.cumulativePointCount = stats.vertexCount
+                    self.delegate?.didUpdatePointCount(stats.vertexCount)
+                    if stats.reachedCapacity || stats.vertexCount >= self.maxPointLimit {
+                        self.delegate?.didReachScanLimit(limit: stats.vertexCount)
+                    }
+                }
+                workSession.withPublishing {
+                    ROS2BridgeClient.shared.publishDepthAnythingMesh(meshSnapshot, timestamp: timestamp)
+                }
+            }
 
             let depthAnythingPointCloud = mappingFrame?.calibratedPoints ?? []
             let newPoints = mappingFrame?.calibratedPoints ?? []
@@ -1311,39 +1095,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 }
             }
 
-            if !lidarPointCloud.isEmpty {
-                // The scan limit bounds accumulated unique voxels, not the
-                // per-frame counts of transient Depth Anything clouds.
-                if workSession.isActive, !Task.isCancelled {
-                    let voxelTotal = await pointManager.addAndFilter(newPoints: lidarPointCloud)
-                    await MainActor.run {
-                        guard workSession.isActive, self.isScanning else { return }
-                        self.cumulativePointCount = voxelTotal
-                        self.delegate?.didUpdatePointCount(voxelTotal)
-                        if voxelTotal >= self.maxPointLimit {
-                            self.delegate?.didReachScanLimit(limit: self.maxPointLimit)
-                        }
-                    }
-                }
-            }
-
-            if let meshSnapshot = mappingFrame?.meshSnapshot {
-                await MainActor.run {
-                    guard workSession.isActive, self.isScanning else { return }
-                    self.lastDepthMeshVisualizationTime = timestamp
-                    self.updateDepthAnythingMeshSnapshot(with: meshSnapshot)
-                }
-                // Nonisolated publish; the DA cadence already throttles it.
-                workSession.withPublishing {
-                    ROS2BridgeClient.shared.publishDepthAnythingMesh(meshSnapshot, timestamp: timestamp)
-                }
-            }
-
             if !newPoints.isEmpty {
-                await MainActor.run {
-                    guard workSession.isActive, self.isScanning else { return }
-                    self.latestDepthAnythingPointCloud = newPoints
-                }
                 if shouldRefreshSurfelVisualization, workSession.isActive, !Task.isCancelled {
                     _ = await surfelMap.fuse(
                         points: newPoints,
@@ -1364,14 +1116,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
     
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         if isScanning {
-            updateSceneMeshes(MeshGenerator.extractSafeMeshes(from: anchors.compactMap { $0 as? ARMeshAnchor }))
             publishMapToROS2IfNeeded(anchors: anchors)
         }
     }
     
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         guard isScanning else { return }
-        updateSceneMeshes(MeshGenerator.extractSafeMeshes(from: anchors.compactMap { $0 as? ARMeshAnchor }))
         publishMapToROS2IfNeeded(anchors: anchors)
     }
     
