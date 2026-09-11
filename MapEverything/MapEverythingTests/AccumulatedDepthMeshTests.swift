@@ -7,6 +7,15 @@ import simd
 @testable import MapEverything
 
 struct AccumulatedDepthMeshTests {
+    @Test("A frame queued before tracking loss cannot enter the accumulated scene")
+    func cancelledTrackingFrameIsRejected() async {
+        let map = AccumulatedDepthMesh()
+        let session = ScanWorkSession()
+        session.cancel()
+        _ = await map.integrate(triangle(color: red), workSession: session)
+        #expect(await map.snapshot().isEmpty)
+    }
+
     private let red = SIMD3<UInt8>(220, 30, 20)
     private let green = SIMD3<UInt8>(20, 210, 40)
 

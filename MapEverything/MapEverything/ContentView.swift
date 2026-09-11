@@ -218,7 +218,20 @@ struct ContentView: View {
             ZStack(alignment: .topLeading) {
                 // Hit testing stays enabled so the Advanced disclosure's
                 // controls are usable; the panel only covers its own bounds.
-                recorderDiagnosticsPanel(width: recorderWidth)
+                VStack(alignment: .leading, spacing: 8) {
+                    recorderDiagnosticsPanel(width: recorderWidth)
+                    if isScanning, !trackingFeedback.isEmpty {
+                        Text(trackingFeedback)
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .frame(width: recorderWidth)
+                            .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 12))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .allowsHitTesting(false)
+                            .accessibilityIdentifier("scannerTrackingFeedback")
+                    }
+                }
                     .padding(.top, topInset)
                     .padding(.leading, leadingInset)
                     .frame(

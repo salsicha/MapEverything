@@ -172,19 +172,20 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 if isScanning {
                     cancelFrameWork()
                     scanWorkSession = ScanWorkSession()
-                    // Old tasks retain their own actors/cache, so a suspended
+                    // Old tasks retain their own actors, so a suspended
                     // mutation cannot repopulate the next scan's map.
                     surfelMap = ColoredSurfelMap()
-                    depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
                     accumulatedDepthMesh = AccumulatedDepthMesh(voxelSize: voxelSize, maximumVertices: maxPointLimit)
                     sceneScanID = UUID()
+                    depthMappingFeedback = ""
+                    trackingStateFeedback = ""
+                    publishTrackingFeedback()
                     let surfelMap = surfelMap
                     let voxelSize = voxelSize
                     Task {
                         await surfelMap.configure(voxelSize: max(0.02, voxelSize * 0.8))
                     }
                     delegate?.didUpdateStoppedInspectionScene(nil)
-                    depthAnythingCalibrationCache.reset()
                     resumeWorldTrackingSession()
                 } else {
                     cancelFrameWork()
@@ -193,7 +194,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     ROS2BridgeClient.shared.clearDepthMeshMarker(
                         timestamp: ProcessInfo.processInfo.systemUptime
                     )
-                    depthAnythingCalibrationCache.reset()
                     freezeCurrentMeshForInspection()
                     cancelMeshUpdateTasks()
                     arView?.session.pause()
@@ -206,7 +206,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private let pointCloudProcessor = PointCloudProcessor()
     // Written once by the preload task before scanning starts.
     nonisolated(unsafe) private var depthAnythingProcessor: DepthAnythingProcessor?
-    private var depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
     private var depthAnythingPreloadTask: Task<Void, Never>?
     private var lastEnhancedFrameTime: TimeInterval = 0
     private let enhancedFrameInterval: TimeInterval = 0.5 // Run Depth Anything at ~2 fps
@@ -250,6 +249,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var sceneScanID = UUID()
     private var finalPointCloudArtifactTask: Task<Void, Never>?
     private var coachingOverlay: ARCoachingOverlayView?
+    private var trackingStateFeedback = ""
+    private var depthMappingFeedback = ""
+
+    private func publishTrackingFeedback() {
+        delegate?.didUpdateTrackingFeedback(trackingStateFeedback.isEmpty ? depthMappingFeedback : trackingStateFeedback)
+    }
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -344,7 +349,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let overlay = ARCoachingOverlayView()
         overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         overlay.session = av.session
-        overlay.goal = .anyPlane
+        overlay.goal = .tracking
         av.addSubview(overlay)
         coachingOverlay = overlay
 
@@ -363,7 +368,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
             configuration.initialWorldMap = worldMap
             delegate?.didUpdateTrackingFeedback("Resuming previous scan area…")
         }
-        depthAnythingCalibrationCache.reset()
         cumulativePointCount = 0
         clearLiveMeshEntities()
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
@@ -665,8 +669,16 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
     @MainActor
     private func shouldUseDepthAnythingMappingDepth() -> Bool {
-        guard depthAnythingProcessor != nil else { return false }
-        if ProcessInfo.processInfo.thermalState == .critical { return false }
+        guard depthAnythingProcessor != nil else {
+            depthMappingFeedback = "Depth model unavailable. Restart the app to prepare it."
+            publishTrackingFeedback()
+            return false
+        }
+        if ProcessInfo.processInfo.thermalState == .critical {
+            depthMappingFeedback = "Depth scanning paused while iPhone cools down."
+            publishTrackingFeedback()
+            return false
+        }
         return true
     }
 
@@ -679,7 +691,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         imageResolution: CGSize,
         transform: simd_float4x4,
         workSession: ScanWorkSession,
-        calibrationCache: DepthAnythingCalibrationCache,
         shouldBuildPointCloud: Bool,
         meshConfiguration: MeshGenerator.DepthAnythingMeshConfiguration
     ) async -> DepthAnythingMappingFrame? {
@@ -707,13 +718,18 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
         guard workSession.isActive, !Task.isCancelled else { return nil }
-        guard let calibration = calibrationCache.calibration(
+        guard let calibration = DepthAnythingProcessor.maximumLikelihoodCalibration(
             relative: relative,
             lidarDepthMap: lidarDepthMap,
-            lidarConfidenceMap: lidarConfidenceMap,
-            timestamp: timestamp,
-            cameraTransform: transform
-        ) else { return nil }
+            lidarConfidenceMap: lidarConfidenceMap
+        ) else {
+            await MainActor.run {
+                guard workSession.isActive, self.isScanning else { return }
+                self.depthMappingFeedback = "Depth scale unavailable. Include shaded, nearby surfaces at different distances."
+                self.publishTrackingFeedback()
+            }
+            return nil
+        }
 
         // The retained cameraImage is both the inference input above and the
         // RGB source below. Never fetch currentFrame after inference finishes.
@@ -740,6 +756,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
             calibratedPoints = []
         }
 
+        await MainActor.run {
+            guard workSession.isActive, self.isScanning else { return }
+            self.depthMappingFeedback = meshSnapshot == nil ? "No reliable surface depth. Include nearby textured surfaces." : ""
+            self.publishTrackingFeedback()
+        }
         guard !calibratedPoints.isEmpty || meshSnapshot != nil else { return nil }
         return DepthAnythingMappingFrame(
             calibratedPoints: calibratedPoints,
@@ -947,8 +968,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let timestamp = frame.timestamp
         let workSession = scanWorkSession
         let surfelMap = surfelMap
-        let calibrationCache = depthAnythingCalibrationCache
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else {
+            depthMappingFeedback = "Depth unavailable. Include shaded, nearby surfaces."
+            publishTrackingFeedback()
             isProcessingFrame = false
             return
         }
@@ -1039,7 +1061,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     imageResolution: imageResolution,
                     transform: transform,
                     workSession: workSession,
-                    calibrationCache: calibrationCache,
                     shouldBuildPointCloud: shouldPublishPointCloud || shouldRefreshSurfelVisualization,
                     meshConfiguration: shouldPublishDepthMesh || shouldPublishPointCloud ? .overlay : .accumulatedScene
                 )
@@ -1049,7 +1070,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
             guard workSession.isActive, !Task.isCancelled else { return }
 
             if let meshSnapshot = mappingFrame?.meshSnapshot {
-                let stats = await accumulator.integrate(meshSnapshot)
+                let stats = await accumulator.integrate(meshSnapshot, workSession: workSession)
                 await MainActor.run {
                     guard workSession.isActive, self.isScanning else { return }
                     self.cumulativePointCount = stats.vertexCount
@@ -1182,28 +1203,34 @@ class ARViewController: UIViewController, ARSessionDelegate {
             trackingQuality = .notAvailable
         }
         ROS2BridgeClient.shared.updateTrackingQuality(trackingQuality)
+        if trackingQuality != .normal {
+            // Cancel pending inference when ARKit loses tracking. Already
+            // accumulated geometry remains intact.
+            cancelFrameWork()
+        }
 
         switch camera.trackingState {
         case .notAvailable:
-            delegate?.didUpdateTrackingFeedback("Tracking Unavailable")
+            trackingStateFeedback = "Tracking Unavailable"
         case .limited(let reason):
             switch reason {
             case .excessiveMotion:
-                delegate?.didUpdateTrackingFeedback("Move Slower")
+                trackingStateFeedback = "Move Slower"
                 let generator = UINotificationFeedbackGenerator()
                 generator.notificationOccurred(.warning)
             case .insufficientFeatures:
-                delegate?.didUpdateTrackingFeedback("More Light / Features Needed")
+                trackingStateFeedback = "Tracking needs detail. Aim at nearby textured objects and move slowly."
             case .initializing:
-                delegate?.didUpdateTrackingFeedback("Calibrating...")
+                trackingStateFeedback = "Establishing tracking… Move slowly around nearby objects."
             case .relocalizing:
-                delegate?.didUpdateTrackingFeedback("Relocalizing — return to a previously scanned area")
+                trackingStateFeedback = "Relocalizing — return to a previously scanned area"
             @unknown default:
-                delegate?.didUpdateTrackingFeedback("Tracking Limited")
+                trackingStateFeedback = "Tracking Limited"
             }
         case .normal:
-            delegate?.didUpdateTrackingFeedback("")
+            trackingStateFeedback = ""
         }
+        publishTrackingFeedback()
     }
     
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -1212,6 +1239,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
     
     func sessionWasInterrupted(_ session: ARSession) {
+        cancelFrameWork()
         delegate?.didUpdateTrackingFeedback("Session interrupted — recording paused")
     }
 

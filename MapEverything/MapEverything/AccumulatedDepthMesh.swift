@@ -52,7 +52,10 @@ actor AccumulatedDepthMesh {
         self.maximumTriangles = max(0, min(maximumTriangles, 4_000_000))
     }
 
-    func integrate(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot) -> Statistics {
+    func integrate(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot, workSession: ScanWorkSession? = nil) -> Statistics {
+        // Recheck after the actor hop: tracking can be lost while a completed
+        // inference waits to enter the accumulator.
+        guard !Task.isCancelled, workSession?.isActive != false else { return statistics }
         // Never fabricate colors from another frame or silently import an
         // uncolored mesh. The producer supplies one camera color per vertex.
         guard mesh.colors.count == mesh.vertices.count else { return statistics }

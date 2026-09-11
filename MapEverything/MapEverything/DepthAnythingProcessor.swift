@@ -332,61 +332,25 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         confidenceSampling: LiDARConfidenceSampling
     ) -> MaximumLikelihoodCalibration? {
         relative.withReadAccess { relativeReader in
-            var sumW: Double = 0
-            var sumX: Double = 0
-            var sumY: Double = 0
-            var sumXX: Double = 0
-            var sumXY: Double = 0
-            var sampleCount = 0
-
+            var samples: [DepthCalibrationSample] = []
             let step = 4
             for y in stride(from: 0, to: lidarHeight, by: step) {
                 for x in stride(from: 0, to: lidarWidth, by: step) {
-                    let lidarDepth = lidarBase[y * lidarFloatsPerRow + x]
-                    guard Self.isValidLiDARDepth(lidarDepth) else { continue }
-
+                    let depth = lidarBase[y * lidarFloatsPerRow + x]
+                    guard Self.isValidLiDARDepth(depth) else { continue }
                     let nx = Float(x) / Float(max(lidarWidth - 1, 1))
                     let ny = Float(y) / Float(max(lidarHeight - 1, 1))
-                    let confidenceWeight = Self.lidarConfidenceWeight(
-                        confidenceSampling.value(normalizedX: nx, normalizedY: ny)
-                    )
-                    guard confidenceWeight > 0 else { continue }
-
-                    let rx = Int(nx * Float(max(relative.width - 1, 1)))
-                    let ry = Int(ny * Float(max(relative.height - 1, 1)))
-                    let r = relativeReader.value(atX: rx, y: ry)
+                    let confidence = Self.lidarConfidenceWeight(confidenceSampling.value(normalizedX: nx, normalizedY: ny))
+                    guard confidence > 0 else { continue }
+                    let r = relativeReader.value(atX: Int(nx * Float(max(relative.width - 1, 1))),
+                                                 y: Int(ny * Float(max(relative.height - 1, 1))))
                     guard r.isFinite, r > 0 else { continue }
-
-                    // Fit in inverse-depth space: 1/z = scale * r + offset.
-                    // sigma(1/z) = sigma(z) / z^2, so the ML weight gains z^4.
-                    let sigma = Self.lidarStandardDeviation(depth: lidarDepth)
-                    let inverseDepthSigma = sigma / (lidarDepth * lidarDepth)
-                    let weight = Double(confidenceWeight / (inverseDepthSigma * inverseDepthSigma))
-                    let xv = Double(r)
-                    let yv = 1.0 / Double(lidarDepth)
-
-                    sumW += weight
-                    sumX += weight * xv
-                    sumY += weight * yv
-                    sumXX += weight * xv * xv
-                    sumXY += weight * xv * yv
-                    sampleCount += 1
+                    let sigma = Self.lidarStandardDeviation(depth: depth) / (depth * depth)
+                    samples.append(DepthCalibrationSample(relative: Double(r), depth: Double(depth),
+                                                           weight: Double(confidence / (sigma * sigma))))
                 }
             }
-
-            guard sampleCount > 50 else { return nil }
-
-            let denom = (sumW * sumXX - sumX * sumX)
-            // Cauchy-Schwarz makes denom >= 0 up to rounding; a relative threshold
-            // rejects near-constant relative-depth frames whose denom is pure
-            // floating-point cancellation noise on ~1e14-magnitude sums.
-            guard denom > 1e-9 * sumW * sumXX else { return nil }
-
-            let scale = Float((sumW * sumXY - sumX * sumY) / denom)
-            let offset = Float((sumY * sumXX - sumX * sumXY) / denom)
-            guard scale.isFinite, offset.isFinite else { return nil }
-
-            return MaximumLikelihoodCalibration(scale: scale, offset: offset)
+            return RobustDepthCalibration.fit(samples)
         }
     }
 
@@ -424,11 +388,13 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         guard let confidence else { return 1.0 }
         switch confidence {
         case 0:
-            return 0.20
+            return 0
         case 1:
             return 0.65
-        default:
+        case 2:
             return 1.0
+        default:
+            return 0
         }
     }
 
@@ -444,246 +410,6 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         max(0.15, 0.10 + 0.08 * depth)
     }
 
-}
-
-nonisolated final class DepthAnythingCalibrationCache: @unchecked Sendable {
-    private struct Entry {
-        let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
-        let timestamp: TimeInterval
-        let cameraTransform: simd_float4x4
-        let relativeWidth: Int
-        let relativeHeight: Int
-        let lidarWidth: Int
-        let lidarHeight: Int
-        let lidarConfidenceWidth: Int?
-        let lidarConfidenceHeight: Int?
-    }
-
-    private let lock = NSLock()
-    private let maxAge: TimeInterval
-    private let maxTranslationMeters: Float
-    private let maxRotationRadians: Float
-    private var entry: Entry?
-
-    init(
-        maxAge: TimeInterval = 1.25,
-        maxTranslationMeters: Float = 0.20,
-        maxRotationRadians: Float = 0.25
-    ) {
-        self.maxAge = maxAge
-        self.maxTranslationMeters = maxTranslationMeters
-        self.maxRotationRadians = maxRotationRadians
-    }
-
-    func reset() {
-        lock.lock()
-        entry = nil
-        lock.unlock()
-    }
-
-    func calibration(
-        relative: RelativeDepthMap,
-        lidarDepthMap: CVPixelBuffer,
-        lidarConfidenceMap: CVPixelBuffer? = nil,
-        timestamp: TimeInterval,
-        cameraTransform: simd_float4x4
-    ) -> DepthAnythingProcessor.MaximumLikelihoodCalibration? {
-        let lidarWidth = CVPixelBufferGetWidth(lidarDepthMap)
-        let lidarHeight = CVPixelBufferGetHeight(lidarDepthMap)
-        let lidarConfidenceWidth = lidarConfidenceMap.map(CVPixelBufferGetWidth)
-        let lidarConfidenceHeight = lidarConfidenceMap.map(CVPixelBufferGetHeight)
-
-        lock.lock()
-        let previousEntry = entry
-        if let previousEntry,
-           isReusable(
-               previousEntry,
-               relative: relative,
-               lidarWidth: lidarWidth,
-               lidarHeight: lidarHeight,
-               lidarConfidenceWidth: lidarConfidenceWidth,
-               lidarConfidenceHeight: lidarConfidenceHeight,
-               timestamp: timestamp,
-               cameraTransform: cameraTransform
-           ) {
-            let calibration = previousEntry.calibration
-            lock.unlock()
-            return calibration
-        }
-        lock.unlock()
-
-        guard let fittedCalibration = DepthAnythingProcessor.maximumLikelihoodCalibration(
-            relative: relative,
-            lidarDepthMap: lidarDepthMap,
-            lidarConfidenceMap: lidarConfidenceMap
-        ) else { return nil }
-
-        let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
-        if let previousEntry,
-           isSmoothingSuccessor(
-               previousEntry,
-               relative: relative,
-               lidarWidth: lidarWidth,
-               lidarHeight: lidarHeight,
-               lidarConfidenceWidth: lidarConfidenceWidth,
-               lidarConfidenceHeight: lidarConfidenceHeight,
-               timestamp: timestamp,
-               cameraTransform: cameraTransform
-           ) {
-            calibration = Self.smoothedCalibration(new: fittedCalibration, previous: previousEntry.calibration)
-        } else {
-            calibration = fittedCalibration
-        }
-
-        let nextEntry = Entry(
-            calibration: calibration,
-            timestamp: timestamp,
-            cameraTransform: cameraTransform,
-            relativeWidth: relative.width,
-            relativeHeight: relative.height,
-            lidarWidth: lidarWidth,
-            lidarHeight: lidarHeight,
-            lidarConfidenceWidth: lidarConfidenceWidth,
-            lidarConfidenceHeight: lidarConfidenceHeight
-        )
-
-        lock.lock()
-        entry = nextEntry
-        lock.unlock()
-
-        return calibration
-    }
-
-    /// EMA weight applied to a newly fitted calibration when blending with its predecessor.
-    static let smoothingFactor: Float = 0.4
-    /// Relative jump beyond which a new fit is treated as a scene change and passed through.
-    static let smoothingMaxRelativeJump: Float = 0.3
-
-    /// Blends a newly accepted fit with the previous calibration to damp
-    /// frame-to-frame jitter in the inverse-depth coefficients. First-ever
-    /// fits (`previous == nil`) and large jumps pass through unmodified so
-    /// single-shot calibrations stay exact and scene changes take effect
-    /// immediately.
-    static func smoothedCalibration(
-        new: DepthAnythingProcessor.MaximumLikelihoodCalibration,
-        previous: DepthAnythingProcessor.MaximumLikelihoodCalibration?
-    ) -> DepthAnythingProcessor.MaximumLikelihoodCalibration {
-        guard let previous else { return new }
-        guard abs(new.scale - previous.scale) <= smoothingMaxRelativeJump * max(abs(previous.scale), 1e-6),
-              abs(new.offset - previous.offset) <= smoothingMaxRelativeJump * max(abs(previous.offset), 1e-3) else {
-            return new
-        }
-
-        let alpha = smoothingFactor
-        return DepthAnythingProcessor.MaximumLikelihoodCalibration(
-            scale: alpha * new.scale + (1 - alpha) * previous.scale,
-            offset: alpha * new.offset + (1 - alpha) * previous.offset
-        )
-    }
-
-    private func isReusable(
-        _ entry: Entry,
-        relative: RelativeDepthMap,
-        lidarWidth: Int,
-        lidarHeight: Int,
-        lidarConfidenceWidth: Int?,
-        lidarConfidenceHeight: Int?,
-        timestamp: TimeInterval,
-        cameraTransform: simd_float4x4
-    ) -> Bool {
-        isNearby(
-            entry,
-            relative: relative,
-            lidarWidth: lidarWidth,
-            lidarHeight: lidarHeight,
-            lidarConfidenceWidth: lidarConfidenceWidth,
-            lidarConfidenceHeight: lidarConfidenceHeight,
-            timestamp: timestamp,
-            cameraTransform: cameraTransform,
-            maxAllowedAge: maxAge
-        )
-    }
-
-    /// A fit only counts as the successor of the cached one when the camera
-    /// has not jumped. Steady-state refits land just after `maxAge` expires,
-    /// so successors are accepted up to twice that gap; anything older is a
-    /// fresh observation and must not be blended.
-    private func isSmoothingSuccessor(
-        _ entry: Entry,
-        relative: RelativeDepthMap,
-        lidarWidth: Int,
-        lidarHeight: Int,
-        lidarConfidenceWidth: Int?,
-        lidarConfidenceHeight: Int?,
-        timestamp: TimeInterval,
-        cameraTransform: simd_float4x4
-    ) -> Bool {
-        isNearby(
-            entry,
-            relative: relative,
-            lidarWidth: lidarWidth,
-            lidarHeight: lidarHeight,
-            lidarConfidenceWidth: lidarConfidenceWidth,
-            lidarConfidenceHeight: lidarConfidenceHeight,
-            timestamp: timestamp,
-            cameraTransform: cameraTransform,
-            maxAllowedAge: maxAge * 2
-        )
-    }
-
-    private func isNearby(
-        _ entry: Entry,
-        relative: RelativeDepthMap,
-        lidarWidth: Int,
-        lidarHeight: Int,
-        lidarConfidenceWidth: Int?,
-        lidarConfidenceHeight: Int?,
-        timestamp: TimeInterval,
-        cameraTransform: simd_float4x4,
-        maxAllowedAge: TimeInterval
-    ) -> Bool {
-        guard timestamp >= entry.timestamp,
-              timestamp - entry.timestamp <= maxAllowedAge,
-              entry.relativeWidth == relative.width,
-              entry.relativeHeight == relative.height,
-              entry.lidarWidth == lidarWidth,
-              entry.lidarHeight == lidarHeight,
-              entry.lidarConfidenceWidth == lidarConfidenceWidth,
-              entry.lidarConfidenceHeight == lidarConfidenceHeight else {
-            return false
-        }
-
-        let translationDelta = simd_length(Self.position(cameraTransform) - Self.position(entry.cameraTransform))
-        guard translationDelta <= maxTranslationMeters else { return false }
-
-        return Self.rotationDeltaRadians(cameraTransform, entry.cameraTransform) <= maxRotationRadians
-    }
-
-    private static func position(_ transform: simd_float4x4) -> SIMD3<Float> {
-        SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-    }
-
-    private static func rotationDeltaRadians(_ lhs: simd_float4x4, _ rhs: simd_float4x4) -> Float {
-        let lhsForward = normalized(-SIMD3<Float>(lhs.columns.2.x, lhs.columns.2.y, lhs.columns.2.z))
-        let rhsForward = normalized(-SIMD3<Float>(rhs.columns.2.x, rhs.columns.2.y, rhs.columns.2.z))
-        let lhsUp = normalized(SIMD3<Float>(lhs.columns.1.x, lhs.columns.1.y, lhs.columns.1.z))
-        let rhsUp = normalized(SIMD3<Float>(rhs.columns.1.x, rhs.columns.1.y, rhs.columns.1.z))
-
-        guard let lhsForward, let rhsForward, let lhsUp, let rhsUp else { return .greatestFiniteMagnitude }
-
-        return max(angleRadians(lhsForward, rhsForward), angleRadians(lhsUp, rhsUp))
-    }
-
-    private static func normalized(_ value: SIMD3<Float>) -> SIMD3<Float>? {
-        let length = simd_length(value)
-        guard length > 1e-5 else { return nil }
-        return value / length
-    }
-
-    private static func angleRadians(_ lhs: SIMD3<Float>, _ rhs: SIMD3<Float>) -> Float {
-        let cosine = min(1, max(-1, simd_dot(lhs, rhs)))
-        return acos(cosine)
-    }
 }
 
 /// Dense depth map view. Depth Anything outputs stay backed by their native

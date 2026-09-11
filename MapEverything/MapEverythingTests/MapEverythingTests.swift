@@ -397,75 +397,41 @@ struct MapEverythingTests {
         #expect(abs(calibration.offset - 0.15) < 0.001)
     }
 
-    @Test("Depth Anything calibration cache reuses nearby frames")
-    func testDepthAnythingCalibrationCacheReusesNearbyFrames() throws {
-        let width = 32
-        let height = 32
-        var relativeValues: [Float] = []
-        relativeValues.reserveCapacity(width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                relativeValues.append(0.5 + Float(x + y) / Float(width + height))
-            }
+    @Test("Each Depth Anything image is calibrated independently, even at the same pose")
+    func testDepthAnythingCalibrationUsesCurrentFrame() throws {
+        let values: [Float] = (0..<1024).map { index in
+            let gradient = Float(index % 32 + index / 32) / Float(64)
+            return Float(0.5) + gradient
         }
+        let lidar = try makeDepthFloat32PixelBuffer(width: 32, height: 32,
+            values: values.map { 1 / (0.5 * $0 + 0.15) })
+        let confidence = try makeLiDARConfidencePixelBuffer(width: 32, height: 32, value: 2)
+        let first = try #require(DepthAnythingProcessor.maximumLikelihoodCalibration(
+            relative: RelativeDepthMap(width: 32, height: 32, data: values),
+            lidarDepthMap: lidar, lidarConfidenceMap: confidence))
+        let second = try #require(DepthAnythingProcessor.maximumLikelihoodCalibration(
+            relative: RelativeDepthMap(width: 32, height: 32, data: values.map { $0 * 3 + 0.1 }),
+            lidarDepthMap: lidar, lidarConfidenceMap: confidence))
+        #expect(abs(second.scale - first.scale / 3) < 0.001)
+        for r in values {
+            let before = try #require(DepthAnythingProcessor.calibratedMetricDepth(relativeDepth: r, calibration: first))
+            let after = try #require(DepthAnythingProcessor.calibratedMetricDepth(relativeDepth: r * 3 + 0.1, calibration: second))
+            #expect(abs(before - after) < 0.001)
+        }
+    }
 
-        let relative = RelativeDepthMap(width: width, height: height, data: relativeValues)
-        let lidar = try makeDepthFloat32PixelBuffer(
-            width: width,
-            height: height,
-            values: relativeValues.map { 2.0 * $0 + 0.5 }
-        )
-        let confidence = try makeLiDARConfidencePixelBuffer(
-            width: width,
-            height: height,
-            value: 2
-        )
-        let cache = DepthAnythingCalibrationCache(
-            maxAge: 1.0,
-            maxTranslationMeters: 0.25,
-            maxRotationRadians: 0.25
-        )
-        let pose = matrix_identity_float4x4
-
-        let first = try #require(cache.calibration(
-            relative: relative,
-            lidarDepthMap: lidar,
-            lidarConfidenceMap: confidence,
-            timestamp: 10.0,
-            cameraTransform: pose
-        ))
-
-        let changedRelative = RelativeDepthMap(
-            width: width,
-            height: height,
-            data: relativeValues.map { $0 * 3.0 }
-        )
-        let changedLidar = try makeDepthFloat32PixelBuffer(
-            width: width,
-            height: height,
-            values: relativeValues.map { 1.2 * $0 + 0.4 }
-        )
-
-        let reused = try #require(cache.calibration(
-            relative: changedRelative,
-            lidarDepthMap: changedLidar,
-            lidarConfidenceMap: confidence,
-            timestamp: 10.5,
-            cameraTransform: pose
-        ))
-        #expect(reused.scale == first.scale)
-        #expect(reused.offset == first.offset)
-
-        var movedPose = pose
-        movedPose.columns.3.x = 1.0
-        let recomputed = try #require(cache.calibration(
-            relative: changedRelative,
-            lidarDepthMap: changedLidar,
-            lidarConfidenceMap: confidence,
-            timestamp: 10.6,
-            cameraTransform: movedPose
-        ))
-        #expect(abs(recomputed.scale - first.scale) > 0.1)
+    @Test("Low-confidence outdoor LiDAR returns cannot establish depth scale")
+    func testLowConfidenceCalibrationIsRejected() throws {
+        let values: [Float] = (0..<1024).map { index in
+            let gradient = Float(index % 32 + index / 32) / Float(64)
+            return Float(0.5) + gradient
+        }
+        let lidar = try makeDepthFloat32PixelBuffer(width: 32, height: 32,
+            values: values.map { 1 / (0.5 * $0 + 0.15) })
+        let confidence = try makeLiDARConfidencePixelBuffer(width: 32, height: 32, value: 0)
+        #expect(DepthAnythingProcessor.maximumLikelihoodCalibration(
+            relative: RelativeDepthMap(width: 32, height: 32, data: values),
+            lidarDepthMap: lidar, lidarConfidenceMap: confidence) == nil)
     }
 
     @Test("RadioObservation schema covers every radio telemetry channel")
