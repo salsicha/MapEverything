@@ -12,7 +12,7 @@ import SceneKit
 import UIKit
 
 enum VisualizationMode: String, CaseIterable, Identifiable {
-    case solidMesh = "Solid Mesh"
+    case solidMesh = "Mesh"
     case surfels = "Surfels"
     case wireframe = "Wireframe"
     case none = "None"
@@ -20,7 +20,7 @@ enum VisualizationMode: String, CaseIterable, Identifiable {
 
     var iconName: String {
         switch self {
-        case .solidMesh: return "cube.fill"
+        case .solidMesh: return "cube"
         case .surfels: return "circle.dotted"
         case .wireframe: return "square.grid.3x3"
         case .none: return "eye.slash"

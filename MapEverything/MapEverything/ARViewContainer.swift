@@ -969,7 +969,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
             do {
                 let meshResource = try await MeshResource(from: [descriptor])
-                let material = UnlitMaterial(color: UIColor.systemTeal.withAlphaComponent(0.72))
+                // Draw triangle edges only so the live camera view stays visible.
+                var material = UnlitMaterial(color: UIColor.systemTeal)
+                material.triangleFillMode = .lines
                 let entity = ModelEntity(mesh: meshResource, materials: [material])
 
                 guard !Task.isCancelled else { return }
