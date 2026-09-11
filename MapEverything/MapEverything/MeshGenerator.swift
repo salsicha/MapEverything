@@ -256,6 +256,11 @@ nonisolated enum MeshGenerator {
                     let upperRight = upperLeft + 1
                     let lowerLeft = upperLeft + columns.count
                     let lowerRight = lowerLeft + 1
+                    // Angular size of this actual grid cell, including a
+                    // shorter final row/column when sampling with step > 1.
+                    let rayWidth = Float(columns[columnIndex + 1] - columns[columnIndex]) / fx
+                    let rayHeight = Float(rows[rowIndex + 1] - rows[rowIndex]) / fy
+                    let pixelFootprint = sqrt(rayWidth * rayWidth + rayHeight * rayHeight)
 
                     appendDepthTriangleIfContinuous(
                         gridIndices[upperLeft],
@@ -267,6 +272,8 @@ nonisolated enum MeshGenerator {
                             gridDepths[upperRight]
                         ],
                         maximumDepthDiscontinuity: configuration.maximumDepthDiscontinuity,
+                        positions: positions,
+                        pixelFootprint: pixelFootprint,
                         indices: &indices
                     )
                     guard indices.count / 3 < configuration.maximumTriangleCount else { break }
@@ -281,6 +288,8 @@ nonisolated enum MeshGenerator {
                             gridDepths[lowerRight]
                         ],
                         maximumDepthDiscontinuity: configuration.maximumDepthDiscontinuity,
+                        positions: positions,
+                        pixelFootprint: pixelFootprint,
                         indices: &indices
                     )
                 }
@@ -317,6 +326,8 @@ nonisolated enum MeshGenerator {
         _ c: Int32,
         depths: [Float],
         maximumDepthDiscontinuity: Float,
+        positions: [SIMD3<Float>],
+        pixelFootprint: Float,
         indices: inout [UInt32]
     ) {
         guard a >= 0, b >= 0, c >= 0 else { return }
@@ -329,6 +340,20 @@ nonisolated enum MeshGenerator {
 
         let allowedJump = max(maximumDepthDiscontinuity, minimumDepth * 0.18)
         guard maximumDepth - minimumDepth <= allowedJump else { return }
+
+        // The percentage-of-range rule alone allows metre-long edges between
+        // adjacent outdoor pixels. Bound edge stretch relative to their ray
+        // spacing, allowing slopes but rejecting depth discontinuity sheets.
+        // This scales with distance and sampling resolution; it is not a
+        // LiDAR-range cutoff. Very grazing/uncertain surfaces may leave gaps.
+        let maximumEdge = max(0.02, minimumDepth * pixelFootprint * 8)
+        let maximumEdgeSquared = maximumEdge * maximumEdge
+        let pa = positions[Int(a)]
+        let pb = positions[Int(b)]
+        let pc = positions[Int(c)]
+        guard simd_length_squared(pa - pb) <= maximumEdgeSquared,
+              simd_length_squared(pb - pc) <= maximumEdgeSquared,
+              simd_length_squared(pc - pa) <= maximumEdgeSquared else { return }
 
         indices.append(UInt32(a))
         indices.append(UInt32(b))

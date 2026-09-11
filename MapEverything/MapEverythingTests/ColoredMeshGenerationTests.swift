@@ -75,9 +75,12 @@ struct ColoredMeshGenerationTests {
     private func makeDepthMap(width: Int, height: Int) -> RelativeDepthMap {
         var data = [Float](repeating: 0, count: width * height)
         for index in 0..<data.count {
-            // A few invalid holes; the rest smooth so triangles survive the
-            // discontinuity gate.
-            data[index] = index % 11 == 0 ? .nan : 0.4 + Float(index % 17) * 0.01
+            // Keep the color-correspondence fixture smooth in both axes.
+            // A wrapping one-dimensional ramp introduces row-wise depth
+            // jumps, which the geometric edge gate now correctly rejects.
+            let x = index % width
+            let y = index / width
+            data[index] = index % 11 == 0 ? .nan : 0.4 + Float(x + y) * 0.001
         }
         return RelativeDepthMap(width: width, height: height, data: data)
     }
