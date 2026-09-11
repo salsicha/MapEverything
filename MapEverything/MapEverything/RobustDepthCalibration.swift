@@ -68,7 +68,14 @@ nonisolated enum RobustDepthCalibration {
             return count + (inverse > 0 && abs(1 / inverse - sample.depth) <= max(0.06, sample.depth * 0.08) ? 1 : 0)
         }
         guard Double(goodCount) >= Double(best.count) * 0.9 else { return nil }
-        return result
+        let supportedSamples = best.filter { sample in
+            let inverse = Double(result.scale) * sample.relative + Double(result.offset)
+            return inverse > 0 && abs(1 / inverse - sample.depth) <= max(0.06, sample.depth * 0.08)
+        }
+        guard let support = DepthCalibrationSupport(samples: supportedSamples, scale: result.scale, offset: result.offset) else {
+            return nil
+        }
+        return Calibration(scale: result.scale, offset: result.offset, support: support)
     }
 
     private static func leastSquares(_ samples: [DepthCalibrationSample]) -> Calibration? {
@@ -89,5 +96,54 @@ nonisolated enum RobustDepthCalibration {
         guard scale.isFinite, scale > 0, offset.isFinite,
               Float(scale).isFinite, Float(offset).isFinite else { return nil }
         return Calibration(scale: Float(scale), offset: Float(offset))
+    }
+}
+
+/// Conservative extrapolation gate, not a claim of statistical confidence.
+/// Pixel errors are correlated, so the error envelope does not shrink with N.
+/// Its growth outside the observed relative-depth spread prevents a good local
+/// fit from turning a near-zero inverse-depth denominator into distant sheets.
+nonisolated struct DepthCalibrationSupport: Sendable {
+    let relativeMean: Float
+    let relativeVariance: Float
+    let inverseErrorVariance: Float
+
+    static let maximumRelativeDepthError: Float = 0.25
+    // Require the upper-depth endpoint 1/(inverse - 2*sigma) to differ by <=25%.
+    // Squaring avoids a square root per pixel, including in the Metal kernel.
+    static let inverseErrorBudgetSquared: Float = 0.01
+
+    init(relativeMean: Float, relativeVariance: Float, inverseErrorVariance: Float) {
+        self.relativeMean = relativeMean
+        self.relativeVariance = relativeVariance
+        self.inverseErrorVariance = inverseErrorVariance
+    }
+
+    init?(samples: [DepthCalibrationSample], scale: Float, offset: Float) {
+        guard !samples.isEmpty else { return nil }
+        let count = Double(samples.count)
+        let mean = samples.reduce(0) { $0 + $1.relative } / count
+        let variance = samples.reduce(0) { $0 + pow($1.relative - mean, 2) } / count
+        var residualVariance = 0.0
+        var sensorVariance = 0.0
+        for sample in samples {
+            let residual = Double(scale) * sample.relative + Double(offset) - 1 / sample.depth
+            residualVariance += residual * residual
+            let sigma = Double(DepthAnythingProcessor.lidarStandardDeviation(depth: Float(sample.depth)))
+                / (sample.depth * sample.depth)
+            sensorVariance += sigma * sigma
+        }
+        let errorVariance = max(residualVariance, sensorVariance) / count
+        guard variance > 0, Float(variance).isFinite, Float(variance) > 0,
+              Float(mean).isFinite, Float(errorVariance).isFinite, Float(errorVariance) > 0 else { return nil }
+        self.init(relativeMean: Float(mean), relativeVariance: Float(variance), inverseErrorVariance: Float(errorVariance))
+    }
+
+    func accepts(relative: Float, inverseDepth: Float) -> Bool {
+        guard relativeVariance > 0, inverseErrorVariance > 0,
+              inverseDepth.isFinite, inverseDepth > 0 else { return false }
+        let delta = relative - relativeMean
+        let errorVariance = inverseErrorVariance * (1 + delta * delta / relativeVariance)
+        return errorVariance.isFinite && errorVariance <= inverseDepth * inverseDepth * Self.inverseErrorBudgetSquared
     }
 }

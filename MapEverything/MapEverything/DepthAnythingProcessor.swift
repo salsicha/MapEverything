@@ -34,6 +34,13 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
     struct MaximumLikelihoodCalibration: Sendable {
         let scale: Float
         let offset: Float
+        let support: DepthCalibrationSupport?
+
+        init(scale: Float, offset: Float, support: DepthCalibrationSupport? = nil) {
+            self.scale = scale
+            self.offset = offset
+            self.support = support
+        }
     }
 
     /// The reciprocal model has a pole as fitted inverse depth approaches zero;
@@ -256,6 +263,10 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
 
         let inverseDepth = calibration.scale * relativeDepth + calibration.offset
         guard inverseDepth.isFinite, inverseDepth > 0 else { return nil }
+        if let support = calibration.support,
+           !support.accepts(relative: relativeDepth, inverseDepth: inverseDepth) {
+            return nil
+        }
 
         let monocularDepth = 1.0 / inverseDepth
         guard monocularDepth > Self.minimumCalibratedDepth,
@@ -402,7 +413,7 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         depth.isFinite && depth > 0.2 && depth < 5.0
     }
 
-    private static func lidarStandardDeviation(depth: Float) -> Float {
+    static func lidarStandardDeviation(depth: Float) -> Float {
         max(0.015, 0.012 + 0.004 * depth * depth)
     }
 

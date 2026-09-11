@@ -911,7 +911,7 @@ class ROS2BridgeClient: ObservableObject {
         relativePointCloudTopic: String,
         frameID: String
     ) -> [String: Any] {
-        let metadata: [String: Any] = [
+        var metadata: [String: Any] = [
             "pointcloud_coordinate_frame": "map",
             "pointcloud_semantics": "x_y_z_are_metric_map_coordinates_projected_from_full_depthanything_depth",
             "metric_reconstruction": "metric_depth_m = 1.0 / (scale * relative_depth + offset); every valid Depth Anything pixel is projected with that metric depth",
@@ -921,6 +921,15 @@ class ROS2BridgeClient: ObservableObject {
             "lidar_usage": "calibration_only",
             "overlay_mesh_uses_calibrated_depth": true
         ]
+
+        if let support = calibration.support {
+            metadata["depth_validity_filter"] = "calibration_extrapolation_error_envelope"
+            metadata["relative_mean"] = Double(support.relativeMean)
+            metadata["relative_variance"] = Double(support.relativeVariance)
+            metadata["inverse_error_variance"] = Double(support.inverseErrorVariance)
+            metadata["inverse_error_budget_squared"] = Double(DepthCalibrationSupport.inverseErrorBudgetSquared)
+            metadata["maximum_relative_depth_error"] = Double(DepthCalibrationSupport.maximumRelativeDepthError)
+        }
 
         let metadataJSON: String
         if JSONSerialization.isValidJSONObject(metadata),
