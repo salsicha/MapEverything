@@ -172,6 +172,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     pointManager = PointCloudManager()
                     surfelMap = ColoredSurfelMap()
                     depthAnythingCalibrationCache = DepthAnythingCalibrationCache()
+                    sceneMeshesByID.removeAll()
+                    clearDepthAnythingMeshSnapshot()
                     let pointManager = pointManager
                     let surfelMap = surfelMap
                     let voxelSize = voxelSize
@@ -244,10 +246,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var liveSurfelAnchor: AnchorEntity?
     private var liveSurfelEntity: ModelEntity?
     private var liveSurfelUpdateTask: Task<Void, Never>?
-    private var liveDepthMeshAnchor: AnchorEntity?
-    private var liveDepthMeshEntity: ModelEntity?
-    private var liveDepthMeshUpdateTask: Task<Void, Never>?
     private var latestDepthAnythingMeshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
+    // Retain the latest geometry for every observed anchor, including areas
+    // outside the final camera view. Cleared only when a new AR scan starts.
+    private var sceneMeshesByID: [UUID: SafeARMesh] = [:]
     private var latestDepthAnythingPointCloud: [ColoredPoint] = []
     private var finalPointCloudArtifactTask: Task<Void, Never>?
     private let depthMeshVisualizationInterval: TimeInterval = 0.5
@@ -306,7 +308,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         cameraImageTask?.cancel()
         mapPublishTask?.cancel()
         liveSurfelUpdateTask?.cancel()
-        liveDepthMeshUpdateTask?.cancel()
         frameProcessingTask = nil
         cameraImageTask = nil
         mapPublishTask = nil
@@ -325,10 +326,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         liveSurfelUpdateTask = nil
         liveSurfelEntity = nil
         liveSurfelAnchor = nil
-        liveDepthMeshUpdateTask?.cancel()
-        liveDepthMeshUpdateTask = nil
-        liveDepthMeshEntity = nil
-        liveDepthMeshAnchor = nil
         latestDepthAnythingMeshSnapshot = nil
         latestDepthAnythingPointCloud = []
         coachingOverlay = nil
@@ -497,39 +494,41 @@ class ARViewController: UIViewController, ARSessionDelegate {
         anchorEntities.values.forEach { arView?.scene.removeAnchor($0) }
         meshEntities.removeAll()
         anchorEntities.removeAll()
-        clearDepthAnythingMeshEntity()
+        clearDepthAnythingMeshSnapshot()
     }
 
-    private func clearDepthAnythingMeshEntity() {
-        liveDepthMeshUpdateTask?.cancel()
-        liveDepthMeshUpdateTask = nil
-        liveDepthMeshEntity?.removeFromParent()
-        liveDepthMeshEntity = nil
-        if let liveDepthMeshAnchor {
-            arView?.scene.removeAnchor(liveDepthMeshAnchor)
-        }
-        liveDepthMeshAnchor = nil
+    private func clearDepthAnythingMeshSnapshot() {
         latestDepthAnythingMeshSnapshot = nil
         latestDepthAnythingPointCloud = []
     }
 
     private func freezeCurrentMeshForInspection() {
-        if let latestDepthAnythingMeshSnapshot,
-           let scene = makeInspectionScene(from: latestDepthAnythingMeshSnapshot) {
-            delegate?.didUpdateStoppedInspectionScene(scene)
-            return
-        }
+        delegate?.didUpdateStoppedInspectionScene(makeStoppedInspectionScene())
+    }
 
-        if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
-           !anchors.isEmpty {
-            let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
-            if let scene = makeInspectionScene(from: safeMeshes) {
-                delegate?.didUpdateStoppedInspectionScene(scene)
-                return
-            }
+    func makeStoppedInspectionScene() -> SCNScene? {
+        // A Depth Anything snapshot covers one camera frame. The accumulated
+        // ARKit reconstruction must take precedence for whole-scan inspection.
+        if let scene = makeInspectionScene(from: currentSceneMeshes()) {
+            return scene
         }
+        if let latestDepthAnythingMeshSnapshot {
+            return makeInspectionScene(from: latestDepthAnythingMeshSnapshot)
+        }
+        return nil
+    }
 
-        delegate?.didUpdateStoppedInspectionScene(nil)
+    func updateSceneMeshes(_ meshes: [SafeARMesh]) {
+        for mesh in meshes where !mesh.vertices.isEmpty && mesh.indices.count >= 3 {
+            sceneMeshesByID[mesh.identifier] = mesh
+        }
+    }
+
+    private func currentSceneMeshes() -> [SafeARMesh] {
+        if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }) {
+            updateSceneMeshes(MeshGenerator.extractSafeMeshes(from: anchors))
+        }
+        return sceneMeshesByID.values.sorted { $0.identifier.uuidString < $1.identifier.uuidString }
     }
 
     private func saveFinalRecordingArtifacts() {
@@ -544,10 +543,20 @@ class ARViewController: UIViewController, ARSessionDelegate {
         finalPointCloudArtifactTask?.cancel()
         let depthAnythingPoints = latestDepthAnythingPointCloud
         finalPointCloudArtifactTask = Task { [pointManager] in
-            let cleanedPoints = depthAnythingPoints.isEmpty ? await pointManager.getCleanedPoints() : []
+            let cleanedPoints = await pointManager.getCleanedPoints(maxDistance: .greatestFiniteMagnitude)
             let artifact: LocalPointCloudArtifact?
 
-            if !depthAnythingPoints.isEmpty {
+            if !cleanedPoints.isEmpty {
+                artifact = LocalPointCloudArtifact(
+                    source: "accumulated_lidar_pointcloud",
+                    coordinateFrame: "map",
+                    capturedAt: Date(),
+                    points: cleanedPoints.map { point in
+                        LocalPointCloudArtifact.Point(position: point.position, color: point.color)
+                    },
+                    metadata: ["point_count_source": "point_manager"]
+                )
+            } else if !depthAnythingPoints.isEmpty {
                 artifact = LocalPointCloudArtifact(
                     source: "depth_anything_lidar_calibrated_full_resolution",
                     coordinateFrame: "map",
@@ -558,18 +567,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     metadata: [
                         "point_count_source": "latest_full_depthanything_frame",
                         "lidar_usage": "calibration_only"
-                    ]
-                )
-            } else if !cleanedPoints.isEmpty {
-                artifact = LocalPointCloudArtifact(
-                    source: "fused_depth_pointcloud",
-                    coordinateFrame: "map",
-                    capturedAt: Date(),
-                    points: cleanedPoints.map { point in
-                        LocalPointCloudArtifact.Point(position: point.position, color: point.color)
-                    },
-                    metadata: [
-                        "point_count_source": "point_manager"
                     ]
                 )
             } else if let meshArtifact {
@@ -596,18 +593,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
     }
 
-    private func currentFinalOverlayMeshArtifact() -> LocalOverlayMeshArtifact? {
+    func currentFinalOverlayMeshArtifact() -> LocalOverlayMeshArtifact? {
+        if let artifact = makeFinalOverlayMeshArtifact(from: currentSceneMeshes()) {
+            return artifact
+        }
         if let latestDepthAnythingMeshSnapshot,
            let artifact = makeFinalOverlayMeshArtifact(from: latestDepthAnythingMeshSnapshot) {
             return artifact
-        }
-
-        if let anchors = arView?.session.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
-           !anchors.isEmpty {
-            let safeMeshes = MeshGenerator.extractSafeMeshes(from: anchors)
-            if let artifact = makeFinalOverlayMeshArtifact(from: safeMeshes) {
-                return artifact
-            }
         }
 
         return nil
@@ -951,53 +943,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
     }
 
-    private func updateLiveDepthMeshVisualization(with snapshot: MeshGenerator.DepthAnythingMeshSnapshot?) {
-        liveDepthMeshUpdateTask?.cancel()
-
-        guard currentMode == .solidMesh else { return }
-        guard let snapshot else {
-            liveDepthMeshEntity?.removeFromParent()
-            liveDepthMeshEntity = nil
-            latestDepthAnythingMeshSnapshot = nil
-            return
-        }
-
+    // Keep depth geometry for recording/fallback inspection, but never add its
+    // dense, blue overlay to the camera scene. ARKit supplies the live wireframe.
+    func updateDepthAnythingMeshSnapshot(with snapshot: MeshGenerator.DepthAnythingMeshSnapshot?) {
         latestDepthAnythingMeshSnapshot = snapshot
-        let descriptor = snapshot.descriptor
-        liveDepthMeshUpdateTask = Task { [weak self] in
-            guard let self = self else { return }
-
-            do {
-                let meshResource = try await MeshResource(from: [descriptor])
-                // Draw triangle edges only so the live camera view stays visible.
-                var material = UnlitMaterial(color: UIColor.systemTeal)
-                material.triangleFillMode = .lines
-                let entity = ModelEntity(mesh: meshResource, materials: [material])
-
-                guard !Task.isCancelled else { return }
-
-                await MainActor.run {
-                    guard !Task.isCancelled else { return }
-
-                    self.liveDepthMeshEntity?.removeFromParent()
-
-                    let anchor: AnchorEntity
-                    if let existingAnchor = self.liveDepthMeshAnchor {
-                        anchor = existingAnchor
-                    } else {
-                        anchor = AnchorEntity(world: .zero)
-                        self.liveDepthMeshAnchor = anchor
-                        self.arView?.scene.addAnchor(anchor)
-                    }
-
-                    anchor.addChild(entity)
-                    anchor.isEnabled = self.currentMode == .solidMesh
-                    self.liveDepthMeshEntity = entity
-                }
-            } catch {
-                print("Failed to create Depth Anything mesh preview: \(error)")
-            }
-        }
     }
 
     private static func makeSurfelPreviewMesh(from surfels: [ColoredSurfel]) -> SurfelPreviewMesh? {
@@ -1101,13 +1050,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
         arView?.debugOptions.remove([.showFeaturePoints, .showSceneUnderstanding])
         meshEntities.values.forEach { $0.isEnabled = false }
         liveSurfelAnchor?.isEnabled = false
-        liveDepthMeshAnchor?.isEnabled = false
         guard isScanning else { return }
         
         switch mode {
         case .solidMesh:
             arView?.debugOptions.insert(.showSceneUnderstanding)
-            liveDepthMeshAnchor?.isEnabled = true
         case .surfels:
             liveSurfelAnchor?.isEnabled = true
         case .wireframe:
@@ -1304,7 +1251,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 await MainActor.run {
                     guard workSession.isActive, self.isScanning else { return }
                     self.lastDepthMeshVisualizationTime = timestamp
-                    self.updateLiveDepthMeshVisualization(with: meshSnapshot)
+                    self.updateDepthAnythingMeshSnapshot(with: meshSnapshot)
                 }
                 // Nonisolated publish; the DA cadence already throttles it.
                 workSession.withPublishing {
@@ -1337,12 +1284,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
     
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         if isScanning {
+            updateSceneMeshes(MeshGenerator.extractSafeMeshes(from: anchors.compactMap { $0 as? ARMeshAnchor }))
             publishMapToROS2IfNeeded(anchors: anchors)
         }
     }
     
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         guard isScanning else { return }
+        updateSceneMeshes(MeshGenerator.extractSafeMeshes(from: anchors.compactMap { $0 as? ARMeshAnchor }))
         publishMapToROS2IfNeeded(anchors: anchors)
     }
     
