@@ -1254,7 +1254,9 @@ struct ActivityShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-final class MeshInspectionCameraNode: SCNNode {
+// SCNNode's designated initializers are nonisolated, so the subclass must opt
+// out of the project-wide MainActor default to inherit them under Swift 6.
+nonisolated final class MeshInspectionCameraNode: SCNNode {
     var capturedViewpoint: CapturedMeshViewpoint?
     var isOverview = false
 }

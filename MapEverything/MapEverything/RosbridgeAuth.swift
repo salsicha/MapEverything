@@ -9,7 +9,8 @@ import Security
 
 /// Builds the rosbridge `auth` op per the rosauth protocol: the MAC is the
 /// SHA-512 of secret + client + dest + rand + t + level + end.
-enum RosbridgeAuth {
+/// Pure functions with no shared state, so exempt from the MainActor default.
+nonisolated enum RosbridgeAuth {
     static func authMessage(
         secret: String,
         client: String,

@@ -17,6 +17,10 @@ import SQLite3
 import UIKit
 @testable import MapEverything
 
+// The app module compiles with default MainActor isolation, so its value
+// types are MainActor-isolated as seen from this Swift 5 test target; running
+// the suite on the main actor keeps every accessor call legal under Swift 6.
+@MainActor
 struct MapEverythingTests {
 
     @Test("Filters out points beyond 20 meters")

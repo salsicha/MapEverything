@@ -317,23 +317,24 @@ class ROS2BridgeClient: ObservableObject {
         guard let url = currentURL else { return }
         guard reconnectWorkItem == nil else { return }
 
-        // The outer item can already be dequeued when cancel() is called, so
-        // the inner block re-checks identity against reconnectWorkItem, which
-        // disconnect()/connect() clear synchronously on the main thread.
+        // The item is MainActor-isolated (it is formed in MainActor context),
+        // so it must run on the main queue: executing it on a global queue
+        // trips the Swift 6 executor assertion. It can already be dequeued
+        // when cancel() is called, so the block re-checks identity against
+        // reconnectWorkItem, which disconnect()/connect() clear synchronously
+        // on the main thread.
         var scheduledItem: DispatchWorkItem?
         let workItem = DispatchWorkItem { [weak self] in
-            DispatchQueue.main.async {
-                guard let self, let scheduledItem,
-                      self.reconnectWorkItem === scheduledItem else { return }
-                self.reconnectWorkItem = nil
-                if UserDefaults.standard.bool(forKey: "ros2Enabled") && !self.isConnected {
-                    self.connect(to: url)
-                }
+            guard let self, let scheduledItem,
+                  self.reconnectWorkItem === scheduledItem else { return }
+            self.reconnectWorkItem = nil
+            if UserDefaults.standard.bool(forKey: "ros2Enabled") && !self.isConnected {
+                self.connect(to: url)
             }
         }
         scheduledItem = workItem
         reconnectWorkItem = workItem
-        DispatchQueue.global().asyncAfter(deadline: .now() + reconnectDelay, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + reconnectDelay, execute: workItem)
     }
 
     nonisolated private func handleConnectionFailure(_ error: Error, socket: ROSBridgeSocket) {
