@@ -46,6 +46,24 @@ class ConverterOutputSafetyTests(unittest.TestCase):
                         remove.assert_not_called()
                     self.assertEqual(chunk.read_bytes(), original_bytes)
 
+    def test_case_differing_output_preserves_input_on_case_insensitive_filesystems(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = root / "session"
+            session.mkdir()
+            chunk = session / "recording.db3"
+            chunk.write_bytes(b"original recording")
+            if not (root / "SESSION").exists():
+                self.skipTest("Requires a case-insensitive filesystem")
+
+            for output in [root / "SESSION", session / "RECORDING.DB3"]:
+                with self.subTest(output=output):
+                    with patch.object(converter.shutil, "rmtree") as remove:
+                        with self.assertRaisesRegex(converter.BagConversionError, "Output contains an input"):
+                            converter.convert([chunk], output, "sqlite3", {}, set(), False, True, False)
+                        remove.assert_not_called()
+                    self.assertEqual(chunk.read_bytes(), b"original recording")
+
     def test_all_input_chunks_are_checked(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

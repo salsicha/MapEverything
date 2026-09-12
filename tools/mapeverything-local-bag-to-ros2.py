@@ -427,10 +427,24 @@ def convert(
 ) -> int:
     # Resolve aliases before any destructive operation, including symlinks and
     # '..'. Replacing an input directory would destroy the source recording.
+    # Path comparison alone misses aliases resolve() cannot fold — notably
+    # case-differing spellings on case-insensitive filesystems (macOS APFS) —
+    # so also compare filesystem identity (st_dev/st_ino) when both exist.
+    def is_same_entry(a: Path, b: Path) -> bool:
+        if a == b:
+            return True
+        try:
+            return a.samefile(b)
+        except OSError:
+            return False
+
     resolved_output = output.resolve()
     for db_file in db_files:
         resolved_input = db_file.resolve()
-        if resolved_output == resolved_input or resolved_output in resolved_input.parents:
+        if any(
+            is_same_entry(resolved_output, candidate)
+            for candidate in (resolved_input, *resolved_input.parents)
+        ):
             raise BagConversionError(
                 f"Output contains an input chunk: {output} ({db_file}). "
                 "Choose a separate output directory."
