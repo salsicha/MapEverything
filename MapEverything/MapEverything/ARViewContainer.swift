@@ -510,8 +510,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     @discardableResult
-    func accumulateDepthAnythingMeshSnapshot(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot) async -> AccumulatedDepthMesh.Statistics {
-        await accumulatedDepthMesh.integrate(mesh)
+    func accumulateDepthAnythingMeshSnapshot(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot,
+                                            viewpoint: CapturedMeshViewpoint? = nil) async -> AccumulatedDepthMesh.Statistics {
+        await accumulatedDepthMesh.integrate(mesh, viewpoint: viewpoint)
     }
 
     private func saveFinalRecordingArtifacts() {
@@ -562,6 +563,18 @@ class ARViewController: UIViewController, ARSessionDelegate {
             vertices: mesh.vertices.map { SCNVector3($0.x, $0.y, $0.z) },
             indices: mesh.indices, tint: .white, vertexColors: mesh.colors
         )))
+        if let viewpoint = mesh.viewpoint {
+            let camera = SCNCamera()
+            camera.zNear = 0.01
+            camera.zFar = 1_000
+            camera.projectionTransform = SCNMatrix4(viewpoint.projection)
+            let node = MeshInspectionCameraNode()
+            node.name = "captured_mesh_camera"
+            node.camera = camera
+            node.simdTransform = viewpoint.transform
+            node.capturedViewpoint = viewpoint
+            scene.rootNode.addChildNode(node)
+        }
         return scene
     }
 
@@ -572,7 +585,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         vertexColors: [SIMD3<UInt8>]? = nil
     ) -> SCNGeometry {
         let vertexSource = SCNGeometrySource(vertices: vertices)
-        let normalSource = SCNGeometrySource(normals: inspectionNormals(for: vertices, indices: indices))
         let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<UInt32>.size)
         let element = SCNGeometryElement(
             data: indexData,
@@ -581,8 +593,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
             bytesPerIndex: MemoryLayout<UInt32>.size
         )
 
-        var sources = [vertexSource, normalSource]
+        var sources = [vertexSource]
         let usesVertexColors = (vertexColors?.count == vertices.count) && !(vertexColors?.isEmpty ?? true)
+        if !usesVertexColors {
+            sources.append(SCNGeometrySource(normals: inspectionNormals(for: vertices, indices: indices)))
+        }
         if usesVertexColors, let vertexColors {
             let colorFloats = vertexColors.map {
                 SIMD3<Float>(Float($0.x) / 255.0, Float($0.y) / 255.0, Float($0.z) / 255.0)
@@ -605,18 +620,18 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let geometry = SCNGeometry(sources: sources, elements: [element])
         let material = SCNMaterial()
         if usesVertexColors {
-            // SceneKit multiplies vertex color by diffuse; white lets the
-            // per-vertex camera colors show while normals still light it.
+            // Captured RGB already contains the scene's lighting. Relighting
+            // it adds artificial highlights to the welded mesh's small facets.
             material.diffuse.contents = UIColor.white
-            material.ambient.contents = UIColor.white.withAlphaComponent(0.3)
+            material.lightingModel = .constant
         } else {
             material.diffuse.contents = tint.withAlphaComponent(0.9)
             material.ambient.contents = tint.withAlphaComponent(0.24)
             material.emission.contents = tint.withAlphaComponent(0.035)
+            material.specular.contents = UIColor.white.withAlphaComponent(0.36)
+            material.shininess = 0.42
+            material.lightingModel = .blinn
         }
-        material.specular.contents = UIColor.white.withAlphaComponent(0.36)
-        material.shininess = 0.42
-        material.lightingModel = .blinn
         material.isDoubleSided = true
         geometry.materials = [material]
         return geometry
@@ -984,6 +999,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let lidarConfidenceMap = sceneDepth.confidenceMap
         let intrinsics = frame.camera.intrinsics
         let imageResolution = frame.camera.imageResolution
+        let windowOrientation = arView?.window?.windowScene?.interfaceOrientation ?? .portrait
+        let orientation: UIInterfaceOrientation = windowOrientation == .unknown ? .portrait : windowOrientation
+        let viewport = orientation.isPortrait
+            ? CGSize(width: imageResolution.height, height: imageResolution.width) : imageResolution
+        let capturedViewpoint = CapturedMeshViewpoint(
+            transform: frame.camera.viewMatrix(for: orientation).inverse,
+            projection: frame.camera.projectionMatrix(for: orientation, viewportSize: viewport, zNear: 0.01, zFar: 1_000),
+            imageAspect: Float(viewport.width / viewport.height)
+        )
         let cameraPosition = SIMD3<Float>(
             transform.columns.3.x,
             transform.columns.3.y,
@@ -1075,7 +1099,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
             guard workSession.isActive, !Task.isCancelled else { return }
 
             if let meshSnapshot = mappingFrame?.meshSnapshot {
-                let stats = await accumulator.integrate(meshSnapshot, workSession: workSession)
+                let stats = await accumulator.integrate(meshSnapshot, workSession: workSession, viewpoint: capturedViewpoint)
                 await MainActor.run {
                     guard workSession.isActive, self.isScanning else { return }
                     self.cumulativePointCount = stats.vertexCount

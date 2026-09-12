@@ -5,6 +5,7 @@ nonisolated struct ColoredSceneMesh: Sendable {
     let vertices: [SIMD3<Float>]
     let indices: [UInt32]
     let colors: [SIMD3<UInt8>]
+    var viewpoint: CapturedMeshViewpoint? = nil
 
     var isEmpty: Bool { indices.isEmpty }
 }
@@ -45,6 +46,7 @@ actor AccumulatedDepthMesh {
     private var indices: [UInt32] = []
     private var cachedSnapshot: ColoredSceneMesh?
     private var reachedCapacity = false
+    private var viewpoint: CapturedMeshViewpoint?
 
     init(voxelSize: Float = 0.05, maximumVertices: Int = 2_000_000, maximumTriangles: Int = 4_000_000) {
         self.voxelSize = voxelSize.isFinite ? max(0.01, voxelSize) : 0.05
@@ -52,7 +54,8 @@ actor AccumulatedDepthMesh {
         self.maximumTriangles = max(0, min(maximumTriangles, 4_000_000))
     }
 
-    func integrate(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot, workSession: ScanWorkSession? = nil) -> Statistics {
+    func integrate(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot, workSession: ScanWorkSession? = nil,
+                   viewpoint: CapturedMeshViewpoint? = nil) -> Statistics {
         // Recheck after the actor hop: tracking can be lost while a completed
         // inference waits to enter the accumulator.
         guard !Task.isCancelled, workSession?.isActive != false else { return statistics }
@@ -61,6 +64,7 @@ actor AccumulatedDepthMesh {
         guard mesh.colors.count == mesh.vertices.count else { return statistics }
         var remap = [UInt32?](repeating: nil, count: mesh.vertices.count)
         let keys = mesh.vertices.map(key)
+        var acceptedFace = false
         for offset in stride(from: 0, to: mesh.indices.count - mesh.indices.count % 3, by: 3) {
             let local = (Int(mesh.indices[offset]), Int(mesh.indices[offset + 1]), Int(mesh.indices[offset + 2]))
             guard local.0 < keys.count, local.1 < keys.count, local.2 < keys.count,
@@ -81,6 +85,11 @@ actor AccumulatedDepthMesh {
                 indices.append(contentsOf: [ia, ib, ic])
             }
             cachedSnapshot = nil
+            acceptedFace = true
+        }
+        if acceptedFace, let viewpoint {
+            self.viewpoint = viewpoint
+            cachedSnapshot = nil
         }
         return statistics
     }
@@ -93,7 +102,7 @@ actor AccumulatedDepthMesh {
                 SIMD3<UInt8>(UInt8(clamping: Int($0.color.x.rounded())),
                              UInt8(clamping: Int($0.color.y.rounded())),
                              UInt8(clamping: Int($0.color.z.rounded())))
-            }
+            }, viewpoint: viewpoint
         )
         cachedSnapshot = result
         return result

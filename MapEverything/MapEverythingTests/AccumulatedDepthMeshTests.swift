@@ -99,6 +99,8 @@ struct AccumulatedDepthMeshTests {
         await controller.accumulateDepthAnythingMeshSnapshot(triangle(x: 20, color: green))
         let scene = try #require(await controller.makeStoppedInspectionScene())
         let source = try #require(scene.rootNode.childNodes.first?.geometry?.sources(for: .color).first)
+        #expect(scene.rootNode.childNodes.first?.geometry?.firstMaterial?.lightingModel == .constant)
+        #expect(scene.rootNode.childNodes.first?.geometry?.sources(for: .normal).isEmpty == true)
         #expect(source.vectorCount == 6)
         let renderedRed = source.data.withUnsafeBytes {
             $0.loadUnaligned(fromByteOffset: source.dataOffset, as: Float.self)

@@ -8,19 +8,71 @@ import simd
 
 @MainActor
 struct StoppedScenePreviewTests {
+    @Test("A distant outlier cannot move the preview away from its captured camera")
+    func previewStartsAtCapturedViewpoint() async throws {
+        let controller = ARViewController()
+        var transform = matrix_identity_float4x4
+        transform.columns.3 = .init(7, 2, 3, 1)
+        let viewpoint = CapturedMeshViewpoint(transform: transform, projection: matrix_identity_float4x4,
+                                             imageAspect: 0.75)
+        await controller.accumulateDepthAnythingMeshSnapshot(depthSnapshot(x: 1_000), viewpoint: viewpoint)
+        let scene = try #require(await controller.makeStoppedInspectionScene())
+        let view = InspectionSCNView(frame: CGRect(x: 0, y: 0, width: 400, height: 400))
+        InspectionSceneView(scene: scene).updateScene(in: view)
+        let camera = try #require(view.pointOfView)
+        #expect(camera.simdTransform == transform)
+        #expect(camera.camera?.usesOrthographicProjection == false)
+        #expect(view.capturedViewpoint?.imageAspect == 0.75)
+        // Full scene data remains available from either viewing mode.
+        #expect(await controller.currentFinalOverlayMeshArtifact()?.vertices.count == 3)
+        InspectionSceneView(scene: scene, overview: true).updateScene(in: view)
+        #expect(view.pointOfView?.camera?.usesOrthographicProjection == true)
+        #expect(view.capturedViewpoint == nil)
+        InspectionSceneView(scene: scene).updateScene(in: view)
+        #expect(view.pointOfView?.simdTransform == transform)
+        let exportURL = FileManager.default.temporaryDirectory.appendingPathComponent("preview-\(UUID()).usdz")
+        defer { try? FileManager.default.removeItem(at: exportURL) }
+        #expect(scene.write(to: exportURL, options: nil, delegate: nil, progressHandler: nil))
+        let exported = try SCNScene(url: exportURL)
+        #expect(exported.rootNode.childNodes.contains { $0.geometry != nil || !$0.childNodes.isEmpty })
+        controller.isScanning = true
+        await controller.accumulateDepthAnythingMeshSnapshot(depthSnapshot(x: 0))
+        let next = try #require(await controller.makeStoppedInspectionScene())
+        #expect(next.rootNode.childNode(withName: "captured_mesh_camera", recursively: false) == nil)
+    }
+
+    @Test("Changing inspector aspect preserves perspective rays and fits the entire capture")
+    func capturedProjectionFitsWithoutStretching() {
+        let projection = simd_float4x4(columns: (
+            SIMD4<Float>(2, 0, 0, 0), SIMD4<Float>(0, 1.5, 0, 0),
+            SIMD4<Float>(0.02, -0.01, -1, -1), SIMD4<Float>(0, 0, -0.02, 0)
+        ))
+        let viewpoint = CapturedMeshViewpoint(transform: matrix_identity_float4x4,
+                                             projection: projection, imageAspect: 0.75)
+        for aspect: Float in [0.5, 0.75, 1, 2] {
+            let fitted = viewpoint.fittedProjection(viewportAspect: aspect)
+            // Pixel focal lengths maintain the same ratio as the source image.
+            #expect(abs(fitted[0][0] * aspect / fitted[1][1] - 1) < 0.00001)
+            #expect(fitted[0][0] <= projection[0][0])
+            #expect(fitted[1][1] <= projection[1][1])
+            #expect(fitted[3][2] == projection[3][2])
+        }
+        #expect(viewpoint.fittedProjection(viewportAspect: 0) == projection)
+    }
+
     @Test("A reused preview view switches to the second scan and reframes its camera")
     func reusedViewDisplaysNewScan() async throws {
         let controller = ARViewController()
         await controller.accumulateDepthAnythingMeshSnapshot(depthSnapshot(x: 0))
         let firstScene = try #require(await controller.makeStoppedInspectionScene())
         let view = SCNView()
-        TopDownSceneView(scene: firstScene).updateScene(in: view)
+        InspectionSceneView(scene: firstScene).updateScene(in: view)
         let firstCamera = try #require(view.pointOfView)
 
         controller.isScanning = true
         await controller.accumulateDepthAnythingMeshSnapshot(depthSnapshot(x: 20))
         let secondScene = try #require(await controller.makeStoppedInspectionScene())
-        TopDownSceneView(scene: secondScene).updateScene(in: view)
+        InspectionSceneView(scene: secondScene).updateScene(in: view)
 
         #expect(view.scene === secondScene)
         #expect(view.pointOfView !== firstCamera)
@@ -35,7 +87,7 @@ struct StoppedScenePreviewTests {
         await controller.accumulateDepthAnythingMeshSnapshot(depthSnapshot(x: 0))
         let scene = try #require(await controller.makeStoppedInspectionScene())
         let view = SCNView()
-        let preview = TopDownSceneView(scene: scene)
+        let preview = InspectionSceneView(scene: scene)
         preview.updateScene(in: view)
         let camera = try #require(view.pointOfView)
         camera.position.x = 42

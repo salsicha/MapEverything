@@ -62,6 +62,7 @@ struct ContentView: View {
     @State private var showSessionHistory = false
     @State private var hasCameraPermission = false
     @State private var stoppedInspectionScene: SCNScene?
+    @State private var inspectionOverview = false
     @State private var isPreparingMapper = true
     @State private var isDepthAnythingReady = false
     @State private var shouldMountARView = false
@@ -296,8 +297,27 @@ struct ContentView: View {
                 let inspectionHeight = min(proxy.size.height * 0.58, 520)
 
                 ZStack(alignment: .topLeading) {
-                    TopDownSceneView(scene: scene)
+                    InspectionSceneView(scene: scene, overview: inspectionOverview)
                         .frame(width: inspectionWidth, height: inspectionHeight)
+
+                    VStack {
+                        Spacer()
+                        if scene.rootNode.childNode(withName: "captured_mesh_camera", recursively: false) != nil {
+                            Button {
+                                inspectionOverview.toggle()
+                            } label: {
+                                Label(inspectionOverview ? "Scan view" : "Overview",
+                                      systemImage: inspectionOverview ? "camera" : "viewfinder")
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 10)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white)
+                            .padding(12)
+                        }
+                    }
+                    .frame(width: inspectionWidth, height: inspectionHeight)
 
                     HStack(alignment: .top) {
                         Button {
@@ -333,6 +353,8 @@ struct ContentView: View {
                 )
                 .shadow(color: Color.black.opacity(0.35), radius: 18, x: 0, y: 8)
                 .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                .onAppear { inspectionOverview = false }
+                .onChange(of: stoppedInspectionScene) { _, _ in inspectionOverview = false }
             }
             .transition(.opacity.combined(with: .scale(scale: 0.98)))
         }
@@ -1232,11 +1254,33 @@ struct ActivityShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-struct TopDownSceneView: UIViewRepresentable {
+final class MeshInspectionCameraNode: SCNNode {
+    var capturedViewpoint: CapturedMeshViewpoint?
+    var isOverview = false
+}
+
+final class InspectionSCNView: SCNView {
+    var capturedViewpoint: CapturedMeshViewpoint?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        fitCapturedProjection()
+    }
+
+    func fitCapturedProjection() {
+        guard let capturedViewpoint, bounds.width > 0, bounds.height > 0 else { return }
+        pointOfView?.camera?.projectionTransform = SCNMatrix4(
+            capturedViewpoint.fittedProjection(viewportAspect: Float(bounds.width / bounds.height))
+        )
+    }
+}
+
+struct InspectionSceneView: UIViewRepresentable {
     let scene: SCNScene
+    var overview = false
 
     func makeUIView(context: Context) -> SCNView {
-        let scnView = SCNView()
+        let scnView = InspectionSCNView()
         scnView.allowsCameraControl = true
         scnView.autoenablesDefaultLighting = false
         scnView.backgroundColor = .secondarySystemBackground
@@ -1252,7 +1296,7 @@ struct TopDownSceneView: UIViewRepresentable {
         // SwiftUI may reuse the SCNView while a newly stopped scan replaces
         // its scene. Reframe only on replacement, preserving touch navigation
         // during ordinary UI updates for the same scene.
-        guard scnView.scene !== scene else { return }
+        guard scnView.scene !== scene || (scnView.pointOfView as? MeshInspectionCameraNode)?.isOverview != overview else { return }
         scnView.scene = scene
 
         removeExistingInspectionViewerNodes(from: scene)
@@ -1269,8 +1313,9 @@ struct TopDownSceneView: UIViewRepresentable {
         let maxDim = max(sizeX, max(sizeY, sizeZ))
         let sceneRadius = max(maxDim, 1.0)
 
-        let cameraNode = SCNNode()
+        let cameraNode = MeshInspectionCameraNode()
         cameraNode.name = "inspection_camera"
+        cameraNode.isOverview = overview
         let camera = SCNCamera()
         camera.usesOrthographicProjection = true
         camera.orthographicScale = Double(max(max(sizeX, sizeZ) * 0.7, sceneRadius * 0.45))
@@ -1280,8 +1325,19 @@ struct TopDownSceneView: UIViewRepresentable {
         cameraNode.position = SCNVector3(center.x, center.y + sceneRadius * 2, center.z)
         cameraNode.look(at: center)
 
+        (scnView as? InspectionSCNView)?.capturedViewpoint = nil
+        if !overview,
+           let captured = scene.rootNode.childNode(withName: "captured_mesh_camera", recursively: false),
+           let capturedCamera = captured.camera,
+           let viewpoint = (captured as? MeshInspectionCameraNode)?.capturedViewpoint {
+            cameraNode.camera = capturedCamera.copy() as? SCNCamera
+            cameraNode.simdTransform = captured.simdTransform
+            (scnView as? InspectionSCNView)?.capturedViewpoint = viewpoint
+        }
+
         scene.rootNode.addChildNode(cameraNode)
         scnView.pointOfView = cameraNode
+        (scnView as? InspectionSCNView)?.fitCapturedProjection()
         addInspectionLighting(to: scene, center: center, radius: sceneRadius)
 
         let floorSize = CGFloat(max(sceneRadius * 2.2, 1.0))
