@@ -49,6 +49,12 @@ nonisolated enum MeshGenerator {
         // Per-vertex camera colors; empty when no camera buffer was supplied
         // at generation time. When non-empty, count == vertices.count.
         let colors: [SIMD3<UInt8>]
+        // World-space camera position and EV exposure offset of the source
+        // frame; AccumulatedDepthMesh uses them to weight color observations
+        // by view quality and to normalize auto-exposure drift. Nil when the
+        // producer had no frame context, which restores equal weighting.
+        var cameraPosition: SIMD3<Float>? = nil
+        var exposureOffset: Float? = nil
     }
 
     static func createDescriptor(from geometry: ARMeshGeometry) -> MeshDescriptor {
@@ -125,7 +131,8 @@ nonisolated enum MeshGenerator {
         imageResolution resolution: CGSize,
         transform: simd_float4x4,
         configuration: DepthAnythingMeshConfiguration = .overlay,
-        cameraImage: CVPixelBuffer? = nil
+        cameraImage: CVPixelBuffer? = nil,
+        exposureOffset: Float? = nil
     ) -> DepthAnythingMeshSnapshot? {
         let depthWidth = relativeDepthMap.width
         let depthHeight = relativeDepthMap.height
@@ -304,7 +311,11 @@ nonisolated enum MeshGenerator {
                 descriptor: descriptor,
                 vertices: positions,
                 indices: indices,
-                colors: colors
+                colors: colors,
+                cameraPosition: SIMD3<Float>(
+                    transform.columns.3.x, transform.columns.3.y, transform.columns.3.z
+                ),
+                exposureOffset: exposureOffset
             )
         }
     }

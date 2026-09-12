@@ -19,12 +19,84 @@ struct AccumulatedDepthMeshTests {
     private let red = SIMD3<UInt8>(220, 30, 20)
     private let green = SIMD3<UInt8>(20, 210, 40)
 
-    private func triangle(x: Float = 0, z: Float = -10, color: SIMD3<UInt8>, indices: [UInt32] = [0, 1, 2]) -> MeshGenerator.DepthAnythingMeshSnapshot {
+    private func triangle(x: Float = 0, z: Float = -10, color: SIMD3<UInt8>, indices: [UInt32] = [0, 1, 2],
+                          cameraPosition: SIMD3<Float>? = nil,
+                          exposureOffset: Float? = nil) -> MeshGenerator.DepthAnythingMeshSnapshot {
         let vertices = [SIMD3<Float>(x, 0, z), SIMD3<Float>(x + 1, 0, z), SIMD3<Float>(x, 1, z)]
         var descriptor = MeshDescriptor()
         descriptor.positions = MeshBuffers.Positions(vertices)
         descriptor.primitives = .triangles(indices)
-        return .init(descriptor: descriptor, vertices: vertices, indices: indices, colors: Array(repeating: color, count: 3))
+        return .init(descriptor: descriptor, vertices: vertices, indices: indices,
+                     colors: Array(repeating: color, count: 3),
+                     cameraPosition: cameraPosition, exposureOffset: exposureOffset)
+    }
+
+    /// One metre in front of the test triangle's centroid, looking at it
+    /// head-on: the highest-quality observation the weighting model knows.
+    private let frontalCamera = SIMD3<Float>(1.0 / 3, 1.0 / 3, -9)
+    /// In the triangle's own plane and 30 m away: a grazing, distant view
+    /// whose observation weight clamps to the minimum.
+    private let grazingCamera = SIMD3<Float>(30, 1.0 / 3, -10)
+
+    private func channelDistance(_ a: SIMD3<UInt8>, _ b: SIMD3<UInt8>) -> Int {
+        max(abs(Int(a.x) - Int(b.x)), max(abs(Int(a.y) - Int(b.y)), abs(Int(a.z) - Int(b.z))))
+    }
+
+    @Test("A grazing distant view barely disturbs a frontal close-up's colors")
+    func frontalObservationResistsGrazingUpdate() async throws {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera))
+        _ = await map.integrate(triangle(color: green, cameraPosition: grazingCamera))
+        let fused = try #require(await map.snapshot().colors.first)
+        // Equal weighting would land halfway (distance 100); the minimum
+        // observation weight keeps the result pinned near the frontal color.
+        #expect(channelDistance(fused, red) < 15)
+        #expect(channelDistance(fused, green) > 150)
+    }
+
+    @Test("A later frontal view overrides a surface first seen at a grazing angle")
+    func frontalObservationOverridesPoorFirstView() async throws {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(color: red, cameraPosition: grazingCamera))
+        _ = await map.integrate(triangle(color: green, cameraPosition: frontalCamera))
+        let fused = try #require(await map.snapshot().colors.first)
+        #expect(channelDistance(fused, green) < 15)
+        #expect(channelDistance(fused, red) > 150)
+    }
+
+    @Test("Frames without camera context keep the historical equal weighting")
+    func missingCameraContextAveragesEqually() async throws {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(color: SIMD3<UInt8>(200, 200, 200)))
+        _ = await map.integrate(triangle(color: SIMD3<UInt8>(100, 100, 100)))
+        let fused = try #require(await map.snapshot().colors.first)
+        #expect(channelDistance(fused, SIMD3<UInt8>(150, 150, 150)) <= 1)
+    }
+
+    @Test("Auto-exposure drift is normalized against the scan's reference exposure")
+    func exposureDriftDoesNotShiftAccumulatedColors() async throws {
+        let gray = SIMD3<UInt8>(128, 128, 128)
+        // The same surface recorded one EV darker: linear value halved, then
+        // re-encoded with the 2.2 gamma the normalization assumes.
+        let oneEVDarker = UInt8((255 * pow(pow(128.0 / 255, 2.2) / 2, 1 / 2.2)).rounded())
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(color: gray, cameraPosition: frontalCamera, exposureOffset: 0))
+        _ = await map.integrate(triangle(
+            color: SIMD3<UInt8>(oneEVDarker, oneEVDarker, oneEVDarker),
+            cameraPosition: frontalCamera, exposureOffset: -1
+        ))
+        let fused = try #require(await map.snapshot().colors.first)
+        // Without normalization the average would sink to ~(128+93)/2 = 110.
+        #expect(channelDistance(fused, gray) <= 2)
+
+        let uncompensated = AccumulatedDepthMesh()
+        _ = await uncompensated.integrate(triangle(color: gray, cameraPosition: frontalCamera))
+        _ = await uncompensated.integrate(triangle(
+            color: SIMD3<UInt8>(oneEVDarker, oneEVDarker, oneEVDarker),
+            cameraPosition: frontalCamera
+        ))
+        let drifted = try #require(await uncompensated.snapshot().colors.first)
+        #expect(channelDistance(drifted, gray) > 10)
     }
 
     @Test("Distant colored surfaces and earlier areas survive across depth frames")

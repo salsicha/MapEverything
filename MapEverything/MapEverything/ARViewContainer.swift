@@ -708,6 +708,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         intrinsics: simd_float3x3,
         imageResolution: CGSize,
         transform: simd_float4x4,
+        exposureOffset: Float,
         workSession: ScanWorkSession,
         shouldBuildPointCloud: Bool,
         meshConfiguration: MeshGenerator.DepthAnythingMeshConfiguration
@@ -754,7 +755,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let meshSnapshot = MeshGenerator.createDepthAnythingMeshSnapshot(
             from: relative, calibration: calibration, intrinsics: intrinsics,
             imageResolution: imageResolution, transform: transform,
-            configuration: meshConfiguration, cameraImage: cameraImage
+            configuration: meshConfiguration, cameraImage: cameraImage,
+            exposureOffset: exposureOffset
         )
         let calibratedPoints: [ColoredPoint]
         if shouldBuildPointCloud, let meshSnapshot,
@@ -999,6 +1001,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let lidarConfidenceMap = sceneDepth.confidenceMap
         let intrinsics = frame.camera.intrinsics
         let imageResolution = frame.camera.imageResolution
+        let exposureOffset = frame.camera.exposureOffset
         let windowOrientation = arView?.window?.windowScene?.interfaceOrientation ?? .portrait
         let orientation: UIInterfaceOrientation = windowOrientation == .unknown ? .portrait : windowOrientation
         let viewport = orientation.isPortrait
@@ -1089,6 +1092,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     intrinsics: intrinsics,
                     imageResolution: imageResolution,
                     transform: transform,
+                    exposureOffset: exposureOffset,
                     workSession: workSession,
                     shouldBuildPointCloud: shouldPublishPointCloud || shouldRefreshSurfelVisualization,
                     meshConfiguration: shouldPublishDepthMesh || shouldPublishPointCloud ? .overlay : .accumulatedScene
