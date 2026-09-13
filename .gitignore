@@ -8,3 +8,4 @@ build/
 bags/
 xcuserdata/
 DerivedData/
+tools/promptda/*.mlpackage
