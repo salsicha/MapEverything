@@ -73,6 +73,176 @@ struct AccumulatedDepthMeshTests {
         #expect(channelDistance(fused, SIMD3<UInt8>(150, 150, 150)) <= 1)
     }
 
+    @Test("LiDAR provenance accrues only from LiDAR-calibrated frames")
+    func lidarWeightAccumulatesOnlyFromLidarFrames() async {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera),
+                                calibrationSource: .meshPropagated)
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera),
+                                calibrationSource: .meshPropagated)
+        #expect(await map.calibrationAnchors().isEmpty)
+
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera))
+        #expect(await map.calibrationAnchors().isEmpty)
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera))
+        // The triangle's vertices sit 1 m apart: three distinct anchor voxels.
+        #expect(await map.calibrationAnchors().count == 3)
+    }
+
+    @Test("Same-frame voxel welds cannot fake a second LiDAR sighting")
+    func sameFrameWeldsDoNotPromoteAnchors() async {
+        let map = AccumulatedDepthMesh()
+        // Two triangles whose corners weld pairwise into the same voxels, as
+        // neighboring grid vertices routinely do at production mesh density.
+        func doubled(color: SIMD3<UInt8>) -> MeshGenerator.DepthAnythingMeshSnapshot {
+            let vertices = [SIMD3<Float>(0, 0, -10), SIMD3<Float>(1, 0, -10), SIMD3<Float>(0, 1, -10),
+                            SIMD3<Float>(0.01, 0, -10), SIMD3<Float>(1.01, 0, -10), SIMD3<Float>(0.01, 1, -10)]
+            var descriptor = MeshDescriptor()
+            descriptor.positions = MeshBuffers.Positions(vertices)
+            descriptor.primitives = .triangles([0, 1, 2, 3, 4, 5])
+            return .init(descriptor: descriptor, vertices: vertices, indices: [0, 1, 2, 3, 4, 5],
+                         colors: Array(repeating: color, count: 6),
+                         cameraPosition: frontalCamera)
+        }
+        _ = await map.integrate(doubled(color: red))
+        // One frame, however densely welded, is one sighting: no anchors yet.
+        #expect(await map.calibrationAnchors().isEmpty)
+        _ = await map.integrate(doubled(color: red))
+        #expect(await map.calibrationAnchors().count == 3)
+    }
+
+    @Test("Propagated frames refresh anchored color but never move anchored geometry")
+    func fallbackFramesDoNotMoveAnchoredVertices() async throws {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera))
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera))
+        let anchored = await map.snapshot()
+
+        _ = await map.integrate(triangle(x: 0.03, color: green, cameraPosition: frontalCamera),
+                                calibrationSource: .meshPropagated)
+        let after = await map.snapshot()
+        #expect(after.vertices == anchored.vertices)
+        #expect(after.colors != anchored.colors)
+    }
+
+    @Test("First LiDAR contact replaces fallback-born geometry outright")
+    func lidarFirstContactReplacesFallbackGeometry() async throws {
+        let map = AccumulatedDepthMesh()
+        for _ in 0..<8 {
+            _ = await map.integrate(triangle(color: green, cameraPosition: frontalCamera),
+                                    calibrationSource: .meshPropagated)
+        }
+        _ = await map.integrate(triangle(x: 0.02, color: red, cameraPosition: frontalCamera))
+        let mesh = await map.snapshot()
+        // The reference-closure invariant: a LiDAR-touched position is a pure
+        // combination of LiDAR observations, so the accumulated propagated
+        // mass cannot hold the vertex at its old position even fractionally —
+        // the reset makes the result exactly the LiDAR frame's geometry.
+        #expect(mesh.vertices == [SIMD3<Float>(0.02, 0, -10),
+                                  SIMD3<Float>(1.02, 0, -10),
+                                  SIMD3<Float>(0.02, 1, -10)])
+        #expect(mesh.colors == [red, red, red])
+    }
+
+    @Test("Anchor positions survive a fallback streak unchanged")
+    func anchorSnapshotStableAcrossFallbackStreak() async {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera))
+        _ = await map.integrate(triangle(color: red, cameraPosition: frontalCamera))
+        let before = await map.calibrationAnchors()
+        for shift in [Float(0.01), 0.02, 0.03] {
+            _ = await map.integrate(triangle(x: shift, color: green, cameraPosition: frontalCamera),
+                                    calibrationSource: .meshPropagated)
+        }
+        let after = await map.calibrationAnchors()
+        #expect(!before.isEmpty)
+        #expect(before == after)
+    }
+
+    @Test("Mesh-propagated calibration does not compound scale error across a streak")
+    func propagatedCalibrationDoesNotCompoundScaleError() async throws {
+        let width = 96, height = 72
+        let truth = DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 0.5, offset: 0.05)
+        let imageResolution = CGSize(width: width, height: height)
+        var intrinsics = matrix_identity_float3x3
+        intrinsics[0][0] = 80
+        intrinsics[1][1] = 80
+        intrinsics[2][0] = Float(width) / 2
+        intrinsics[2][1] = Float(height) / 2
+        func depth(_ x: Int, _ y: Int) -> Float { 3 + Float(x) / Float(width - 1) }
+        let relative = RelativeDepthMap(width: width, height: height, data: (0..<(width * height)).map {
+            (1 / depth($0 % width, $0 / width) - truth.offset) / truth.scale
+        })
+        let wide = MeshGenerator.DepthAnythingMeshConfiguration(
+            step: 1, minimumDepth: 0.1, maximumDepth: 100,
+            maximumDepthDiscontinuity: 1_000, maximumTriangleCount: 100_000
+        )
+        func colored(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot) -> MeshGenerator.DepthAnythingMeshSnapshot {
+            .init(descriptor: mesh.descriptor, vertices: mesh.vertices, indices: mesh.indices,
+                  colors: Array(repeating: SIMD3<UInt8>(200, 180, 160), count: mesh.vertices.count),
+                  cameraPosition: mesh.cameraPosition, exposureOffset: mesh.exposureOffset)
+        }
+
+        // Weld coarser than the 2% drift (7 cm at this range) so propagated
+        // geometry lands in the same voxels as the anchors it would corrupt
+        // if the freeze rule leaked, while the 0.4 m anchor grid still yields
+        // enough references for the fitter's own >50-sample gate.
+        let map = AccumulatedDepthMesh(voxelSize: 0.1)
+        for _ in 0..<3 {
+            let mesh = try #require(MeshGenerator.createDepthAnythingMeshSnapshot(
+                from: relative, calibration: truth, intrinsics: intrinsics,
+                imageResolution: imageResolution, transform: matrix_identity_float4x4,
+                configuration: wide
+            ))
+            _ = await map.integrate(colored(mesh))
+        }
+        let anchorsBefore = await map.calibrationAnchors()
+        try #require(!anchorsBefore.isEmpty)
+
+        var configuration = MeshDepthPropagation.Configuration()
+        configuration.minimumSamples = 60
+        configuration.minimumCoverage = 0.3
+        let referenceRelative = relative.value(atX: width / 2, y: height / 2)
+        var finalRatio: Float = 0
+        for _ in 0..<20 {
+            let anchors = await map.calibrationAnchors()
+            let fit = try #require(MeshDepthPropagation.fitCalibration(
+                anchors: anchors, relative: relative, intrinsics: intrinsics,
+                imageResolution: imageResolution, transform: matrix_identity_float4x4,
+                configuration: configuration
+            ))
+            let implied = try #require(DepthAnythingProcessor.calibratedMetricDepth(
+                relativeDepth: referenceRelative, calibration: fit
+            ))
+            finalRatio = implied / depth(width / 2, height / 2)
+
+            // Integrate deliberately 2%-too-far geometry as propagated. Were
+            // fallback output able to re-enter the anchor set, each round
+            // would fit against last round's error and compound 1.02^k.
+            let drifted = DepthAnythingProcessor.MaximumLikelihoodCalibration(
+                scale: fit.scale / 1.02, offset: fit.offset / 1.02
+            )
+            let mesh = try #require(MeshGenerator.createDepthAnythingMeshSnapshot(
+                from: relative, calibration: drifted, intrinsics: intrinsics,
+                imageResolution: imageResolution, transform: matrix_identity_float4x4,
+                configuration: wide
+            ))
+            _ = await map.integrate(colored(mesh), calibrationSource: .meshPropagated)
+            // A LiDAR frame elsewhere (nearby floor) lands between fallback
+            // frames, invalidating the anchor cache. The next round's anchors
+            // are re-read from vertex positions — the moment a freeze leak
+            // would let last round's drifted geometry become this round's
+            // reference and compound 1.02^k.
+            _ = await map.integrate(triangle(x: 50, color: red,
+                                             cameraPosition: SIMD3<Float>(50 + 1.0 / 3, 1.0 / 3, -9)))
+        }
+        #expect(abs(finalRatio - 1) < 0.02)
+        // The floor patch appends its own anchors; the wall anchors that
+        // served as calibration references must be byte-identical.
+        let anchorsAfter = await map.calibrationAnchors()
+        #expect(Array(anchorsAfter.prefix(anchorsBefore.count)) == anchorsBefore)
+    }
+
     @Test("Auto-exposure drift is normalized against the scan's reference exposure")
     func exposureDriftDoesNotShiftAccumulatedColors() async throws {
         let gray = SIMD3<UInt8>(128, 128, 128)

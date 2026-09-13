@@ -838,6 +838,7 @@ class ROS2BridgeClient: ObservableObject {
 
     nonisolated func publishDepthAnythingCalibration(
         _ calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
+        source: DepthCalibrationSource = .lidar,
         relativeDepthSize: CGSize,
         imageResolution: CGSize,
         timestamp: TimeInterval
@@ -848,6 +849,7 @@ class ROS2BridgeClient: ObservableObject {
         let topic = topicRegistry.topic(.depthAnythingCalibration)
         let msg = Self.makeDepthAnythingCalibrationMessage(
             calibration: calibration,
+            source: source,
             header: createHeader(frameId: FrameID.iphoneCamera, timestamp: timestamp),
             relativeDepthSize: relativeDepthSize,
             imageResolution: imageResolution,
@@ -906,6 +908,7 @@ class ROS2BridgeClient: ObservableObject {
 
     nonisolated static func makeDepthAnythingCalibrationMessage(
         calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
+        source: DepthCalibrationSource = .lidar,
         header: [String: Any],
         relativeDepthSize: CGSize,
         imageResolution: CGSize,
@@ -921,8 +924,11 @@ class ROS2BridgeClient: ObservableObject {
             "depth_validity_filter": "finite_metric_depth_only",
             "lidar_limits_output_range": false,
             "valid_metric_depth_range_m": [0.1, 100.0],
-            "uses_lidar_for_scale_calibration": true,
+            "uses_lidar_for_scale_calibration": source == .lidar,
             "lidar_usage": "calibration_only",
+            "scale_reference": source == .lidar
+                ? "arkit_lidar_depth"
+                : "lidar_anchored_accumulated_mesh_projection",
             "overlay_mesh_uses_calibrated_depth": true
         ]
 
@@ -951,7 +957,9 @@ class ROS2BridgeClient: ObservableObject {
             "equation": "metric_depth_m = 1.0 / (scale * relative_depth + offset)",
             "relative_depth_units": "depthanything_relative",
             "metric_depth_units": "m",
-            "calibration_source": "arkit_lidar_maximum_likelihood",
+            "calibration_source": source == .lidar
+                ? "arkit_lidar_maximum_likelihood"
+                : "accumulated_mesh_propagated",
             "metadata_json": metadataJSON
         ]
     }

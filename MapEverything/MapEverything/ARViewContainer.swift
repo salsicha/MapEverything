@@ -159,6 +159,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     nonisolated private struct DepthAnythingMappingFrame: @unchecked Sendable {
         let calibratedPoints: [ColoredPoint]
         let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
+        let calibrationSource: DepthCalibrationSource
         let relativeDepthSize: CGSize
         let meshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
     }
@@ -179,6 +180,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     sceneScanID = UUID()
                     exportedScanDirectories.removeAll()
                     depthMappingFeedback = ""
+                    consecutiveMeshCalibrationFrames = 0
                     trackingStateFeedback = ""
                     publishTrackingFeedback()
                     let surfelMap = surfelMap
@@ -253,6 +255,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var coachingOverlay: ARCoachingOverlayView?
     private var trackingStateFeedback = ""
     private var depthMappingFeedback = ""
+    /// Length of the current mesh-propagated calibration streak; reset by any
+    /// LiDAR-calibrated frame and at scan start. Drives the gentle "depth
+    /// from scanned map" notice after ~5 s of continuous fallback.
+    private var consecutiveMeshCalibrationFrames = 0
 
     private func publishTrackingFeedback() {
         delegate?.didUpdateTrackingFeedback(trackingStateFeedback.isEmpty ? depthMappingFeedback : trackingStateFeedback)
@@ -710,6 +716,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         transform: simd_float4x4,
         exposureOffset: Float,
         workSession: ScanWorkSession,
+        accumulator: AccumulatedDepthMesh,
         shouldBuildPointCloud: Bool,
         meshConfiguration: MeshGenerator.DepthAnythingMeshConfiguration
     ) async -> DepthAnythingMappingFrame? {
@@ -737,17 +744,38 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
         guard workSession.isActive, !Task.isCancelled else { return nil }
-        guard let calibration = DepthAnythingProcessor.maximumLikelihoodCalibration(
+        let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
+        let calibrationSource: DepthCalibrationSource
+        if let lidarCalibration = DepthAnythingProcessor.maximumLikelihoodCalibration(
             relative: relative,
             lidarDepthMap: lidarDepthMap,
             lidarConfidenceMap: lidarConfidenceMap
-        ) else {
-            await MainActor.run {
-                guard workSession.isActive, self.isScanning else { return }
-                self.depthMappingFeedback = "Depth scale unavailable. Include shaded, nearby surfaces at different distances."
-                self.publishTrackingFeedback()
+        ) {
+            calibration = lidarCalibration
+            calibrationSource = .lidar
+        } else {
+            // LiDAR could not scale this frame; fit against the LiDAR-anchored
+            // accumulated mesh instead (docs/mesh-propagated-calibration.md).
+            let anchors = await accumulator.calibrationAnchors()
+            guard workSession.isActive, !Task.isCancelled else { return nil }
+            if let propagated = MeshDepthPropagation.fitCalibration(
+                anchors: anchors, relative: relative, intrinsics: intrinsics,
+                imageResolution: imageResolution, transform: transform,
+                lidarDepthMap: lidarDepthMap, lidarConfidenceMap: lidarConfidenceMap
+            ) {
+                calibration = propagated
+                calibrationSource = .meshPropagated
+            } else {
+                let guidance = anchors.count < MeshDepthPropagation.Configuration.default.minimumSamples
+                    ? "Depth scale unavailable. Scan nearby surfaces first, then move outward."
+                    : "Depth scale unavailable. Keep previously scanned surfaces in view."
+                await MainActor.run {
+                    guard workSession.isActive, self.isScanning else { return }
+                    self.depthMappingFeedback = guidance
+                    self.publishTrackingFeedback()
+                }
+                return nil
             }
-            return nil
         }
 
         // The retained cameraImage is both the inference input above and the
@@ -778,13 +806,28 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         await MainActor.run {
             guard workSession.isActive, self.isScanning else { return }
-            self.depthMappingFeedback = meshSnapshot == nil ? "No reliable surface depth. Include nearby textured surfaces." : ""
+            if calibrationSource == .lidar {
+                self.consecutiveMeshCalibrationFrames = 0
+            } else {
+                self.consecutiveMeshCalibrationFrames += 1
+            }
+            if meshSnapshot == nil {
+                self.depthMappingFeedback = "No reliable surface depth. Include nearby textured surfaces."
+            } else if self.consecutiveMeshCalibrationFrames > 10 {
+                // Silent for the first ~5 s of propagated frames to avoid
+                // flicker; a long streak deserves a gentle nudge back toward
+                // LiDAR-calibratable surfaces.
+                self.depthMappingFeedback = "Depth from scanned map — revisit nearby surfaces when possible."
+            } else {
+                self.depthMappingFeedback = ""
+            }
             self.publishTrackingFeedback()
         }
         guard !calibratedPoints.isEmpty || meshSnapshot != nil else { return nil }
         return DepthAnythingMappingFrame(
             calibratedPoints: calibratedPoints,
             calibration: calibration,
+            calibrationSource: calibrationSource,
             relativeDepthSize: CGSize(width: CGFloat(relative.width), height: CGFloat(relative.height)),
             meshSnapshot: meshSnapshot
         )
@@ -1094,6 +1137,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     transform: transform,
                     exposureOffset: exposureOffset,
                     workSession: workSession,
+                    accumulator: accumulator,
                     shouldBuildPointCloud: shouldPublishPointCloud || shouldRefreshSurfelVisualization,
                     meshConfiguration: shouldPublishDepthMesh || shouldPublishPointCloud ? .overlay : .accumulatedScene
                 )
@@ -1102,8 +1146,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
             }
             guard workSession.isActive, !Task.isCancelled else { return }
 
-            if let meshSnapshot = mappingFrame?.meshSnapshot {
-                let stats = await accumulator.integrate(meshSnapshot, workSession: workSession, viewpoint: capturedViewpoint)
+            if let mappingFrame, let meshSnapshot = mappingFrame.meshSnapshot {
+                let stats = await accumulator.integrate(meshSnapshot, workSession: workSession,
+                                                        viewpoint: capturedViewpoint,
+                                                        calibrationSource: mappingFrame.calibrationSource)
                 await MainActor.run {
                     guard workSession.isActive, self.isScanning else { return }
                     self.cumulativePointCount = stats.vertexCount
@@ -1135,6 +1181,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     if let mappingFrame {
                         ROS2BridgeClient.shared.publishDepthAnythingCalibration(
                             mappingFrame.calibration,
+                            source: mappingFrame.calibrationSource,
                             relativeDepthSize: mappingFrame.relativeDepthSize,
                             imageResolution: imageResolution,
                             timestamp: timestamp

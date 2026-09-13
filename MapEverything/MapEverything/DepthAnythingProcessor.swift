@@ -406,10 +406,71 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         max(0.015, 0.012 + 0.004 * depth * depth)
     }
 
-    private static func monocularStandardDeviation(depth: Float) -> Float {
+    static func monocularStandardDeviation(depth: Float) -> Float {
         max(0.15, 0.10 + 0.08 * depth)
     }
 
+    /// Absolute-scale sanity check for a mesh-propagated calibration: the
+    /// LiDAR FIT failed as a set (too few pixels, or a degenerate span), but
+    /// individually valid LiDAR returns often still exist, and a calibration
+    /// derived from the accumulated mesh must agree with them. Returns nil
+    /// when fewer than `minimumCrossCheckPixels` valid returns exist (nothing
+    /// to judge), true when the median return agrees within
+    /// max(0.12 m, 15% of depth), false otherwise.
+    static let minimumCrossCheckPixels = 10
+
+    static func sparseLiDARAgreement(
+        calibration: MaximumLikelihoodCalibration,
+        relative: RelativeDepthMap,
+        lidarDepthMap: CVPixelBuffer,
+        lidarConfidenceMap: CVPixelBuffer? = nil
+    ) -> Bool? {
+        CVPixelBufferLockBaseAddress(lidarDepthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(lidarDepthMap, .readOnly) }
+        if let lidarConfidenceMap {
+            CVPixelBufferLockBaseAddress(lidarConfidenceMap, .readOnly)
+        }
+        defer {
+            if let lidarConfidenceMap {
+                CVPixelBufferUnlockBaseAddress(lidarConfidenceMap, .readOnly)
+            }
+        }
+
+        let lidarW = CVPixelBufferGetWidth(lidarDepthMap)
+        let lidarH = CVPixelBufferGetHeight(lidarDepthMap)
+        guard CVPixelBufferGetPixelFormatType(lidarDepthMap) == kCVPixelFormatType_DepthFloat32,
+              let base = CVPixelBufferGetBaseAddress(lidarDepthMap)?.assumingMemoryBound(to: Float32.self)
+        else { return nil }
+
+        let floatsPerRow = CVPixelBufferGetBytesPerRow(lidarDepthMap) / MemoryLayout<Float32>.stride
+        let confidenceSampling = lidarConfidenceSampling(lidarConfidenceMap)
+        var agreeing = 0
+        var total = 0
+        relative.withReadAccess { relativeReader in
+            let step = 4
+            for y in stride(from: 0, to: lidarH, by: step) {
+                for x in stride(from: 0, to: lidarW, by: step) {
+                    let depth = base[y * floatsPerRow + x]
+                    guard Self.isValidLiDARDepth(depth) else { continue }
+                    let nx = Float(x) / Float(lidarW)
+                    let ny = Float(y) / Float(lidarH)
+                    guard Self.lidarConfidenceWeight(confidenceSampling.value(normalizedX: nx, normalizedY: ny)) > 0 else { continue }
+                    let r = relativeReader.value(atX: min(relative.width - 1, Int((nx * Float(relative.width)).rounded())),
+                                                 y: min(relative.height - 1, Int((ny * Float(relative.height)).rounded())))
+                    guard let predicted = Self.calibratedMetricDepth(relativeDepth: r, calibration: calibration) else {
+                        total += 1
+                        continue
+                    }
+                    total += 1
+                    if abs(predicted - depth) <= max(0.12, 0.15 * depth) {
+                        agreeing += 1
+                    }
+                }
+            }
+        }
+        guard total >= Self.minimumCrossCheckPixels else { return nil }
+        return agreeing * 2 >= total
+    }
 }
 
 /// Dense depth map view. Depth Anything outputs stay backed by their native

@@ -23,6 +23,13 @@ actor AccumulatedDepthMesh {
         var position: SIMD3<Float>
         var color: SIMD3<Float>
         var weight: Float
+        // LiDAR-provenance mass: accrues only from frames whose calibration
+        // came from LiDAR, with incidence-only observation weights. The
+        // reference-closure invariant (docs/mesh-propagated-calibration.md)
+        // guarantees every vertex with lidarWeight > 0 has a position formed
+        // exclusively from LiDAR-calibrated observations. Lives in the
+        // struct's tail padding, so the 48-byte stride is unchanged.
+        var lidarWeight: Float
     }
 
     private struct Face: Hashable {
@@ -48,6 +55,20 @@ actor AccumulatedDepthMesh {
     /// Exposure normalization is capped at ±1 EV so a wildly different
     /// metering never bleaches or crushes accumulated colors.
     static let maximumExposureGain: Float = 2
+    /// LiDAR mass needed before a vertex can serve as a calibration anchor.
+    /// One observation contributes at most 1, so this proves at least two
+    /// LiDAR-calibrated sightings, filtering single-frame ghosts.
+    static let anchorLidarWeight: Float = 1.5
+    /// Mesh-propagated observations carry a quarter of their view-quality
+    /// weight, so one subsequent frontal LiDAR view dominates up to four
+    /// accumulated fallback views of fallback-born geometry.
+    static let fallbackObservationWeightPenalty: Float = 0.25
+    /// Anchors deduplicate on a grid this many times coarser than the weld
+    /// voxel; calibration needs spread, not density.
+    static let anchorVoxelScale: Float = 4
+    /// Hard cap on the anchor index (~2,600 m^2 of anchored surface at the
+    /// default spacing). Insertion stops at the cap; coverage remains valid.
+    static let maximumAnchors = 65_536
 
     private let voxelSize: Float
     private let maximumVertices: Int
@@ -60,6 +81,9 @@ actor AccumulatedDepthMesh {
     private var reachedCapacity = false
     private var viewpoint: CapturedMeshViewpoint?
     private var referenceExposureOffset: Float?
+    private var anchorKeys: Set<SIMD3<Int>> = []
+    private var anchorVertexIndices: [UInt32] = []
+    private var cachedAnchorPositions: [SIMD3<Float>]?
 
     init(voxelSize: Float = 0.05, maximumVertices: Int = 2_000_000, maximumTriangles: Int = 4_000_000) {
         self.voxelSize = voxelSize.isFinite ? max(0.01, voxelSize) : 0.05
@@ -68,7 +92,8 @@ actor AccumulatedDepthMesh {
     }
 
     func integrate(_ mesh: MeshGenerator.DepthAnythingMeshSnapshot, workSession: ScanWorkSession? = nil,
-                   viewpoint: CapturedMeshViewpoint? = nil) -> Statistics {
+                   viewpoint: CapturedMeshViewpoint? = nil,
+                   calibrationSource: DepthCalibrationSource = .lidar) -> Statistics {
         // Recheck after the actor hop: tracking can be lost while a completed
         // inference waits to enter the accumulator.
         guard !Task.isCancelled, workSession?.isActive != false else { return statistics }
@@ -78,6 +103,10 @@ actor AccumulatedDepthMesh {
         var remap = [UInt32?](repeating: nil, count: mesh.vertices.count)
         let keys = mesh.vertices.map(key)
         let colorTable = exposureColorTable(for: mesh.exposureOffset)
+        // Neighboring grid vertices routinely weld into one accumulated
+        // vertex within a single frame; anchor mass must count sightings
+        // across frames, so each vertex accrues at most once per integrate.
+        var lidarAccrued: Set<Int> = []
         var acceptedFace = false
         for offset in stride(from: 0, to: mesh.indices.count - mesh.indices.count % 3, by: 3) {
             let local = (Int(mesh.indices[offset]), Int(mesh.indices[offset + 1]), Int(mesh.indices[offset + 2]))
@@ -93,14 +122,20 @@ actor AccumulatedDepthMesh {
                 reachedCapacity = true
                 break
             }
-            let weight = observationWeight(
+            let weights = faceWeights(
                 faceCross: crossProduct, faceCrossLength: area.squareRoot(),
                 centroid: (mesh.vertices[local.0] + mesh.vertices[local.1] + mesh.vertices[local.2]) / 3,
                 cameraPosition: mesh.cameraPosition
             )
-            let ia = fuse(local.0, key: a, mesh: mesh, remap: &remap, observationWeight: weight, colorTable: colorTable)
-            let ib = fuse(local.1, key: b, mesh: mesh, remap: &remap, observationWeight: weight, colorTable: colorTable)
-            let ic = fuse(local.2, key: c, mesh: mesh, remap: &remap, observationWeight: weight, colorTable: colorTable)
+            let ia = fuse(local.0, key: a, mesh: mesh, remap: &remap, weights: weights,
+                          colorTable: colorTable, source: calibrationSource,
+                          lidarAccrued: &lidarAccrued)
+            let ib = fuse(local.1, key: b, mesh: mesh, remap: &remap, weights: weights,
+                          colorTable: colorTable, source: calibrationSource,
+                          lidarAccrued: &lidarAccrued)
+            let ic = fuse(local.2, key: c, mesh: mesh, remap: &remap, weights: weights,
+                          colorTable: colorTable, source: calibrationSource,
+                          lidarAccrued: &lidarAccrued)
             if faces.insert(Face(ia, ib, ic)).inserted {
                 indices.append(contentsOf: [ia, ib, ic])
             }
@@ -115,26 +150,50 @@ actor AccumulatedDepthMesh {
             if referenceExposureOffset == nil {
                 referenceExposureOffset = mesh.exposureOffset
             }
+            if calibrationSource == .lidar {
+                // Anchored vertex positions only move on LiDAR frames, so the
+                // anchor cache stays warm through an entire fallback streak.
+                cachedAnchorPositions = nil
+            }
         }
         return statistics
     }
 
-    /// How well the camera saw this face: the cosine of the incidence angle
-    /// attenuated by inverse-square distance beyond `fullWeightDistance`.
-    /// Frames without a camera position keep the historical equal weighting.
-    private func observationWeight(
+    /// World positions of the LiDAR-anchored calibration references, in
+    /// deterministic insertion order. Cached between LiDAR-sourced
+    /// integrations, so repeated calls during a fallback streak are O(1).
+    func calibrationAnchors() -> [SIMD3<Float>] {
+        if let cachedAnchorPositions { return cachedAnchorPositions }
+        let positions = anchorVertexIndices.map { vertices[Int($0)].position }
+        cachedAnchorPositions = positions
+        return positions
+    }
+
+    /// Per-face view-quality weights. `observation` is the cosine of the
+    /// incidence angle attenuated by inverse-square distance beyond
+    /// `fullWeightDistance` (drives position/color averaging); `anchor` is the
+    /// incidence term alone — a frontal LiDAR-calibrated sighting at range is
+    /// a valid anchor certificate, and depth-dependent noise is handled by the
+    /// calibration sigma model instead. Frames without a camera position keep
+    /// the historical equal weighting.
+    private func faceWeights(
         faceCross: SIMD3<Float>, faceCrossLength: Float,
         centroid: SIMD3<Float>, cameraPosition: SIMD3<Float>?
-    ) -> Float {
-        guard let cameraPosition else { return 1 }
+    ) -> (observation: Float, anchor: Float) {
+        guard let cameraPosition else { return (1, 1) }
         let toCamera = cameraPosition - centroid
         let distance = simd_length(toCamera)
-        guard distance > 1e-6, faceCrossLength > 0 else { return Self.minimumObservationWeight }
+        guard distance > 1e-6, faceCrossLength > 0 else {
+            return (Self.minimumObservationWeight, Self.minimumObservationWeight)
+        }
         let cosineIncidence = abs(simd_dot(faceCross, toCamera)) / (faceCrossLength * distance)
         let proximity = min(1, (Self.fullWeightDistance / distance) * (Self.fullWeightDistance / distance))
         let weight = cosineIncidence * proximity
-        guard weight.isFinite else { return Self.minimumObservationWeight }
-        return min(1, max(Self.minimumObservationWeight, weight))
+        guard weight.isFinite, cosineIncidence.isFinite else {
+            return (Self.minimumObservationWeight, Self.minimumObservationWeight)
+        }
+        return (min(1, max(Self.minimumObservationWeight, weight)),
+                min(1, max(Self.minimumObservationWeight, cosineIncidence)))
     }
 
     /// Maps incoming 8-bit channels onto the scan's reference exposure by
@@ -172,7 +231,9 @@ actor AccumulatedDepthMesh {
     }
 
     private func fuse(_ local: Int, key: SIMD3<Int>, mesh: MeshGenerator.DepthAnythingMeshSnapshot,
-                      remap: inout [UInt32?], observationWeight: Float, colorTable: [Float]?) -> UInt32 {
+                      remap: inout [UInt32?], weights: (observation: Float, anchor: Float),
+                      colorTable: [Float]?, source: DepthCalibrationSource,
+                      lidarAccrued: inout Set<Int>) -> UInt32 {
         if let id = remap[local] { return id }
         let rgb = mesh.colors[local]
         let color: SIMD3<Float>
@@ -181,6 +242,9 @@ actor AccumulatedDepthMesh {
         } else {
             color = SIMD3<Float>(Float(rgb.x), Float(rgb.y), Float(rgb.z))
         }
+        let observationWeight = source == .lidar
+            ? weights.observation
+            : weights.observation * Self.fallbackObservationWeightPenalty
         let id: UInt32
         if let existing = vertexIDs[key] {
             id = existing
@@ -190,18 +254,68 @@ actor AccumulatedDepthMesh {
             // vertex first seen at a grazing angle or from far away.
             let accumulated = min(vertices[index].weight, 7)
             let total = accumulated + observationWeight
-            vertices[index].position =
-                (vertices[index].position * accumulated + mesh.vertices[local] * observationWeight) / total
-            vertices[index].color =
-                (vertices[index].color * accumulated + color * observationWeight) / total
-            vertices[index].weight = total
+            switch source {
+            case .lidar where vertices[index].lidarWeight == 0:
+                // First LiDAR contact with fallback-born geometry replaces the
+                // propagated running average outright, keeping every
+                // LiDAR-touched position a pure combination of LiDAR
+                // observations (the reference-closure invariant).
+                vertices[index].position = mesh.vertices[local]
+                vertices[index].color = color
+                vertices[index].weight = observationWeight
+            case .lidar:
+                vertices[index].position =
+                    (vertices[index].position * accumulated + mesh.vertices[local] * observationWeight) / total
+                vertices[index].color =
+                    (vertices[index].color * accumulated + color * observationWeight) / total
+                vertices[index].weight = total
+            case .meshPropagated where vertices[index].lidarWeight > 0:
+                // Propagated observations must never move LiDAR-touched
+                // geometry: color refreshes, position/weight stay frozen.
+                vertices[index].color =
+                    (vertices[index].color * accumulated + color * observationWeight) / total
+            case .meshPropagated:
+                vertices[index].position =
+                    (vertices[index].position * accumulated + mesh.vertices[local] * observationWeight) / total
+                vertices[index].color =
+                    (vertices[index].color * accumulated + color * observationWeight) / total
+                vertices[index].weight = total
+            }
+            if source == .lidar, lidarAccrued.insert(index).inserted {
+                accrueLidarMass(vertexIndex: index, anchorWeight: weights.anchor)
+            }
         } else {
             id = UInt32(vertices.count)
             vertexIDs[key] = id
-            vertices.append(Vertex(position: mesh.vertices[local], color: color, weight: observationWeight))
+            vertices.append(Vertex(position: mesh.vertices[local], color: color,
+                                   weight: observationWeight,
+                                   lidarWeight: source == .lidar ? weights.anchor : 0))
+            if source == .lidar {
+                lidarAccrued.insert(Int(id))
+            }
         }
         remap[local] = id
         return id
+    }
+
+    /// Adds LiDAR-provenance mass and registers the vertex as a calibration
+    /// anchor the moment it crosses the eligibility threshold — a
+    /// once-per-vertex event, so the integrate hot path stays free of
+    /// per-observation anchor bookkeeping.
+    private func accrueLidarMass(vertexIndex: Int, anchorWeight: Float) {
+        let before = vertices[vertexIndex].lidarWeight
+        let after = min(before, 7) + anchorWeight
+        vertices[vertexIndex].lidarWeight = after
+        guard before < Self.anchorLidarWeight, after >= Self.anchorLidarWeight,
+              anchorVertexIndices.count < Self.maximumAnchors else { return }
+        let anchorVoxel = voxelSize * Self.anchorVoxelScale
+        let position = vertices[vertexIndex].position
+        let anchorKey = SIMD3<Int>(Int(floor(position.x / anchorVoxel)),
+                                   Int(floor(position.y / anchorVoxel)),
+                                   Int(floor(position.z / anchorVoxel)))
+        guard anchorKeys.insert(anchorKey).inserted else { return }
+        anchorVertexIndices.append(UInt32(vertexIndex))
+        cachedAnchorPositions = nil
     }
 
     private func key(_ position: SIMD3<Float>) -> SIMD3<Int>? {
