@@ -273,20 +273,27 @@ class ARViewController: UIViewController, ARSessionDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(handleWillStopMapping), name: .mapEverythingWillStopMapping, object: nil)
     }
     
-    @objc private func thermalStateChanged() {
+    /// iOS posts thermal-state changes on a global dispatch queue and
+    /// selector observers run on the posting thread, so this must be
+    /// nonisolated: a MainActor-isolated @objc thunk asserts at entry before
+    /// the body's main-queue hop can run. Internal so the tests can invoke
+    /// it from a background queue.
+    @objc nonisolated func thermalStateChanged() {
         let state = ProcessInfo.processInfo.thermalState
         DispatchQueue.main.async {
-            switch state {
-            case .nominal, .fair:
-                self.pointProcessingInterval = 0.1 // 10Hz
-            case .serious:
-                self.pointProcessingInterval = 0.25 // 4Hz - Cooldown mode
-                self.delegate?.didUpdateTrackingFeedback("Device Heating Up (Throttling scan...)")
-            case .critical:
-                self.pointProcessingInterval = 0.5 // 2Hz - Emergency mode
-                self.delegate?.didUpdateTrackingFeedback("Device Too Hot! Save scan soon.")
-            @unknown default:
-                break
+            MainActor.assumeIsolated {
+                switch state {
+                case .nominal, .fair:
+                    self.pointProcessingInterval = 0.1 // 10Hz
+                case .serious:
+                    self.pointProcessingInterval = 0.25 // 4Hz - Cooldown mode
+                    self.delegate?.didUpdateTrackingFeedback("Device Heating Up (Throttling scan...)")
+                case .critical:
+                    self.pointProcessingInterval = 0.5 // 2Hz - Emergency mode
+                    self.delegate?.didUpdateTrackingFeedback("Device Too Hot! Save scan soon.")
+                @unknown default:
+                    break
+                }
             }
         }
     }
@@ -394,25 +401,37 @@ class ARViewController: UIViewController, ARSessionDelegate {
         guard let session = arView?.session, let fileURL = Self.worldMapFileURL else { return }
 
         // Requested before the session pauses; ARKit still delivers the map
-        // asynchronously afterwards. Failures only surface as feedback text.
-        session.getCurrentWorldMap { [weak self] worldMap, error in
-            guard let worldMap else {
-                DispatchQueue.main.async {
-                    let reason = error?.localizedDescription ?? "world map unavailable"
-                    self?.delegate?.didUpdateTrackingFeedback("Couldn't save scan area: \(reason)")
-                }
-                return
-            }
+        // asynchronously afterwards ON ITS OWN QUEUE, so the completion must
+        // be @Sendable: an inferred-MainActor closure trips the Swift 6
+        // executor assertion the moment the map arrives after Stop.
+        // Failures only surface as feedback text.
+        session.getCurrentWorldMap { @Sendable [weak self] worldMap, error in
+            self?.archiveCapturedWorldMap(worldMap, error: error, to: fileURL)
+        }
+    }
 
-            let worldMapBox = UncheckedSendable(worldMap)
-            Task.detached(priority: .utility) { [weak self] in
-                do {
-                    let data = try NSKeyedArchiver.archivedData(withRootObject: worldMapBox.value, requiringSecureCoding: true)
-                    try data.write(to: fileURL, options: [.atomic])
-                } catch {
-                    await MainActor.run {
-                        self?.delegate?.didUpdateTrackingFeedback("Couldn't save scan area: \(error.localizedDescription)")
-                    }
+    /// Runs on whatever queue ARKit delivers the captured world map on;
+    /// everything main-actor-facing hops explicitly. Internal so the tests
+    /// can invoke it from a background queue.
+    nonisolated func archiveCapturedWorldMap(_ worldMap: ARWorldMap?, error: Error?, to fileURL: URL) {
+        guard let worldMap else {
+            let reason = error?.localizedDescription ?? "world map unavailable"
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.delegate?.didUpdateTrackingFeedback("Couldn't save scan area: \(reason)")
+                }
+            }
+            return
+        }
+
+        let worldMapBox = UncheckedSendable(worldMap)
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                let data = try NSKeyedArchiver.archivedData(withRootObject: worldMapBox.value, requiringSecureCoding: true)
+                try data.write(to: fileURL, options: [.atomic])
+            } catch {
+                await MainActor.run {
+                    self?.delegate?.didUpdateTrackingFeedback("Couldn't save scan area: \(error.localizedDescription)")
                 }
             }
         }
