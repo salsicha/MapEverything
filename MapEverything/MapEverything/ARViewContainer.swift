@@ -177,6 +177,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     // mutation cannot repopulate the next scan's map.
                     surfelMap = ColoredSurfelMap()
                     accumulatedDepthMesh = AccumulatedDepthMesh(voxelSize: voxelSize, maximumVertices: maxPointLimit)
+                    tsdfVolume = TSDFVolume()
                     sceneScanID = UUID()
                     exportedScanDirectories.removeAll()
                     depthMappingFeedback = ""
@@ -250,6 +251,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var liveSurfelEntity: ModelEntity?
     private var liveSurfelUpdateTask: Task<Void, Never>?
     private var accumulatedDepthMesh = AccumulatedDepthMesh()
+    /// Fused surface volume for the stopped preview and exports; the vertex
+    /// map above remains the source of calibration anchors and ROS streams.
+    private var tsdfVolume = TSDFVolume()
     private var sceneScanID = UUID()
     private var finalPointCloudArtifactTask: Task<Void, Never>?
     private var exportedScanDirectories: Set<URL> = []
@@ -524,18 +528,34 @@ class ARViewController: UIViewController, ARSessionDelegate {
         anchorEntities.removeAll()
     }
 
+    /// The fused TSDF surface when it exists (one continuous, de-duplicated
+    /// sheet per real surface), else the vertex map. Viewpoint always comes
+    /// from the vertex map, which tracks the last accepted frame.
+    private nonisolated static func stoppedSceneMesh(
+        tsdf: TSDFVolume, accumulator: AccumulatedDepthMesh
+    ) async -> ColoredSceneMesh {
+        let vertexMesh = await accumulator.snapshot()
+        let fused = await tsdf.extractMesh()
+        guard !fused.isEmpty else { return vertexMesh }
+        return ColoredSceneMesh(
+            vertices: fused.vertices, indices: fused.indices,
+            colors: fused.colors, viewpoint: vertexMesh.viewpoint
+        )
+    }
+
     private func freezeCurrentMeshForInspection() {
         let accumulator = accumulatedDepthMesh
+        let tsdf = tsdfVolume
         let scanID = sceneScanID
         Task { [weak self] in
-            let mesh = await accumulator.snapshot()
+            let mesh = await Self.stoppedSceneMesh(tsdf: tsdf, accumulator: accumulator)
             guard let self, self.sceneScanID == scanID, !self.isScanning else { return }
             self.delegate?.didUpdateStoppedInspectionScene(self.makeInspectionScene(from: mesh))
         }
     }
 
     func makeStoppedInspectionScene() async -> SCNScene? {
-        makeInspectionScene(from: await accumulatedDepthMesh.snapshot())
+        makeInspectionScene(from: await Self.stoppedSceneMesh(tsdf: tsdfVolume, accumulator: accumulatedDepthMesh))
     }
 
     @discardableResult
@@ -549,12 +569,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
         guard let targetDirectoryURL = recorder.currentArtifactDirectoryURL,
               exportedScanDirectories.insert(targetDirectoryURL).inserted else { return }
         let accumulator = accumulatedDepthMesh
+        let tsdf = tsdfVolume
         let mode = currentMode
         // Capture this scan and its destination. A later scan or Save Local
         // toggle must not substitute another mesh or cancel this export.
         finalPointCloudArtifactTask = Task.detached(priority: .utility) {
-            let mesh = await accumulator.snapshot()
-            guard let artifact = Self.makeFinalOverlayMeshArtifact(from: mesh, mode: mode) else { return }
+            let mesh = await Self.stoppedSceneMesh(tsdf: tsdf, accumulator: accumulator)
+            let fused = await !tsdf.extractMesh().isEmpty
+            guard let artifact = Self.makeFinalOverlayMeshArtifact(from: mesh, mode: mode, fused: fused) else { return }
             recorder.recordFinalOverlayMesh(artifact, in: targetDirectoryURL)
             recorder.recordFinalPointCloud(LocalPointCloudArtifact(
                 source: artifact.source + "_vertices", coordinateFrame: artifact.coordinateFrame,
@@ -568,19 +590,25 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     func currentFinalOverlayMeshArtifact() async -> LocalOverlayMeshArtifact? {
-        Self.makeFinalOverlayMeshArtifact(from: await accumulatedDepthMesh.snapshot(), mode: currentMode)
+        let mesh = await Self.stoppedSceneMesh(tsdf: tsdfVolume, accumulator: accumulatedDepthMesh)
+        let fused = await !tsdfVolume.extractMesh().isEmpty
+        return Self.makeFinalOverlayMeshArtifact(from: mesh, mode: currentMode, fused: fused)
     }
 
-    nonisolated private static func makeFinalOverlayMeshArtifact(from mesh: ColoredSceneMesh, mode: VisualizationMode) -> LocalOverlayMeshArtifact? {
+    nonisolated private static func makeFinalOverlayMeshArtifact(
+        from mesh: ColoredSceneMesh, mode: VisualizationMode, fused: Bool = false
+    ) -> LocalOverlayMeshArtifact? {
         guard !mesh.isEmpty else { return nil }
         return LocalOverlayMeshArtifact(
-            source: "accumulated_depth_anything_lidar_calibrated",
+            source: fused ? "tsdf_fused_depth_anything_lidar_calibrated"
+                          : "accumulated_depth_anything_lidar_calibrated",
             coordinateFrame: "map", capturedAt: Date(),
             vertices: mesh.vertices, indices: mesh.indices, colors: mesh.colors,
             metadata: [
                 "visualization_mode": mode.rawValue,
                 "lidar_usage": "calibration_only",
-                "color_source": "same_camera_frame_as_depth_inference"
+                "color_source": "same_camera_frame_as_depth_inference",
+                "surface_extraction": fused ? "tsdf_surface_nets" : "vertex_weld"
             ]
         )
     }
@@ -740,6 +768,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         exposureOffset: Float,
         workSession: ScanWorkSession,
         accumulator: AccumulatedDepthMesh,
+        tsdf: TSDFVolume,
         shouldBuildPointCloud: Bool,
         meshConfiguration: MeshGenerator.DepthAnythingMeshConfiguration
     ) async -> DepthAnythingMappingFrame? {
@@ -812,6 +841,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
             configuration: cappedConfiguration, cameraImage: cameraImage,
             exposureOffset: exposureOffset
         )
+        if meshSnapshot != nil {
+            await integrateTSDF(
+                tsdf: tsdf, relative: relative, calibration: calibration,
+                cameraImage: cameraImage, intrinsics: intrinsics,
+                imageResolution: imageResolution, transform: transform,
+                maximumDepth: calibrated.integrationDepthCap, workSession: workSession
+            )
+            guard workSession.isActive, !Task.isCancelled else { return nil }
+        }
         let calibratedPoints: [ColoredPoint]
         if shouldBuildPointCloud, let meshSnapshot,
            meshSnapshot.colors.count == meshSnapshot.vertices.count {
@@ -856,6 +894,68 @@ class ARViewController: UIViewController, ARSessionDelegate {
             calibrationSource: calibrationSource,
             relativeDepthSize: CGSize(width: CGFloat(relative.width), height: CGFloat(relative.height)),
             meshSnapshot: meshSnapshot
+        )
+    }
+
+    /// Converts the frame's calibrated relative map into a metric depth image
+    /// (with per-pixel camera colors) and fuses it into the TSDF volume.
+    nonisolated private func integrateTSDF(
+        tsdf: TSDFVolume,
+        relative: RelativeDepthMap,
+        calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
+        cameraImage: CVPixelBuffer,
+        intrinsics: simd_float3x3,
+        imageResolution: CGSize,
+        transform: simd_float4x4,
+        maximumDepth: Float,
+        workSession: ScanWorkSession
+    ) async {
+        let width = relative.width
+        let height = relative.height
+        var metric = [Float](repeating: .nan, count: width * height)
+        relative.withReadAccess { reader in
+            for y in 0..<height {
+                for x in 0..<width {
+                    if let depth = DepthAnythingProcessor.calibratedMetricDepth(
+                        relativeDepth: reader.value(atX: x, y: y), calibration: calibration
+                    ) {
+                        metric[y * width + x] = depth
+                    }
+                }
+            }
+        }
+
+        var tsdfColors: [SIMD3<UInt8>]?
+        if CVPixelBufferGetPlaneCount(cameraImage) >= 2 {
+            CVPixelBufferLockBaseAddress(cameraImage, .readOnly)
+            if let yBase = CVPixelBufferGetBaseAddressOfPlane(cameraImage, 0),
+               let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(cameraImage, 1) {
+                let yPlane = UnsafePointer(yBase.assumingMemoryBound(to: UInt8.self))
+                let cbcrPlane = UnsafePointer(cbcrBase.assumingMemoryBound(to: UInt8.self))
+                let yBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(cameraImage, 0)
+                let cbcrBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(cameraImage, 1)
+                let imageWidth = CVPixelBufferGetWidth(cameraImage)
+                let imageHeight = CVPixelBufferGetHeight(cameraImage)
+                var colors = [SIMD3<UInt8>](repeating: SIMD3(255, 255, 255), count: metric.count)
+                for y in 0..<height {
+                    for x in 0..<width where metric[y * width + x].isFinite {
+                        colors[y * width + x] = PointCloudProcessor.sampleCameraColor(
+                            depthX: x, depthY: y, depthWidth: width, depthHeight: height,
+                            imageWidth: imageWidth, imageHeight: imageHeight,
+                            yPlane: yPlane, yBytesPerRow: yBytesPerRow,
+                            cbcrPlane: cbcrPlane, cbcrBytesPerRow: cbcrBytesPerRow
+                        )
+                    }
+                }
+                tsdfColors = colors
+            }
+            CVPixelBufferUnlockBaseAddress(cameraImage, .readOnly)
+        }
+
+        _ = await tsdf.integrate(
+            depth: metric, colors: tsdfColors, width: width, height: height,
+            intrinsics: intrinsics, imageResolution: imageResolution,
+            transform: transform, maximumDepth: maximumDepth, workSession: workSession
         )
     }
 
@@ -1129,6 +1229,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let lidarDepthMapBox = UncheckedSendable(lidarDepthMap)
         let lidarConfidenceMapBox = UncheckedSendable(lidarConfidenceMap)
         let accumulator = accumulatedDepthMesh
+        let tsdf = tsdfVolume
         frameProcessingTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
             defer {
@@ -1164,6 +1265,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     exposureOffset: exposureOffset,
                     workSession: workSession,
                     accumulator: accumulator,
+                    tsdf: tsdf,
                     shouldBuildPointCloud: shouldPublishPointCloud || shouldRefreshSurfelVisualization,
                     meshConfiguration: shouldPublishDepthMesh || shouldPublishPointCloud ? .overlay : .accumulatedScene
                 )

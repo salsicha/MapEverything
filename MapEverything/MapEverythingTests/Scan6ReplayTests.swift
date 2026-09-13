@@ -227,4 +227,74 @@ struct Scan6ReplayTests {
         #expect(replay.median < baseline.median * 0.7,
                 "Far-field inter-frame spread must drop by at least 30% (got \(replay.median) vs \(baseline.median))")
     }
+
+    @Test("The TSDF fuses the calibrated scan into one bounded surface")
+    func replayFusesIntoTSDF() async throws {
+        let fixture = try Self.loadFixture()
+        let map = AccumulatedDepthMesh()
+        let volume = TSDFVolume()
+        let clock = ContinuousClock()
+        var integrationTime = Duration.zero
+        var integrated = 0
+        for frame in fixture.frames {
+            let anchors = await map.calibrationAnchors()
+            guard let result = DepthCalibrationPipeline.calibrate(
+                relative: frame.relative, lidarDepthMap: frame.lidar, lidarConfidenceMap: nil,
+                anchors: anchors, intrinsics: fixture.intrinsics,
+                imageResolution: fixture.imageResolution, transform: frame.transform
+            ) else { continue }
+            let configuration = MeshGenerator.DepthAnythingMeshConfiguration(
+                step: 2, minimumDepth: 0.1, maximumDepth: result.integrationDepthCap,
+                maximumDepthDiscontinuity: 0.45, maximumTriangleCount: 600_000
+            )
+            if let mesh = MeshGenerator.createDepthAnythingMeshSnapshot(
+                from: frame.relative, calibration: result.calibration, intrinsics: fixture.intrinsics,
+                imageResolution: fixture.imageResolution, transform: frame.transform,
+                configuration: configuration
+            ) {
+                let colored = MeshGenerator.DepthAnythingMeshSnapshot(
+                    descriptor: mesh.descriptor, vertices: mesh.vertices, indices: mesh.indices,
+                    colors: Array(repeating: SIMD3<UInt8>(180, 180, 180), count: mesh.vertices.count),
+                    cameraPosition: mesh.cameraPosition
+                )
+                _ = await map.integrate(colored, calibrationSource: result.source)
+            }
+            var metric = [Float](repeating: .nan, count: frame.relative.width * frame.relative.height)
+            frame.relative.withReadAccess { reader in
+                for y in 0..<frame.relative.height {
+                    for x in 0..<frame.relative.width {
+                        if let depth = DepthAnythingProcessor.calibratedMetricDepth(
+                            relativeDepth: reader.value(atX: x, y: y), calibration: result.calibration
+                        ) {
+                            metric[y * frame.relative.width + x] = depth
+                        }
+                    }
+                }
+            }
+            let started = clock.now
+            _ = await volume.integrate(
+                depth: metric, colors: nil, width: frame.relative.width, height: frame.relative.height,
+                intrinsics: fixture.intrinsics, imageResolution: fixture.imageResolution,
+                transform: frame.transform, maximumDepth: result.integrationDepthCap
+            )
+            integrationTime += clock.now - started
+            integrated += 1
+        }
+        let extractStart = clock.now
+        let fused = await volume.extractMesh()
+        let extractionTime = clock.now - extractStart
+        let statistics = await volume.statistics
+
+        print("scan6 tsdf: \(statistics.allocatedBlocks) blocks (~\(statistics.allocatedBlocks * 4 / 1024) MB voxels), capped \(statistics.reachedCapacity)")
+        print("scan6 tsdf: \(fused.vertices.count) vertices, \(fused.indices.count / 3) triangles")
+        print("scan6 tsdf: integration \(integrationTime) over \(integrated) frames, extraction \(extractionTime)")
+
+        try #require(!fused.isEmpty)
+        #expect(fused.vertices.count > 5_000)
+        // Everything the fused surface contains stays inside the supported
+        // integration range of the scan (12 m cap + camera offset).
+        let origin = fixture.frames[0].transform.columns.3
+        let cameraOrigin = SIMD3<Float>(origin.x, origin.y, origin.z)
+        #expect(fused.vertices.allSatisfy { simd_length($0 - cameraOrigin) < 14 })
+    }
 }
