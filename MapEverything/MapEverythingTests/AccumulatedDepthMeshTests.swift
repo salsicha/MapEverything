@@ -243,6 +243,115 @@ struct AccumulatedDepthMeshTests {
         #expect(Array(anchorsAfter.prefix(anchorsBefore.count)) == anchorsBefore)
     }
 
+    /// Dense wall at depth `z` filling the camera view, with full camera
+    /// context so the frame participates in free-space carving.
+    private func wall(z: Float, color: SIMD3<UInt8>,
+                      source: DepthCalibrationSource = .lidar) -> MeshGenerator.DepthAnythingMeshSnapshot {
+        let side = 48
+        var vertices: [SIMD3<Float>] = []
+        for row in 0..<side {
+            for column in 0..<side {
+                let x = -3 + 6 * Float(column) / Float(side - 1)
+                let y = -3 + 6 * Float(row) / Float(side - 1)
+                vertices.append(SIMD3<Float>(x, y, -z))
+            }
+        }
+        var indices: [UInt32] = []
+        for row in 0..<(side - 1) {
+            for column in 0..<(side - 1) {
+                let a = UInt32(row * side + column)
+                let b = a + 1
+                let c = a + UInt32(side)
+                let d = c + 1
+                indices.append(contentsOf: [a, b, c, b, d, c])
+            }
+        }
+        var descriptor = MeshDescriptor()
+        descriptor.positions = MeshBuffers.Positions(vertices)
+        descriptor.primitives = .triangles(indices)
+        var intrinsics = matrix_identity_float3x3
+        intrinsics[0][0] = 100
+        intrinsics[1][1] = 100
+        intrinsics[2][0] = 50
+        intrinsics[2][1] = 50
+        return .init(descriptor: descriptor, vertices: vertices, indices: indices,
+                     colors: Array(repeating: color, count: vertices.count),
+                     cameraPosition: .zero,
+                     cameraTransform: matrix_identity_float4x4,
+                     intrinsics: intrinsics,
+                     imageResolution: CGSize(width: 100, height: 100))
+    }
+
+    @Test("Observed free space carves phantoms out of the map")
+    func carvingRemovesPhantomsInObservedFreeSpace() async {
+        let map = AccumulatedDepthMesh()
+        // Phantom surface at 5 m, born from a propagated frame (weight 0.25).
+        _ = await map.integrate(triangle(z: -5, color: green),
+                                calibrationSource: .meshPropagated)
+        #expect(await map.snapshot().vertices.contains { $0.z == -5 })
+        // Six frames observe a wall at 10 m through the phantom's position.
+        for _ in 0..<6 {
+            _ = await map.integrate(wall(z: 10, color: red))
+        }
+        let mesh = await map.snapshot()
+        #expect(!mesh.vertices.contains { $0.z == -5 })
+        #expect(mesh.vertices.contains { $0.z == -10 })
+    }
+
+    @Test("Occluded geometry behind a measured surface survives carving")
+    func occludedGeometrySurvivesCarving() async {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(z: -15, color: green),
+                                calibrationSource: .meshPropagated)
+        for _ in 0..<6 {
+            _ = await map.integrate(wall(z: 10, color: red))
+        }
+        #expect(await map.snapshot().vertices.contains { $0.z == -15 })
+    }
+
+    @Test("The carve margin protects surfaces near the measured depth")
+    func carvingMarginProtectsNearbySurfaces() async {
+        let map = AccumulatedDepthMesh()
+        // 9 m sits inside the 1.35 m tolerance of a 10 m measurement; 6 m is
+        // clearly in front of it.
+        _ = await map.integrate(triangle(z: -9, color: green),
+                                calibrationSource: .meshPropagated)
+        _ = await map.integrate(triangle(z: -6, color: green),
+                                calibrationSource: .meshPropagated)
+        for _ in 0..<6 {
+            _ = await map.integrate(wall(z: 10, color: red))
+        }
+        let mesh = await map.snapshot()
+        #expect(mesh.vertices.contains { $0.z == -9 })
+        #expect(!mesh.vertices.contains { $0.z == -6 })
+    }
+
+    @Test("Carved-out anchors stop serving as calibration references")
+    func carvedAnchorsStopServingCalibration() async {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(z: -5, color: red, cameraPosition: frontalCamera))
+        _ = await map.integrate(triangle(z: -5, color: red, cameraPosition: frontalCamera))
+        #expect(await map.calibrationAnchors().count == 3)
+        _ = await map.integrate(wall(z: 10, color: red))
+        // One contradiction halves the anchors' LiDAR mass below the
+        // two-sighting threshold; they must vanish from the reference set.
+        #expect(await map.calibrationAnchors().isEmpty)
+    }
+
+    @Test("A carved voxel accepts fresh geometry afterwards")
+    func carvedVoxelAcceptsFreshGeometry() async {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(z: -5, color: green),
+                                calibrationSource: .meshPropagated)
+        for _ in 0..<6 {
+            _ = await map.integrate(wall(z: 10, color: red))
+        }
+        #expect(await map.snapshot().vertices.contains { $0.z == -5 } == false)
+        let stats = await map.integrate(triangle(z: -5, color: red, cameraPosition: frontalCamera))
+        #expect(await map.snapshot().vertices.contains { $0.z == -5 })
+        #expect(stats.vertexCount > 0)
+    }
+
     @Test("Auto-exposure drift is normalized against the scan's reference exposure")
     func exposureDriftDoesNotShiftAccumulatedColors() async throws {
         let gray = SIMD3<UInt8>(128, 128, 128)

@@ -55,6 +55,13 @@ nonisolated enum MeshGenerator {
         // producer had no frame context, which restores equal weighting.
         var cameraPosition: SIMD3<Float>? = nil
         var exposureOffset: Float? = nil
+        // Full camera model of the source frame, used for free-space carving:
+        // map vertices that project well in front of this frame's measured
+        // surfaces lie in observed empty space and decay. Nil disables
+        // carving for meshes without frame context.
+        var cameraTransform: simd_float4x4? = nil
+        var intrinsics: simd_float3x3? = nil
+        var imageResolution: CGSize? = nil
     }
 
     static func createDescriptor(from geometry: ARMeshGeometry) -> MeshDescriptor {
@@ -315,7 +322,10 @@ nonisolated enum MeshGenerator {
                 cameraPosition: SIMD3<Float>(
                     transform.columns.3.x, transform.columns.3.y, transform.columns.3.z
                 ),
-                exposureOffset: exposureOffset
+                exposureOffset: exposureOffset,
+                cameraTransform: transform,
+                intrinsics: intrinsics,
+                imageResolution: resolution
             )
         }
     }

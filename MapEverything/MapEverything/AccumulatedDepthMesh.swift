@@ -69,6 +69,18 @@ actor AccumulatedDepthMesh {
     /// Hard cap on the anchor index (~2,600 m^2 of anchored surface at the
     /// default spacing). Insertion stops at the cap; coverage remains valid.
     static let maximumAnchors = 65_536
+    /// Free-space carving: a stored vertex projecting at least this margin in
+    /// front of a frame's measured surface (fraction of its own depth, with a
+    /// floor) lies in observed empty space and decays. Generous so residual
+    /// calibration noise never eats true surfaces.
+    static let carveToleranceFloor: Float = 0.3
+    static let carveToleranceFraction: Float = 0.15
+    /// Each contradiction halves a vertex's mass; below this it tombstones
+    /// and its voxel becomes available for fresh geometry.
+    static let carveTombstoneWeight: Float = 0.02
+    /// Carve depth-buffer resolution (cells across the frame).
+    static let carveGridWidth = 160
+    static let carveGridHeight = 120
 
     private let voxelSize: Float
     private let maximumVertices: Int
@@ -84,6 +96,7 @@ actor AccumulatedDepthMesh {
     private var anchorKeys: Set<SIMD3<Int>> = []
     private var anchorVertexIndices: [UInt32] = []
     private var cachedAnchorPositions: [SIMD3<Float>]?
+    private var aliveVertexCount = 0
 
     init(voxelSize: Float = 0.05, maximumVertices: Int = 2_000_000, maximumTriangles: Int = 4_000_000) {
         self.voxelSize = voxelSize.isFinite ? max(0.01, voxelSize) : 0.05
@@ -155,16 +168,106 @@ actor AccumulatedDepthMesh {
                 // anchor cache stays warm through an entire fallback streak.
                 cachedAnchorPositions = nil
             }
+            carve(with: mesh)
         }
         return statistics
+    }
+
+    /// Free-space carving (CHISEL-style projection mapping): stored vertices
+    /// that project well in front of this frame's measured surfaces sit in
+    /// space the camera just observed to be empty. Each contradiction halves
+    /// their mass; exhausted vertices tombstone and free their voxel. This is
+    /// the map's only negative-evidence channel — without it a wrongly
+    /// placed surface could never be removed.
+    private func carve(with mesh: MeshGenerator.DepthAnythingMeshSnapshot) {
+        guard let transform = mesh.cameraTransform,
+              let intrinsics = mesh.intrinsics,
+              let resolution = mesh.imageResolution,
+              resolution.width > 0, resolution.height > 0 else { return }
+        let gridW = Self.carveGridWidth
+        let gridH = Self.carveGridHeight
+        let fx = intrinsics[0][0] * Float(gridW) / Float(resolution.width)
+        let fy = intrinsics[1][1] * Float(gridH) / Float(resolution.height)
+        let cx = intrinsics[2][0] * Float(gridW) / Float(resolution.width)
+        let cy = intrinsics[2][1] * Float(gridH) / Float(resolution.height)
+        guard fx.isFinite, fy.isFinite, abs(fx) > 1e-5, abs(fy) > 1e-5 else { return }
+        let worldToCamera = transform.inverse
+        guard worldToCamera.columns.0.x.isFinite else { return }
+
+        // Measured-depth buffer from the frame's own surface, minimum per
+        // cell so carving stays conservative wherever any nearer surface was
+        // seen. Each sample splats a 3x3 neighborhood so gaps between mesh
+        // vertices cannot shield phantoms sitting in front of the surface.
+        var measured = [Float](repeating: .infinity, count: gridW * gridH)
+        var coverage = 0
+        for vertex in mesh.vertices {
+            let camera = worldToCamera * SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1)
+            let depth = -camera.z
+            guard depth > 0.05 else { continue }
+            let px = Int((cx + fx * camera.x / depth).rounded())
+            let py = Int((cy - fy * camera.y / depth).rounded())
+            guard px >= -1, px <= gridW, py >= -1, py <= gridH else { continue }
+            for row in max(0, py - 1)...min(gridH - 1, py + 1) {
+                for column in max(0, px - 1)...min(gridW - 1, px + 1) {
+                    let cell = row * gridW + column
+                    if measured[cell] == .infinity { coverage += 1 }
+                    if depth < measured[cell] { measured[cell] = depth }
+                }
+            }
+        }
+        guard coverage > 32 else { return }
+
+        let forward = -SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
+        let origin = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+        var tombstonedAnchorMass = false
+        for index in vertices.indices {
+            let weight = vertices[index].weight
+            guard weight > 0 else { continue }
+            let position = vertices[index].position
+            // Cheap frustum reject before the full projection.
+            let toVertex = position - origin
+            let along = simd_dot(toVertex, forward)
+            guard along > 0.05 else { continue }
+            let camera = worldToCamera * SIMD4<Float>(position.x, position.y, position.z, 1)
+            let depth = -camera.z
+            guard depth > 0.05 else { continue }
+            let px = Int((cx + fx * camera.x / depth).rounded())
+            let py = Int((cy - fy * camera.y / depth).rounded())
+            guard px >= 0, px < gridW, py >= 0, py < gridH else { continue }
+            let surface = measured[py * gridW + px]
+            guard surface != .infinity else { continue }
+            let tolerance = max(Self.carveToleranceFloor, Self.carveToleranceFraction * depth)
+            guard depth < surface - tolerance else { continue }
+
+            vertices[index].weight = weight * 0.5
+            vertices[index].lidarWeight *= 0.5
+            if vertices[index].weight < Self.carveTombstoneWeight {
+                vertices[index].weight = 0
+                if vertices[index].lidarWeight > 0 { tombstonedAnchorMass = true }
+                vertices[index].lidarWeight = 0
+                aliveVertexCount -= 1
+                if let key = key(position), vertexIDs[key] == UInt32(index) {
+                    vertexIDs.removeValue(forKey: key)
+                }
+                cachedSnapshot = nil
+            }
+        }
+        if tombstonedAnchorMass {
+            cachedAnchorPositions = nil
+        }
     }
 
     /// World positions of the LiDAR-anchored calibration references, in
     /// deterministic insertion order. Cached between LiDAR-sourced
     /// integrations, so repeated calls during a fallback streak are O(1).
+    /// Carved-out vertices no longer serve as references.
     func calibrationAnchors() -> [SIMD3<Float>] {
         if let cachedAnchorPositions { return cachedAnchorPositions }
-        let positions = anchorVertexIndices.map { vertices[Int($0)].position }
+        let positions = anchorVertexIndices.compactMap { index -> SIMD3<Float>? in
+            let vertex = vertices[Int(index)]
+            guard vertex.weight > 0, vertex.lidarWeight >= Self.anchorLidarWeight else { return nil }
+            return vertex.position
+        }
         cachedAnchorPositions = positions
         return positions
     }
@@ -214,20 +317,38 @@ actor AccumulatedDepthMesh {
 
     func snapshot() -> ColoredSceneMesh {
         if let cachedSnapshot { return cachedSnapshot }
+        // Compact carved-out vertices away and drop faces that lost a corner.
+        var remap = [UInt32](repeating: .max, count: vertices.count)
+        var positions: [SIMD3<Float>] = []
+        var colors: [SIMD3<UInt8>] = []
+        positions.reserveCapacity(aliveVertexCount)
+        colors.reserveCapacity(aliveVertexCount)
+        for index in vertices.indices where vertices[index].weight > 0 {
+            remap[index] = UInt32(positions.count)
+            positions.append(vertices[index].position)
+            let color = vertices[index].color
+            colors.append(SIMD3<UInt8>(UInt8(clamping: Int(color.x.rounded())),
+                                       UInt8(clamping: Int(color.y.rounded())),
+                                       UInt8(clamping: Int(color.z.rounded()))))
+        }
+        var liveIndices: [UInt32] = []
+        liveIndices.reserveCapacity(indices.count)
+        for offset in stride(from: 0, to: indices.count - indices.count % 3, by: 3) {
+            let a = remap[Int(indices[offset])]
+            let b = remap[Int(indices[offset + 1])]
+            let c = remap[Int(indices[offset + 2])]
+            guard a != .max, b != .max, c != .max else { continue }
+            liveIndices.append(contentsOf: [a, b, c])
+        }
         let result = ColoredSceneMesh(
-            vertices: vertices.map(\.position), indices: indices,
-            colors: vertices.map {
-                SIMD3<UInt8>(UInt8(clamping: Int($0.color.x.rounded())),
-                             UInt8(clamping: Int($0.color.y.rounded())),
-                             UInt8(clamping: Int($0.color.z.rounded())))
-            }, viewpoint: viewpoint
+            vertices: positions, indices: liveIndices, colors: colors, viewpoint: viewpoint
         )
         cachedSnapshot = result
         return result
     }
 
     private var statistics: Statistics {
-        Statistics(vertexCount: vertices.count, triangleCount: faces.count, reachedCapacity: reachedCapacity)
+        Statistics(vertexCount: aliveVertexCount, triangleCount: faces.count, reachedCapacity: reachedCapacity)
     }
 
     private func fuse(_ local: Int, key: SIMD3<Int>, mesh: MeshGenerator.DepthAnythingMeshSnapshot,
@@ -249,6 +370,12 @@ actor AccumulatedDepthMesh {
         if let existing = vertexIDs[key] {
             id = existing
             let index = Int(id)
+            if vertices[index].weight == 0 {
+                // A tombstoned vertex reached through a stale voxel mapping
+                // is reborn with this observation (zero accumulated mass
+                // makes the running average adopt it outright).
+                aliveVertexCount += 1
+            }
             // Cap the accumulated weight so fresh observations always retain
             // influence; a frontal close-up (weight 1) quickly overrides a
             // vertex first seen at a grazing angle or from far away.
@@ -290,6 +417,7 @@ actor AccumulatedDepthMesh {
             vertices.append(Vertex(position: mesh.vertices[local], color: color,
                                    weight: observationWeight,
                                    lidarWeight: source == .lidar ? weights.anchor : 0))
+            aliveVertexCount += 1
             if source == .lidar {
                 lidarAccrued.insert(Int(id))
             }
