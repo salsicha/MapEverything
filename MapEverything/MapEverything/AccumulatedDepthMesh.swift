@@ -93,8 +93,16 @@ actor AccumulatedDepthMesh {
     private var reachedCapacity = false
     private var viewpoint: CapturedMeshViewpoint?
     private var referenceExposureOffset: Float?
-    private var anchorKeys: Set<SIMD3<Int>> = []
-    private var anchorVertexIndices: [UInt32] = []
+    /// Calibration anchors accrue on a grid 4x coarser than the weld voxel:
+    /// real per-frame calibration jitter displaces far surfaces by several
+    /// weld voxels between sightings, so vertex-identity accrual never
+    /// completes the two-sighting rule at range - cell-identity accrual does.
+    private struct AnchorCell {
+        var position: SIMD3<Float>
+        var mass: Float
+    }
+    private var anchorCells: [SIMD3<Int>: AnchorCell] = [:]
+    private var anchorOrder: [SIMD3<Int>] = []
     private var cachedAnchorPositions: [SIMD3<Float>]?
     private var aliveVertexCount = 0
 
@@ -118,8 +126,10 @@ actor AccumulatedDepthMesh {
         let colorTable = exposureColorTable(for: mesh.exposureOffset)
         // Neighboring grid vertices routinely weld into one accumulated
         // vertex within a single frame; anchor mass must count sightings
-        // across frames, so each vertex accrues at most once per integrate.
+        // across frames, so each vertex and each anchor cell accrue at most
+        // once per integrate.
         var lidarAccrued: Set<Int> = []
+        var cellsAccrued: Set<SIMD3<Int>> = []
         var acceptedFace = false
         for offset in stride(from: 0, to: mesh.indices.count - mesh.indices.count % 3, by: 3) {
             let local = (Int(mesh.indices[offset]), Int(mesh.indices[offset + 1]), Int(mesh.indices[offset + 2]))
@@ -147,13 +157,13 @@ actor AccumulatedDepthMesh {
             )
             let ia = fuse(local.0, key: a, mesh: mesh, remap: &remap, weights: weights,
                           colorTable: colorTable, source: calibrationSource,
-                          lidarAccrued: &lidarAccrued)
+                          lidarAccrued: &lidarAccrued, cellsAccrued: &cellsAccrued)
             let ib = fuse(local.1, key: b, mesh: mesh, remap: &remap, weights: weights,
                           colorTable: colorTable, source: calibrationSource,
-                          lidarAccrued: &lidarAccrued)
+                          lidarAccrued: &lidarAccrued, cellsAccrued: &cellsAccrued)
             let ic = fuse(local.2, key: c, mesh: mesh, remap: &remap, weights: weights,
                           colorTable: colorTable, source: calibrationSource,
-                          lidarAccrued: &lidarAccrued)
+                          lidarAccrued: &lidarAccrued, cellsAccrued: &cellsAccrued)
             if faces.insert(Face(ia, ib, ic)).inserted {
                 indices.append(contentsOf: [ia, ib, ic])
             }
@@ -225,6 +235,7 @@ actor AccumulatedDepthMesh {
         let forward = -SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
         let origin = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
         var tombstonedAnchorMass = false
+        var demotedCells: Set<SIMD3<Int>> = []
         for index in vertices.indices {
             let weight = vertices[index].weight
             guard weight > 0 else { continue }
@@ -245,28 +256,28 @@ actor AccumulatedDepthMesh {
             guard depth < surface - tolerance else { continue }
 
             vertices[index].weight = weight * 0.5
-            let lidarBefore = vertices[index].lidarWeight
-            vertices[index].lidarWeight = lidarBefore * 0.5
-            if lidarBefore >= Self.anchorLidarWeight,
-               vertices[index].lidarWeight < Self.anchorLidarWeight {
-                // Demoted below anchor eligibility while still alive: the
-                // served reference list must stop including it immediately,
-                // fallback streak or not.
-                tombstonedAnchorMass = true
+            vertices[index].lidarWeight *= 0.5
+            // A contradicted observation also drains its anchor cell (once
+            // per carve pass per cell): served references drop out as soon
+            // as mass falls below eligibility, fallback streak or not, and
+            // a fully drained cell simply re-accrues from rescans.
+            if let cellKey = anchorCellKey(for: position), demotedCells.insert(cellKey).inserted,
+               var cell = anchorCells[cellKey] {
+                if cell.mass >= Self.anchorLidarWeight { tombstonedAnchorMass = true }
+                cell.mass *= 0.5
+                if cell.mass < 0.1 {
+                    anchorCells.removeValue(forKey: cellKey)
+                } else {
+                    anchorCells[cellKey] = cell
+                }
             }
             if vertices[index].weight < Self.carveTombstoneWeight {
                 vertices[index].weight = 0
-                if vertices[index].lidarWeight > 0 { tombstonedAnchorMass = true }
                 vertices[index].lidarWeight = 0
                 aliveVertexCount -= 1
                 if let key = key(position), vertexIDs[key] == UInt32(index) {
                     vertexIDs.removeValue(forKey: key)
                 }
-                // Free the anchor cell so rescanned geometry can re-anchor.
-                let anchorVoxel = voxelSize * Self.anchorVoxelScale
-                anchorKeys.remove(SIMD3<Int>(Int(floor(position.x / anchorVoxel)),
-                                             Int(floor(position.y / anchorVoxel)),
-                                             Int(floor(position.z / anchorVoxel))))
                 cachedSnapshot = nil
             }
         }
@@ -278,13 +289,12 @@ actor AccumulatedDepthMesh {
     /// World positions of the LiDAR-anchored calibration references, in
     /// deterministic insertion order. Cached between LiDAR-sourced
     /// integrations, so repeated calls during a fallback streak are O(1).
-    /// Carved-out vertices no longer serve as references.
+    /// Carve demotion drains cell mass, so contradicted references drop out.
     func calibrationAnchors() -> [SIMD3<Float>] {
         if let cachedAnchorPositions { return cachedAnchorPositions }
-        let positions = anchorVertexIndices.compactMap { index -> SIMD3<Float>? in
-            let vertex = vertices[Int(index)]
-            guard vertex.weight > 0, vertex.lidarWeight >= Self.anchorLidarWeight else { return nil }
-            return vertex.position
+        let positions = anchorOrder.compactMap { key -> SIMD3<Float>? in
+            guard let cell = anchorCells[key], cell.mass >= Self.anchorLidarWeight else { return nil }
+            return cell.position
         }
         cachedAnchorPositions = positions
         return positions
@@ -372,7 +382,7 @@ actor AccumulatedDepthMesh {
     private func fuse(_ local: Int, key: SIMD3<Int>, mesh: MeshGenerator.DepthAnythingMeshSnapshot,
                       remap: inout [UInt32?], weights: (observation: Float, anchor: Float),
                       colorTable: [Float]?, source: DepthCalibrationSource,
-                      lidarAccrued: inout Set<Int>) -> UInt32 {
+                      lidarAccrued: inout Set<Int>, cellsAccrued: inout Set<SIMD3<Int>>) -> UInt32 {
         if let id = remap[local] { return id }
         let rgb = mesh.colors[local]
         let color: SIMD3<Float>
@@ -426,8 +436,12 @@ actor AccumulatedDepthMesh {
                     (vertices[index].color * accumulated + color * observationWeight) / total
                 vertices[index].weight = total
             }
-            if source == .lidar, lidarAccrued.insert(index).inserted {
-                accrueLidarMass(vertexIndex: index, anchorWeight: weights.anchor)
+            if source == .lidar {
+                if lidarAccrued.insert(index).inserted {
+                    vertices[index].lidarWeight = min(vertices[index].lidarWeight, 7) + weights.anchor
+                }
+                accrueAnchorCell(position: vertices[index].position,
+                                 anchorWeight: weights.anchor, cellsAccrued: &cellsAccrued)
             }
         } else {
             id = UInt32(vertices.count)
@@ -438,30 +452,40 @@ actor AccumulatedDepthMesh {
             aliveVertexCount += 1
             if source == .lidar {
                 lidarAccrued.insert(Int(id))
+                accrueAnchorCell(position: mesh.vertices[local],
+                                 anchorWeight: weights.anchor, cellsAccrued: &cellsAccrued)
             }
         }
         remap[local] = id
         return id
     }
 
-    /// Adds LiDAR-provenance mass and registers the vertex as a calibration
-    /// anchor the moment it crosses the eligibility threshold — a
-    /// once-per-vertex event, so the integrate hot path stays free of
-    /// per-observation anchor bookkeeping.
-    private func accrueLidarMass(vertexIndex: Int, anchorWeight: Float) {
-        let before = vertices[vertexIndex].lidarWeight
-        let after = min(before, 7) + anchorWeight
-        vertices[vertexIndex].lidarWeight = after
-        guard before < Self.anchorLidarWeight, after >= Self.anchorLidarWeight,
-              anchorVertexIndices.count < Self.maximumAnchors else { return }
+    /// Accrues LiDAR sighting mass into the coarse anchor cell containing
+    /// this observation - at most once per cell per frame, so the
+    /// two-sighting rule still requires two separate LiDAR-calibrated frames.
+    private func accrueAnchorCell(position: SIMD3<Float>, anchorWeight: Float,
+                                  cellsAccrued: inout Set<SIMD3<Int>>) {
+        guard let key = anchorCellKey(for: position) else { return }
+        guard cellsAccrued.insert(key).inserted else { return }
+        if var cell = anchorCells[key] {
+            let mass = min(cell.mass, 7)
+            cell.position = (cell.position * mass + position * anchorWeight) / (mass + anchorWeight)
+            cell.mass = mass + anchorWeight
+            anchorCells[key] = cell
+        } else {
+            guard anchorOrder.count < Self.maximumAnchors else { return }
+            anchorCells[key] = AnchorCell(position: position, mass: anchorWeight)
+            anchorOrder.append(key)
+        }
+    }
+
+    private func anchorCellKey(for position: SIMD3<Float>) -> SIMD3<Int>? {
+        guard position.x.isFinite, position.y.isFinite, position.z.isFinite,
+              abs(position.x) < 1_000_000, abs(position.y) < 1_000_000, abs(position.z) < 1_000_000 else { return nil }
         let anchorVoxel = voxelSize * Self.anchorVoxelScale
-        let position = vertices[vertexIndex].position
-        let anchorKey = SIMD3<Int>(Int(floor(position.x / anchorVoxel)),
-                                   Int(floor(position.y / anchorVoxel)),
-                                   Int(floor(position.z / anchorVoxel)))
-        guard anchorKeys.insert(anchorKey).inserted else { return }
-        anchorVertexIndices.append(UInt32(vertexIndex))
-        cachedAnchorPositions = nil
+        return SIMD3<Int>(Int(floor(position.x / anchorVoxel)),
+                          Int(floor(position.y / anchorVoxel)),
+                          Int(floor(position.z / anchorVoxel)))
     }
 
     private func key(_ position: SIMD3<Float>) -> SIMD3<Int>? {

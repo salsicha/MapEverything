@@ -271,7 +271,10 @@ actor TSDFVolume {
         let voxelData = block.voxels[index]
         return Sample(
             sdf: Float(voxelData.sdf),
-            valid: Float(voxelData.weight) > 0.15,
+            // Any genuine surface observation counts (a single far-field
+            // sighting carries 0.08); free-space-only voxels stay below
+            // this and, being all-positive, can never form a surface.
+            valid: Float(voxelData.weight) > 0.06,
             color: SIMD3<Float>(Float(voxelData.red), Float(voxelData.green), Float(voxelData.blue))
         )
     }

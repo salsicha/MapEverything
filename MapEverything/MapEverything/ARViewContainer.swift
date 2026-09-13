@@ -9,6 +9,7 @@ import SwiftUI
 import RealityKit
 import ARKit
 import SceneKit
+import os
 
 extension Notification.Name {
     static let mapEverythingWillStopMapping = Notification.Name("mapEverythingWillStopMapping")
@@ -250,6 +251,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var liveSurfelAnchor: AnchorEntity?
     private var liveSurfelEntity: ModelEntity?
     private var liveSurfelUpdateTask: Task<Void, Never>?
+    /// Per-frame depth pipeline diagnostics; stream in Console.app or the
+    /// Xcode console with subsystem com.salsicha.MapEverything.
+    nonisolated static let depthLog = Logger(subsystem: "com.salsicha.MapEverything", category: "DepthPipeline")
+
     private var accumulatedDepthMesh = AccumulatedDepthMesh()
     /// Fused surface volume for the stopped preview and exports; the vertex
     /// map above remains the source of calibration anchors and ROS streams.
@@ -552,7 +557,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let tsdf = tsdfVolume
         let scanID = sceneScanID
         Task { [weak self] in
-            let mesh = await Self.stoppedSceneMesh(tsdf: tsdf, accumulator: accumulator).mesh
+            let statistics = await tsdf.statistics
+            let (mesh, fused) = await Self.stoppedSceneMesh(tsdf: tsdf, accumulator: accumulator)
+            let reach = mesh.vertices.reduce(Float(0)) { max($0, simd_length($1)) }
+            Self.depthLog.log("stop preview fused=\(fused) vertices=\(mesh.vertices.count) triangles=\(mesh.indices.count / 3) blocks=\(statistics.allocatedBlocks) capped=\(statistics.reachedCapacity) maxReach=\(String(format: "%.1f", reach), privacy: .public)m")
             guard let self, self.sceneScanID == scanID, !self.isScanning else { return }
             self.delegate?.didUpdateStoppedInspectionScene(self.makeInspectionScene(from: mesh))
         }
@@ -816,6 +824,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
             let guidance = anchors.count < MeshDepthPropagation.Configuration.default.minimumSamples
                 ? "Depth scale unavailable. Scan nearby surfaces first, then move outward."
                 : "Depth scale unavailable. Keep previously scanned surfaces in view."
+            Self.depthLog.log("calib DROPPED anchors=\(anchors.count)")
             await MainActor.run {
                 guard workSession.isActive, self.isScanning else { return }
                 self.depthMappingFeedback = guidance
@@ -825,6 +834,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
         let calibration = calibrated.calibration
         let calibrationSource = calibrated.source
+        Self.depthLog.log("calib ok source=\(calibrationSource == .lidar ? "lidar/joint" : "propagated", privacy: .public) cap=\(String(format: "%.1f", calibrated.integrationDepthCap), privacy: .public)m anchors=\(anchors.count) scale=\(String(format: "%.3f", calibration.scale), privacy: .public) offset=\(String(format: "%.3f", calibration.offset), privacy: .public)")
         // Stage 2/4: geometry only enters the map where this frame's
         // calibration had supporting evidence.
         let cappedConfiguration = MeshGenerator.DepthAnythingMeshConfiguration(

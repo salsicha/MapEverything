@@ -19,6 +19,7 @@ struct Scan6ReplayTests {
         let offset: Float
         let relative: RelativeDepthMap
         let lidar: CVPixelBuffer
+        let lidarData: Data
     }
 
     struct Fixture {
@@ -69,7 +70,8 @@ struct Scan6ReplayTests {
                 scale: (entry["scale"] as! NSNumber).floatValue,
                 offset: (entry["offset"] as! NSNumber).floatValue,
                 relative: RelativeDepthMap(width: width, height: height, data: values),
-                lidar: lidar
+                lidar: lidar,
+                lidarData: lidarData
             ))
         }
         return Fixture(intrinsics: intrinsics, imageResolution: resolution, frames: frames)
@@ -228,6 +230,77 @@ struct Scan6ReplayTests {
                 "Far-field inter-frame spread must drop by at least 30% (got \(replay.median) vs \(baseline.median))")
     }
 
+    @Test("Confidence-gated device LiDAR cannot pin the integration horizon")
+    func confidenceGatedReplayStillExtends() async throws {
+        // Real devices drop most LiDAR beyond ~3.5 m (confidence gating) and
+        // deliver a dense near field. Under the pooled-percentile support cap
+        // this pinned the horizon at ~6 m with zero geometry beyond 8 m -
+        // the "only LiDAR range in the final mesh" field bug. The per-
+        // population horizon must keep growing regardless of LiDAR density.
+        let fixture = try Self.loadFixture()
+        func degraded(_ data: Data) throws -> CVPixelBuffer {
+            var kept = Data()
+            var counter = 0
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                let floats = raw.bindMemory(to: Float32.self)
+                for index in Swift.stride(from: 0, to: floats.count - 2, by: 3) {
+                    guard floats[index + 2] <= 3.5 else { continue }
+                    counter += 1
+                    guard counter % 3 != 0 else { continue }   // thin to ~65%
+                    withUnsafeBytes(of: floats[index]) { kept.append(contentsOf: $0) }
+                    withUnsafeBytes(of: floats[index + 1]) { kept.append(contentsOf: $0) }
+                    withUnsafeBytes(of: floats[index + 2]) { kept.append(contentsOf: $0) }
+                }
+            }
+            return try Self.makeLidarBuffer(samples: kept, sourceWidth: 518, sourceHeight: 392)
+        }
+
+        let map = AccumulatedDepthMesh()
+        var maximumCap: Float = 0
+        var farVertices = 0
+        for frame in fixture.frames {
+            let anchors = await map.calibrationAnchors()
+            guard let result = DepthCalibrationPipeline.calibrate(
+                relative: frame.relative, lidarDepthMap: try degraded(frame.lidarData),
+                lidarConfidenceMap: nil, anchors: anchors, intrinsics: fixture.intrinsics,
+                imageResolution: fixture.imageResolution, transform: frame.transform
+            ) else { continue }
+            maximumCap = max(maximumCap, result.integrationDepthCap)
+            let points = Self.calibratedPoints(
+                frame: frame, calibration: result.calibration,
+                maximumDepth: result.integrationDepthCap, fixture: fixture
+            )
+            let origin = SIMD3<Float>(frame.transform.columns.3.x,
+                                      frame.transform.columns.3.y,
+                                      frame.transform.columns.3.z)
+            farVertices += points.count(where: { simd_length($0 - origin) > 8 })
+            let configuration = MeshGenerator.DepthAnythingMeshConfiguration(
+                step: 2, minimumDepth: 0.1, maximumDepth: result.integrationDepthCap,
+                maximumDepthDiscontinuity: 0.45, maximumTriangleCount: 600_000
+            )
+            if let mesh = MeshGenerator.createDepthAnythingMeshSnapshot(
+                from: frame.relative, calibration: result.calibration, intrinsics: fixture.intrinsics,
+                imageResolution: fixture.imageResolution, transform: frame.transform,
+                configuration: configuration
+            ) {
+                let colored = MeshGenerator.DepthAnythingMeshSnapshot(
+                    descriptor: mesh.descriptor, vertices: mesh.vertices, indices: mesh.indices,
+                    colors: Array(repeating: SIMD3<UInt8>(180, 180, 180), count: mesh.vertices.count),
+                    cameraPosition: mesh.cameraPosition
+                )
+                _ = await map.integrate(colored, calibrationSource: result.source)
+            }
+        }
+        print("scan6 gated: maximum cap \(maximumCap) m, vertices beyond 8 m: \(farVertices)")
+        // The pooled-percentile cap PINNED at a 5.8-6.0 m fixed point with
+        // zero far vertices under this degradation. The shell-based horizon
+        // must escape it: the 20-frame clip reaches ~8.2 m and is still
+        // climbing (each frontier shell needs 2-4 frames of anchor mass), so
+        // multi-minute device scans converge to the 12 m ceiling.
+        #expect(maximumCap >= 8, "The horizon must escape the LiDAR fixed point (got \(maximumCap))")
+        #expect(farVertices > 200, "Far geometry must survive confidence-gated LiDAR (got \(farVertices))")
+    }
+
     @Test("The TSDF fuses the calibrated scan into one bounded surface")
     func replayFusesIntoTSDF() async throws {
         let fixture = try Self.loadFixture()
@@ -292,9 +365,11 @@ struct Scan6ReplayTests {
         try #require(!fused.isEmpty)
         #expect(fused.vertices.count > 5_000)
         // Everything the fused surface contains stays inside the supported
-        // integration range of the scan (12 m cap + camera offset).
+        // integration range: the 12 m cap is Z-DEPTH, which at the frustum
+        // corner (half-FOV ~36/28 degrees) is ~15.5 m Euclidean, plus the
+        // truncation band and camera motion.
         let origin = fixture.frames[0].transform.columns.3
         let cameraOrigin = SIMD3<Float>(origin.x, origin.y, origin.z)
-        #expect(fused.vertices.allSatisfy { simd_length($0 - cameraOrigin) < 14 })
+        #expect(fused.vertices.allSatisfy { simd_length($0 - cameraOrigin) < 16.5 })
     }
 }

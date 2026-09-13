@@ -16,9 +16,13 @@ nonisolated enum DepthCalibrationPipeline {
         /// this fraction of the LiDAR total — the balance validated by the
         /// scan6 simulation (-58% far-field spread at 1.0).
         var pseudoWeightBalance = 1.0
-        /// Joint fitting engages once this many pseudo-samples are visible;
-        /// below it the map cannot say anything trustworthy about the frame.
-        var minimumJointPseudoSamples = 60
+        /// Joint fitting engages once this many pseudo-samples are visible —
+        /// deliberately low: engaging is safe (the agreement gates judge the
+        /// result), and frames facing new territory often see few anchors.
+        var minimumJointPseudoSamples = 30
+        /// Vetoing a LiDAR fit takes a substantially larger population than
+        /// merely helping one.
+        var minimumVetoPseudoSamples = 60
         /// Frames integrate to at most this multiple of their supporting
         /// samples' 95th-percentile depth.
         var supportDepthFactor: Float = 1.75
@@ -59,6 +63,14 @@ nonisolated enum DepthCalibrationPipeline {
             imageResolution: imageResolution, transform: transform,
             configuration: configuration.propagation
         )
+        // The horizon is judged on EVERY visibility-passing anchor: the
+        // per-cell nearest-anchor selection that keeps fit samples spread is
+        // systematically near-biased and would pin the cap.
+        let anchorDepths = MeshDepthPropagation.visibleAnchorDepths(
+            anchors: anchors, depthWidth: relative.width, depthHeight: relative.height,
+            intrinsics: intrinsics, imageResolution: imageResolution, transform: transform,
+            configuration: configuration.propagation
+        )
 
         if lidarSamples.count > 50 {
             if pseudoSamples.count >= configuration.minimumJointPseudoSamples,
@@ -68,7 +80,9 @@ nonisolated enum DepthCalibrationPipeline {
                agrees(joint, with: pseudoSamples, toleranceFloor: 0.3, toleranceFraction: 0.2) != false {
                 return Result(
                     calibration: joint, source: .lidar,
-                    integrationDepthCap: supportCap(lidarSamples + pseudoSamples, configuration: configuration)
+                    integrationDepthCap: supportCap(lidarSamples: lidarSamples,
+                                                    anchorDepths: anchorDepths,
+                                                    configuration: configuration)
                 )
             }
 
@@ -78,13 +92,17 @@ nonisolated enum DepthCalibrationPipeline {
             // may only VETO a LiDAR fit with the same substantial sample
             // population joint fitting requires — a stale handful of anchors
             // must never stall mapping (carving self-heals them instead).
-            let mapMayVeto = pseudoSamples.count >= configuration.minimumJointPseudoSamples
+            let mapMayVeto = pseudoSamples.count >= configuration.minimumVetoPseudoSamples
             if let lidarOnly = RobustDepthCalibration.fit(lidarSamples),
                !mapMayVeto
                || agrees(lidarOnly, with: pseudoSamples, toleranceFloor: 0.3, toleranceFraction: 0.2) != false {
+                // Visible anchors still testify to the scene's supported
+                // depth even when the fit itself is LiDAR-only.
                 return Result(
                     calibration: lidarOnly, source: .lidar,
-                    integrationDepthCap: supportCap(lidarSamples, configuration: configuration)
+                    integrationDepthCap: supportCap(lidarSamples: lidarSamples,
+                                                    anchorDepths: anchorDepths,
+                                                    configuration: configuration)
                 )
             }
         }
@@ -97,14 +115,11 @@ nonisolated enum DepthCalibrationPipeline {
             lidarDepthMap: lidarDepthMap, lidarConfidenceMap: lidarConfidenceMap,
             configuration: configuration.propagation
         ) {
-            let support = rawPseudoSamples(
-                anchors: anchors, relative: relative, intrinsics: intrinsics,
-                imageResolution: imageResolution, transform: transform,
-                configuration: configuration.propagation
-            )
             return Result(
                 calibration: propagated, source: .meshPropagated,
-                integrationDepthCap: supportCap(support, configuration: configuration)
+                integrationDepthCap: supportCap(lidarSamples: [],
+                                                anchorDepths: anchorDepths,
+                                                configuration: configuration)
             )
         }
         return nil
@@ -168,17 +183,51 @@ nonisolated enum DepthCalibrationPipeline {
         return agreeing * 2 >= total
     }
 
-    /// 95th-percentile supporting depth times the support factor, clamped to
-    /// the global ceiling: the deepest geometry this frame may write.
+    /// The deepest geometry a frame may write: the support factor times the
+    /// evidence horizon, clamped to the global ceiling. The horizon is the
+    /// MAXIMUM of each reference population's own 95th percentile — never a
+    /// percentile of the pooled set. Pooling is a contraction on real
+    /// devices: thousands of confidence-gated near-field LiDAR samples
+    /// numerically drown the few far map anchors, pinning the cap inside
+    /// LiDAR range forever (reproduced from scan6 with device-realistic
+    /// gating). Each population is a trusted reference in its own right, so
+    /// each extends the horizon independently.
     static func supportCap(
-        _ samples: [DepthCalibrationSample],
+        lidarSamples: [DepthCalibrationSample],
+        anchorDepths: [Float] = [],
         configuration: Configuration = .default
     ) -> Float {
-        guard !samples.isEmpty else { return DepthAnythingProcessor.minimumCalibratedDepth }
-        let depths = samples.map(\.depth).sorted()
-        let p95 = Float(depths[min(depths.count - 1, depths.count * 19 / 20)])
+        var horizon: Float = 0
+        if !lidarSamples.isEmpty {
+            let depths = lidarSamples.map(\.depth).sorted()
+            horizon = Float(depths[min(depths.count - 1, depths.count * 19 / 20)])
+        }
+        // The anchor horizon is the deepest depth whose reference SHELL is
+        // populated: percentiles over the whole population re-dilute against
+        // the dense near field at every level (the exact statistic that
+        // pinned on-device caps inside LiDAR range), whereas a shell count
+        // only asks whether the frontier itself is validated.
+        if anchorDepths.count >= 30 {
+            let sorted = anchorDepths.sorted(by: >)
+            var index = 0
+            while index < sorted.count {
+                let candidate = sorted[index]
+                var shell = 0
+                var probe = index
+                while probe < sorted.count, sorted[probe] >= candidate * 0.7 {
+                    shell += 1
+                    probe += 1
+                }
+                if shell >= 15 {
+                    horizon = max(horizon, candidate)
+                    break
+                }
+                index += 1
+            }
+        }
+        guard horizon > 0 else { return DepthAnythingProcessor.minimumCalibratedDepth }
         return min(configuration.maximumIntegrationDepth,
                    max(DepthAnythingProcessor.minimumCalibratedDepth + 0.1,
-                       configuration.supportDepthFactor * p95))
+                       configuration.supportDepthFactor * horizon))
     }
 }

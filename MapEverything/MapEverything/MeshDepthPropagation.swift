@@ -147,6 +147,65 @@ nonisolated enum MeshDepthPropagation {
         return result
     }
 
+    /// Depths of EVERY visibility-passing anchor in this frame - no
+    /// per-cell winner selection. The per-cell nearest-anchor choice that
+    /// keeps fit samples spread is systematically near-biased, so the
+    /// integration horizon must be judged on this unbiased population.
+    static func visibleAnchorDepths(
+        anchors: [SIMD3<Float>],
+        depthWidth: Int,
+        depthHeight: Int,
+        intrinsics: simd_float3x3,
+        imageResolution: CGSize,
+        transform: simd_float4x4,
+        configuration: Configuration = .default
+    ) -> [Float] {
+        guard depthWidth > 1, depthHeight > 1,
+              imageResolution.width > 0, imageResolution.height > 0 else { return [] }
+        let scaleX = Float(depthWidth) / Float(imageResolution.width)
+        let scaleY = Float(depthHeight) / Float(imageResolution.height)
+        let fx = intrinsics[0][0] * scaleX
+        let fy = intrinsics[1][1] * scaleY
+        let cx = intrinsics[2][0] * scaleX
+        let cy = intrinsics[2][1] * scaleY
+        guard fx.isFinite, fy.isFinite, abs(fx) > 1e-5, abs(fy) > 1e-5 else { return [] }
+        let worldToCamera = transform.inverse
+        guard worldToCamera.columns.0.x.isFinite else { return [] }
+
+        let down = max(1, configuration.cellDownsample)
+        let cellsW = (depthWidth + down - 1) / down
+        let cellsH = (depthHeight + down - 1) / down
+        var cellDepth = [Float](repeating: .infinity, count: cellsW * cellsH)
+        var projected: [(cell: Int, depth: Float)] = []
+        projected.reserveCapacity(min(anchors.count, 65_536))
+        let footprintScale = 0.5 * configuration.anchorFootprint * max(abs(fx), abs(fy))
+        for anchor in anchors {
+            let camera = worldToCamera * SIMD4<Float>(anchor.x, anchor.y, anchor.z, 1)
+            let depth = -camera.z
+            guard depth >= configuration.depthRange.lowerBound,
+                  depth <= configuration.depthRange.upperBound else { continue }
+            let gridX = cx + fx * camera.x / depth
+            let gridY = cy - fy * camera.y / depth
+            guard gridX.isFinite, gridY.isFinite else { continue }
+            let px = Int(gridX.rounded())
+            let py = Int(gridY.rounded())
+            guard px >= 0, px < depthWidth, py >= 0, py < depthHeight else { continue }
+            let cellX = px / down
+            let cellY = py / down
+            projected.append((cellY * cellsW + cellX, depth))
+            let radius = min(6, max(1, Int((footprintScale / (depth * Float(down))).rounded())))
+            for y in max(0, cellY - radius)...min(cellsH - 1, cellY + radius) {
+                for x in max(0, cellX - radius)...min(cellsW - 1, cellX + radius) {
+                    let index = y * cellsW + x
+                    if depth < cellDepth[index] { cellDepth[index] = depth }
+                }
+            }
+        }
+        return projected.compactMap { point in
+            point.depth <= cellDepth[point.cell] + max(0.10, 0.05 * point.depth) ? point.depth : nil
+        }
+    }
+
     /// Full fallback fit: visible-anchor sampling, the verbatim
     /// RobustDepthCalibration gates, and — when enough individually valid
     /// LiDAR pixels exist despite the failed LiDAR fit — an absolute-scale
