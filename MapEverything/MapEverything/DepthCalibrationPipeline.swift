@@ -74,9 +74,14 @@ nonisolated enum DepthCalibrationPipeline {
 
             // No usable map constraint (scan start, or new territory): the
             // LiDAR-only fit stands, but its far field is unsupported, so
-            // integration is capped at the LiDAR evidence horizon.
+            // integration is capped at the LiDAR evidence horizon. The map
+            // may only VETO a LiDAR fit with the same substantial sample
+            // population joint fitting requires — a stale handful of anchors
+            // must never stall mapping (carving self-heals them instead).
+            let mapMayVeto = pseudoSamples.count >= configuration.minimumJointPseudoSamples
             if let lidarOnly = RobustDepthCalibration.fit(lidarSamples),
-               agrees(lidarOnly, with: pseudoSamples, toleranceFloor: 0.3, toleranceFraction: 0.2) != false {
+               !mapMayVeto
+               || agrees(lidarOnly, with: pseudoSamples, toleranceFloor: 0.3, toleranceFraction: 0.2) != false {
                 return Result(
                     calibration: lidarOnly, source: .lidar,
                     integrationDepthCap: supportCap(lidarSamples, configuration: configuration)

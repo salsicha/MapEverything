@@ -131,7 +131,12 @@ actor AccumulatedDepthMesh {
             let area = simd_length_squared(crossProduct)
             guard area.isFinite, area > 1e-12 else { continue }
             let newCount = [a, b, c].reduce(0) { $0 + (vertexIDs[$1] == nil ? 1 : 0) }
-            guard vertices.count + newCount <= maximumVertices, faces.count < maximumTriangles else {
+            // The scan limit follows ALIVE vertices (carving frees budget);
+            // the 2x slot bound keeps memory finite under carve/re-add churn
+            // since tombstoned slots are never compacted mid-scan.
+            guard aliveVertexCount + newCount <= maximumVertices,
+                  vertices.count + newCount <= maximumVertices * 2,
+                  faces.count < maximumTriangles else {
                 reachedCapacity = true
                 break
             }
@@ -240,7 +245,15 @@ actor AccumulatedDepthMesh {
             guard depth < surface - tolerance else { continue }
 
             vertices[index].weight = weight * 0.5
-            vertices[index].lidarWeight *= 0.5
+            let lidarBefore = vertices[index].lidarWeight
+            vertices[index].lidarWeight = lidarBefore * 0.5
+            if lidarBefore >= Self.anchorLidarWeight,
+               vertices[index].lidarWeight < Self.anchorLidarWeight {
+                // Demoted below anchor eligibility while still alive: the
+                // served reference list must stop including it immediately,
+                // fallback streak or not.
+                tombstonedAnchorMass = true
+            }
             if vertices[index].weight < Self.carveTombstoneWeight {
                 vertices[index].weight = 0
                 if vertices[index].lidarWeight > 0 { tombstonedAnchorMass = true }
@@ -249,6 +262,11 @@ actor AccumulatedDepthMesh {
                 if let key = key(position), vertexIDs[key] == UInt32(index) {
                     vertexIDs.removeValue(forKey: key)
                 }
+                // Free the anchor cell so rescanned geometry can re-anchor.
+                let anchorVoxel = voxelSize * Self.anchorVoxelScale
+                anchorKeys.remove(SIMD3<Int>(Int(floor(position.x / anchorVoxel)),
+                                             Int(floor(position.y / anchorVoxel)),
+                                             Int(floor(position.z / anchorVoxel))))
                 cachedSnapshot = nil
             }
         }

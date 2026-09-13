@@ -78,6 +78,7 @@ actor TSDFVolume {
         imageResolution: CGSize,
         transform: simd_float4x4,
         maximumDepth: Float,
+        weightScale: Float = 1,
         workSession: ScanWorkSession? = nil
     ) -> Statistics {
         guard !Task.isCancelled, workSession?.isActive != false else { return statistics }
@@ -114,6 +115,7 @@ actor TSDFVolume {
                     touched.insert(blockCoordinate(of: point))
                     offset += blockSize
                 }
+                touched.insert(blockCoordinate(of: surface))
                 touched.insert(blockCoordinate(of: surface + ray * tau))
             }
         }
@@ -140,7 +142,7 @@ actor TSDFVolume {
             let projectionDepth = max(depthAtCenter, 0.05)
             let px = cx + fx * camera.x / projectionDepth
             let py = cy - fy * camera.y / projectionDepth
-            let margin = Float(Self.blockEdge) * 4
+            let margin = abs(fx) * blockDiagonal / max(projectionDepth, 0.3) + 8
             guard px > -margin, px < Float(width) + margin,
                   py > -margin, py < Float(height) + margin else { continue }
             updateSet.insert(coordinate)
@@ -170,7 +172,7 @@ actor TSDFVolume {
                         let signed = measured - voxelDepth
                         if signed < -tau { continue }   // occluded: unobserved
 
-                        let observationWeight = min(1, 4 / (measured * measured))
+                        let observationWeight = min(1, max(0.08, 4 / (measured * measured))) * max(0.05, min(1, weightScale))
                         let update: Float
                         let weightGain: Float
                         if signed > tau {
@@ -187,15 +189,18 @@ actor TSDFVolume {
                         let total = min(previousWeight + weightGain, 64)
                         let blended = (Float(voxel.sdf) * previousWeight + update * weightGain)
                             / (previousWeight + weightGain)
-                        voxel.sdf = Float16(max(-tau, min(tau, blended)))
+                        // Clamp only to the global band: re-clamping to
+                        // this frame's tau would let one low-weight
+                        // observation discard accumulated evidence.
+                        voxel.sdf = Float16(max(-0.8, min(0.8, blended)))
                         voxel.weight = Float16(total)
                         if let colors, abs(signed) <= tau * 0.5 {
                             let color = colors[iy * width + ix]
                             let cw = Float(voxel.colorWeight)
                             let gain = min(cw + 1, 32)
-                            voxel.red = UInt8((Float(voxel.red) * cw + Float(color.x)) / (cw + 1))
-                            voxel.green = UInt8((Float(voxel.green) * cw + Float(color.y)) / (cw + 1))
-                            voxel.blue = UInt8((Float(voxel.blue) * cw + Float(color.z)) / (cw + 1))
+                            voxel.red = UInt8(((Float(voxel.red) * cw + Float(color.x)) / (cw + 1)).rounded())
+                            voxel.green = UInt8(((Float(voxel.green) * cw + Float(color.y)) / (cw + 1)).rounded())
+                            voxel.blue = UInt8(((Float(voxel.blue) * cw + Float(color.z)) / (cw + 1)).rounded())
                             voxel.colorWeight = UInt8(gain)
                         }
                         block.voxels[index] = voxel
@@ -266,7 +271,7 @@ actor TSDFVolume {
         let voxelData = block.voxels[index]
         return Sample(
             sdf: Float(voxelData.sdf),
-            valid: Float(voxelData.weight) > 0.5,
+            valid: Float(voxelData.weight) > 0.15,
             color: SIMD3<Float>(Float(voxelData.red), Float(voxelData.green), Float(voxelData.blue))
         )
     }
