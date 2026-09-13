@@ -4,6 +4,10 @@ import Testing
 
 // Simulate a long export without allocating a million-vertex mesh. The timeout
 // lets the old blocking implementation fail an assertion instead of hanging CI.
+// It must be generous: in a full parallel run on a physical device the main
+// thread services other @MainActor suites continuously, so a responsive
+// implementation can still take seconds to run a queued probe. A blocking
+// regression holds its caller for the whole window and fails deterministically.
 nonisolated private final class BagWriterStall: @unchecked Sendable {
     private let lock = NSLock()
     private let releaseSignal = DispatchSemaphore(value: 0)
@@ -14,7 +18,7 @@ nonisolated private final class BagWriterStall: @unchecked Sendable {
         let entered = DispatchSemaphore(value: 0)
         queue.async {
             entered.signal()
-            _ = self.releaseSignal.wait(timeout: .now() + 3)
+            _ = self.releaseSignal.wait(timeout: .now() + 30)
             self.lock.withLock { self.finished = true }
         }
         entered.wait()
@@ -58,10 +62,13 @@ struct BagBrowserResponsivenessTests {
             try? FileManager.default.removeItem(at: root)
         }
 
-        // Queue the UI event inside this task immediately before entering the
-        // async API: it can only run if that API actually suspends the caller.
+        // Queue main-actor work immediately before entering the async API: it
+        // can only run if that API actually suspends the caller instead of
+        // holding the main thread. A Task (not DispatchQueue.main.async) so a
+        // failure attributes to this test rather than recording as an
+        // unassociated issue.
         let scan = Task { @MainActor in
-            DispatchQueue.main.async {
+            _ = Task { @MainActor in
                 #expect(!stall.hasFinished, "The preview blocked UI events behind the writer")
                 stall.release()
             }

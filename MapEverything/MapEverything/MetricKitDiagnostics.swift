@@ -9,7 +9,17 @@ import MetricKit
 /// Subscribes to MetricKit and archives crash/hang diagnostic payloads and
 /// daily metric payloads as JSON under Documents/Diagnostics so they can be
 /// shared from the Advanced settings panel.
-final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber {
+///
+/// Must stay `nonisolated`: MetricKit invokes `didReceive` on its own queue
+/// (com.apple.metrickit.manager.queue) through an ObjC thunk that erases
+/// actor isolation, so a MainActor-isolated conformance passes the compiler
+/// but trips the Swift 6 executor assertion at delivery time — and because
+/// each crash queues a diagnostic payload for the next launch, that trap
+/// crash-loops the app on every real device (simulators never deliver).
+// @unchecked only because NSObject precludes a checked conformance: the sole
+// stored property is an immutable serial queue, and all file-system state is
+// confined to it.
+nonisolated final class MetricKitDiagnostics: NSObject, MXMetricManagerSubscriber, @unchecked Sendable {
     static let shared = MetricKitDiagnostics()
 
     /// Number of files retained per payload kind; older files are deleted.
