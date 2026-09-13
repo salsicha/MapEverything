@@ -181,6 +181,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     exportedScanDirectories.removeAll()
                     depthMappingFeedback = ""
                     consecutiveMeshCalibrationFrames = 0
+                    sessionFailureRestarts = 0
                     trackingStateFeedback = ""
                     publishTrackingFeedback()
                     let surfelMap = surfelMap
@@ -259,6 +260,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
     /// LiDAR-calibrated frame and at scan start. Drives the gentle "depth
     /// from scanned map" notice after ~5 s of continuous fallback.
     private var consecutiveMeshCalibrationFrames = 0
+    /// Transient AR session failures restart tracking at most this many times
+    /// per scan before the error surfaces to the user.
+    private var sessionFailureRestarts = 0
 
     private func publishTrackingFeedback() {
         delegate?.didUpdateTrackingFeedback(trackingStateFeedback.isEmpty ? depthMappingFeedback : trackingStateFeedback)
@@ -1332,9 +1336,54 @@ class ARViewController: UIViewController, ARSessionDelegate {
         publishTrackingFeedback()
     }
     
+    /// What to do about an AR session failure. Pure so tests can pin the
+    /// policy: a bad resume map is deleted, camera denial gets actionable
+    /// guidance, and transient failures restart tracking a bounded number of
+    /// times per scan before surfacing.
+    enum SessionFailureAction: Equatable {
+        case restartTracking
+        case surfaceCameraGuidance
+        case surface
+    }
+
+    nonisolated static func sessionFailureResponse(
+        code: ARError.Code?, restartsSoFar: Int, isScanning: Bool
+    ) -> (deletesWorldMap: Bool, action: SessionFailureAction) {
+        let deletesWorldMap = code == .invalidWorldMap
+        if code == .cameraUnauthorized { return (deletesWorldMap, .surfaceCameraGuidance) }
+        guard isScanning, restartsSoFar < 3 else { return (deletesWorldMap, .surface) }
+        return (deletesWorldMap, .restartTracking)
+    }
+
     func session(_ session: ARSession, didFailWithError error: Error) {
-        print("AR Session Failed: \(error.localizedDescription)")
-        delegate?.didFailWithError(error)
+        let code = (error as? ARError)?.code
+        print("AR Session Failed (code \(code.map { String($0.rawValue) } ?? "unknown")): \(error)")
+        let response = Self.sessionFailureResponse(
+            code: code, restartsSoFar: sessionFailureRestarts, isScanning: isScanning
+        )
+        if response.deletesWorldMap, let url = Self.worldMapFileURL {
+            // A stale or incompatible resume map must not brick every scan.
+            try? FileManager.default.removeItem(at: url)
+        }
+        switch response.action {
+        case .surfaceCameraGuidance:
+            delegate?.didFailWithError(NSError(domain: "MapEverything", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Camera access is denied. Enable Camera for MapEverything in Settings, then restart the scan."
+            ]))
+        case .restartTracking:
+            guard let configuration = session.configuration ?? makeWorldTrackingConfiguration() else {
+                delegate?.didFailWithError(error)
+                return
+            }
+            sessionFailureRestarts += 1
+            delegate?.didUpdateTrackingFeedback("AR session failed — restarting tracking…")
+            // No reset options: accumulated world-space geometry stays
+            // aligned, and sessionShouldAttemptRelocalization allows ARKit
+            // to relocalize into the existing map.
+            session.run(configuration)
+        case .surface:
+            delegate?.didFailWithError(error)
+        }
     }
     
     func sessionWasInterrupted(_ session: ARSession) {

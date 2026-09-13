@@ -4,10 +4,12 @@ import Testing
 
 // Simulate a long export without allocating a million-vertex mesh. The timeout
 // lets the old blocking implementation fail an assertion instead of hanging CI.
-// It must be generous: in a full parallel run on a physical device the main
-// thread services other @MainActor suites continuously, so a responsive
-// implementation can still take seconds to run a queued probe. A blocking
-// regression holds its caller for the whole window and fails deterministically.
+// It must be far larger than any continuous main-actor occupancy a parallel
+// run can produce: probes queued on the main actor compete with every other
+// @MainActor test (including CPU-bound sweeps), so a responsive
+// implementation may wait many seconds for one free slot. A blocking
+// regression holds its caller for the whole window and fails
+// deterministically after it.
 nonisolated private final class BagWriterStall: @unchecked Sendable {
     private let lock = NSLock()
     private let releaseSignal = DispatchSemaphore(value: 0)
@@ -18,7 +20,7 @@ nonisolated private final class BagWriterStall: @unchecked Sendable {
         let entered = DispatchSemaphore(value: 0)
         queue.async {
             entered.signal()
-            _ = self.releaseSignal.wait(timeout: .now() + 30)
+            _ = self.releaseSignal.wait(timeout: .now() + 120)
             self.lock.withLock { self.finished = true }
         }
         entered.wait()
