@@ -162,6 +162,39 @@ nonisolated enum MeshDepthPropagation {
         lidarConfidenceMap: CVPixelBuffer? = nil,
         configuration: Configuration = .default
     ) -> DepthAnythingProcessor.MaximumLikelihoodCalibration? {
+        guard let samples = pseudoDepthSamples(
+            anchors: anchors,
+            relative: relative,
+            intrinsics: intrinsics,
+            imageResolution: imageResolution,
+            transform: transform,
+            configuration: configuration
+        ) else { return nil }
+        guard let fit = RobustDepthCalibration.fit(samples) else { return nil }
+
+        if let lidarDepthMap,
+           DepthAnythingProcessor.sparseLiDARAgreement(
+               calibration: fit,
+               relative: relative,
+               lidarDepthMap: lidarDepthMap,
+               lidarConfidenceMap: lidarConfidenceMap
+           ) == false {
+            return nil
+        }
+        return fit
+    }
+
+    /// Visible-anchor pseudo-samples ready for the fitter: z-buffered
+    /// projection, per-cell selection, and the count/coverage gates. Nil when
+    /// the anchors cannot legitimately constrain this frame.
+    static func pseudoDepthSamples(
+        anchors: [SIMD3<Float>],
+        relative: RelativeDepthMap,
+        intrinsics: simd_float3x3,
+        imageResolution: CGSize,
+        transform: simd_float4x4,
+        configuration: Configuration = .default
+    ) -> [DepthCalibrationSample]? {
         guard let visible = visibleAnchors(
             anchors: anchors,
             depthWidth: relative.width,
@@ -188,18 +221,7 @@ nonisolated enum MeshDepthPropagation {
             }
         }
         guard samples.count >= configuration.minimumSamples else { return nil }
-        guard let fit = RobustDepthCalibration.fit(samples) else { return nil }
-
-        if let lidarDepthMap,
-           DepthAnythingProcessor.sparseLiDARAgreement(
-               calibration: fit,
-               relative: relative,
-               lidarDepthMap: lidarDepthMap,
-               lidarConfidenceMap: lidarConfidenceMap
-           ) == false {
-            return nil
-        }
-        return fit
+        return samples
     }
 
     /// 10th-to-90th percentile spread of the given coordinates.

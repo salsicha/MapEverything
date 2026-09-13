@@ -331,6 +331,51 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         lidarFloatsPerRow: Int,
         confidenceSampling: LiDARConfidenceSampling
     ) -> MaximumLikelihoodCalibration? {
+        RobustDepthCalibration.fit(collectLidarSamples(
+            relative: relative, lidarBase: lidarBase, lidarWidth: lidarWidth,
+            lidarHeight: lidarHeight, lidarFloatsPerRow: lidarFloatsPerRow,
+            confidenceSampling: confidenceSampling
+        ))
+    }
+
+    /// The LiDAR half of the calibration sample set, exposed so the joint
+    /// map-anchored fit can combine it with mesh pseudo-samples.
+    static func lidarCalibrationSamples(
+        relative: RelativeDepthMap,
+        lidarDepthMap: CVPixelBuffer,
+        lidarConfidenceMap: CVPixelBuffer? = nil
+    ) -> [DepthCalibrationSample] {
+        CVPixelBufferLockBaseAddress(lidarDepthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(lidarDepthMap, .readOnly) }
+        if let lidarConfidenceMap {
+            CVPixelBufferLockBaseAddress(lidarConfidenceMap, .readOnly)
+        }
+        defer {
+            if let lidarConfidenceMap {
+                CVPixelBufferUnlockBaseAddress(lidarConfidenceMap, .readOnly)
+            }
+        }
+
+        let lidarW = CVPixelBufferGetWidth(lidarDepthMap)
+        let lidarH = CVPixelBufferGetHeight(lidarDepthMap)
+        guard CVPixelBufferGetPixelFormatType(lidarDepthMap) == kCVPixelFormatType_DepthFloat32,
+              let base = CVPixelBufferGetBaseAddress(lidarDepthMap)?.assumingMemoryBound(to: Float32.self)
+        else { return [] }
+        return collectLidarSamples(
+            relative: relative, lidarBase: base, lidarWidth: lidarW, lidarHeight: lidarH,
+            lidarFloatsPerRow: CVPixelBufferGetBytesPerRow(lidarDepthMap) / MemoryLayout<Float32>.stride,
+            confidenceSampling: lidarConfidenceSampling(lidarConfidenceMap)
+        )
+    }
+
+    private static func collectLidarSamples(
+        relative: RelativeDepthMap,
+        lidarBase: UnsafePointer<Float32>,
+        lidarWidth: Int,
+        lidarHeight: Int,
+        lidarFloatsPerRow: Int,
+        confidenceSampling: LiDARConfidenceSampling
+    ) -> [DepthCalibrationSample] {
         relative.withReadAccess { relativeReader in
             var samples: [DepthCalibrationSample] = []
             let step = 4
@@ -350,7 +395,7 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
                                                            weight: Double(confidence / (sigma * sigma))))
                 }
             }
-            return RobustDepthCalibration.fit(samples)
+            return samples
         }
     }
 

@@ -767,46 +767,49 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
         guard workSession.isActive, !Task.isCancelled else { return nil }
-        let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
-        let calibrationSource: DepthCalibrationSource
-        if let lidarCalibration = DepthAnythingProcessor.maximumLikelihoodCalibration(
+        // Every frame calibrates against LiDAR AND the accumulated map's
+        // anchors jointly (docs/consistent-scene-plan.md): the map constrains
+        // the far field LiDAR cannot see, so consecutive frames stop placing
+        // the same distant surfaces at different depths.
+        let anchors = await accumulator.calibrationAnchors()
+        guard workSession.isActive, !Task.isCancelled else { return nil }
+        guard let calibrated = DepthCalibrationPipeline.calibrate(
             relative: relative,
             lidarDepthMap: lidarDepthMap,
-            lidarConfidenceMap: lidarConfidenceMap
-        ) {
-            calibration = lidarCalibration
-            calibrationSource = .lidar
-        } else {
-            // LiDAR could not scale this frame; fit against the LiDAR-anchored
-            // accumulated mesh instead (docs/mesh-propagated-calibration.md).
-            let anchors = await accumulator.calibrationAnchors()
-            guard workSession.isActive, !Task.isCancelled else { return nil }
-            if let propagated = MeshDepthPropagation.fitCalibration(
-                anchors: anchors, relative: relative, intrinsics: intrinsics,
-                imageResolution: imageResolution, transform: transform,
-                lidarDepthMap: lidarDepthMap, lidarConfidenceMap: lidarConfidenceMap
-            ) {
-                calibration = propagated
-                calibrationSource = .meshPropagated
-            } else {
-                let guidance = anchors.count < MeshDepthPropagation.Configuration.default.minimumSamples
-                    ? "Depth scale unavailable. Scan nearby surfaces first, then move outward."
-                    : "Depth scale unavailable. Keep previously scanned surfaces in view."
-                await MainActor.run {
-                    guard workSession.isActive, self.isScanning else { return }
-                    self.depthMappingFeedback = guidance
-                    self.publishTrackingFeedback()
-                }
-                return nil
+            lidarConfidenceMap: lidarConfidenceMap,
+            anchors: anchors,
+            intrinsics: intrinsics,
+            imageResolution: imageResolution,
+            transform: transform
+        ) else {
+            let guidance = anchors.count < MeshDepthPropagation.Configuration.default.minimumSamples
+                ? "Depth scale unavailable. Scan nearby surfaces first, then move outward."
+                : "Depth scale unavailable. Keep previously scanned surfaces in view."
+            await MainActor.run {
+                guard workSession.isActive, self.isScanning else { return }
+                self.depthMappingFeedback = guidance
+                self.publishTrackingFeedback()
             }
+            return nil
         }
+        let calibration = calibrated.calibration
+        let calibrationSource = calibrated.source
+        // Stage 2/4: geometry only enters the map where this frame's
+        // calibration had supporting evidence.
+        let cappedConfiguration = MeshGenerator.DepthAnythingMeshConfiguration(
+            step: meshConfiguration.step,
+            minimumDepth: meshConfiguration.minimumDepth,
+            maximumDepth: min(meshConfiguration.maximumDepth, calibrated.integrationDepthCap),
+            maximumDepthDiscontinuity: meshConfiguration.maximumDepthDiscontinuity,
+            maximumTriangleCount: meshConfiguration.maximumTriangleCount
+        )
 
         // The retained cameraImage is both the inference input above and the
         // RGB source below. Never fetch currentFrame after inference finishes.
         let meshSnapshot = MeshGenerator.createDepthAnythingMeshSnapshot(
             from: relative, calibration: calibration, intrinsics: intrinsics,
             imageResolution: imageResolution, transform: transform,
-            configuration: meshConfiguration, cameraImage: cameraImage,
+            configuration: cappedConfiguration, cameraImage: cameraImage,
             exposureOffset: exposureOffset
         )
         let calibratedPoints: [ColoredPoint]
