@@ -342,4 +342,4 @@ The [fastlane/](fastlane) directory configures three lanes:
 ---
 
 ## 🤝 Contributing & License
-Contributions, bug reports, and features are welcome! Feel free to open a pull request if you'd like to implement new mesh generation pipelines, improve Depth Anything calibration, or support CBOR/binary WebSockets. This project is licensed under the MIT License.
+Contributions, bug reports, and features are welcome! Feel free to open a pull request if you'd like to implement new mesh generation pipelines, improve Depth Anything calibration, or support CBOR/binary WebSockets. This project is licensed under the [MIT License](LICENSE). The bundled Depth Anything V2 Small model is redistributed under the Apache License 2.0 — see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
