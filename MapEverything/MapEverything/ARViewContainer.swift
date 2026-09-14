@@ -183,6 +183,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     exportedScanDirectories.removeAll()
                     depthMappingFeedback = ""
                     consecutiveMeshCalibrationFrames = 0
+                    sceneDarknessGate = SceneLuminance.DarknessGate()
                     sessionFailureRestarts = 0
                     trackingStateFeedback = ""
                     publishTrackingFeedback()
@@ -269,6 +270,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
     /// LiDAR-calibrated frame and at scan start. Drives the gentle "depth
     /// from scanned map" notice after ~5 s of continuous fallback.
     private var consecutiveMeshCalibrationFrames = 0
+    /// Hysteresis gate naming darkness as the reason far-field depth is
+    /// missing; a passive RGB depth model cannot see unlit geometry.
+    private var sceneDarknessGate = SceneLuminance.DarknessGate()
+    private static let darkSceneFeedback =
+        "Scene too dark to extend depth. Mapping is limited to LiDAR range until there is more light."
+
     /// Transient AR session failures restart tracking at most this many times
     /// per scan before the error surfaces to the user.
     private var sessionFailureRestarts = 0
@@ -808,6 +815,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         guard let processor = depthAnythingProcessor else { return nil }
 
+        // Scene brightness is judged per enhanced frame (~1 Hz): a passive
+        // RGB model cannot extend depth into unlit space, and the feedback
+        // below should say so instead of blaming calibration.
+        let sceneMedianLuma = SceneLuminance.medianLuma(of: cameraImage)
+
         guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
         guard workSession.isActive, !Task.isCancelled else { return nil }
         // Every frame calibrates against LiDAR AND the accumulated map's
@@ -834,7 +846,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
             #endif
             await MainActor.run {
                 guard workSession.isActive, self.isScanning else { return }
-                self.depthMappingFeedback = guidance
+                let isDark = self.sceneDarknessGate.update(medianLuma: sceneMedianLuma)
+                self.depthMappingFeedback = isDark ? Self.darkSceneFeedback : guidance
                 self.publishTrackingFeedback()
             }
             return nil
@@ -899,7 +912,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
             } else {
                 self.consecutiveMeshCalibrationFrames += 1
             }
-            if meshSnapshot == nil {
+            if self.sceneDarknessGate.update(medianLuma: sceneMedianLuma) {
+                // Darkness explains a missing or near-only mesh better than
+                // any calibration guidance, and the near field keeps mapping
+                // from LiDAR while the message shows.
+                self.depthMappingFeedback = Self.darkSceneFeedback
+            } else if meshSnapshot == nil {
                 self.depthMappingFeedback = "No reliable surface depth. Include nearby textured surfaces."
             } else if self.consecutiveMeshCalibrationFrames > 10 {
                 // Silent for the first ~5 s of propagated frames to avoid
