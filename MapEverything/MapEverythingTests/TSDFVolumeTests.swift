@@ -7,7 +7,9 @@ import simd
 /// Structural checks on the sparse TSDF: fronto-parallel planes must come
 /// back flat and single-sheeted, sub-truncation disagreement must fuse to
 /// one surface (the whole point of stage 5), observed free space must erode
-/// stale geometry, and occluded geometry must survive.
+/// stale geometry, occluded geometry must survive, and a truncated
+/// observation must mesh out to its frontier without skinning unobserved
+/// space.
 struct TSDFVolumeTests {
     private let width = 128
     private let height = 96
@@ -95,6 +97,27 @@ struct TSDFVolumeTests {
         #expect(mesh.vertices.contains { abs($0.z + 6) < 0.15 })
     }
 
+    @Test("A measurement beyond the integration cap still erodes stale in-cap surface")
+    func beyondCapMeasurementErodesInCapSurface() async throws {
+        let volume = TSDFVolume(voxelSize: 0.06)
+        // A spurious curtain at 3 m (three sightings, full weight), then
+        // thirty correcting frames that each measure the ray's true content
+        // at 25 m — beyond the 12 m cap. Pre-fix those rays were skipped
+        // outright, so no free-space evidence ever reached the curtain and
+        // it survived at full weight forever; the beyond-cap measurement
+        // proves 0-11.4 m of the ray empty and must erode it.
+        await integrate(volume, depth: plane(z: 3), times: 3)
+        try #require(await !volume.extractMesh().isEmpty)
+        await integrate(volume, depth: plane(z: 25), times: 30)
+        let mesh = await volume.extractMesh()
+        #expect(!mesh.vertices.contains { abs($0.z + 3) < 0.3 },
+                "The 3 m curtain sits on rays whose content was measured past the cap")
+        // The clamped carrier is a bound, not a surface: nothing may
+        // materialize near the cap (or anywhere else) from those frames.
+        #expect(!mesh.vertices.contains { -$0.z > 4 },
+                "A beyond-cap measurement must never write surface")
+    }
+
     @Test("Geometry occluded behind a measured surface survives")
     func occludedSurfaceSurvives() async throws {
         let volume = TSDFVolume(voxelSize: 0.06)
@@ -127,5 +150,86 @@ struct TSDFVolumeTests {
         await integrate(volume, depth: plane(z: 3), times: 1)
         let third = await volume.extractMesh()
         #expect(abs(third.vertices.count - first.vertices.count) < first.vertices.count / 4)
+    }
+
+    // MARK: - Frontier extraction
+
+    /// A wall tilted in x by 0.1 per meter of depth (x = 1 + 0.1 d) seen
+    /// from the origin: depth recedes smoothly along the wall, and a 7 m
+    /// `maximumDepth` truncates observation mid-wall — the street far field
+    /// in miniature. Rays that meet the wall beyond the cap carry their true
+    /// beyond-cap depth, so integrate() writes no SURFACE for them — only
+    /// clamped-carrier free-space updates to their in-cap prefix (all
+    /// positive, so they can never skin) — and the deepest observed band
+    /// ends in cells with one or two surface-unobserved corners (the
+    /// occluded band behind, low-weight free space to the side).
+    private func recedingWallDepth() -> [Float] {
+        var depth = [Float](repeating: .nan, count: width * height)
+        for px in 75..<width {
+            let d = 100 / (Float(px) - 74)  // ray px meets the wall here
+            for py in 0..<height {
+                depth[py * width + px] = d
+            }
+        }
+        return depth
+    }
+
+    private func recedingWallMesh() async -> TSDFMesh {
+        let volume = TSDFVolume(voxelSize: 0.06)
+        for _ in 0..<4 {
+            _ = await volume.integrate(
+                depth: recedingWallDepth(), colors: nil, width: width, height: height,
+                intrinsics: intrinsics, imageResolution: resolution,
+                transform: matrix_identity_float4x4, maximumDepth: 7
+            )
+        }
+        return await volume.extractMesh()
+    }
+
+    /// Vertices actually referenced by triangles — the skinned surface.
+    private func skinnedVertices(_ mesh: TSDFMesh) -> [SIMD3<Float>] {
+        Set(mesh.indices).map { mesh.vertices[Int($0)] }
+    }
+
+    @Test("Frontier cells with unobserved corners still mesh out to the truncated observation edge")
+    func frontierReachesTruncatedObservationEdge() async throws {
+        let mesh = await recedingWallMesh()
+        try #require(!mesh.isEmpty)
+        let skinned = skinnedVertices(mesh)
+        let reach = skinned.map { -$0.z }.max() ?? 0
+        // The deepest observed surface sample sits at 6.67 m (the px 89
+        // ray). The old all-8-corners rule stalled at 6.42 m with ZERO
+        // skinned vertices beyond 6.45 m — every deeper band cell has one
+        // or two never-observed corners (dropped rays to the side, the
+        // occluded band behind) — while the >= 6-observed rule reaches
+        // 6.51 m with ~345 skinned vertices beyond 6.45 m.
+        #expect(reach > 6.47, "frontier band must mesh strictly deeper than the all-8 rule's 6.42 m")
+        #expect(skinned.filter { -$0.z > 6.45 }.count >= 100,
+                "the recovered frontier is a band of surface, not a stray vertex")
+        // The whole deepest 0.4 m of skinned surface stays well populated.
+        #expect(skinned.filter { -$0.z > reach - 0.4 }.count >= 200)
+    }
+
+    @Test("Unobserved space beyond the frontier grows no surface")
+    func unobservedSpaceBeyondFrontierStaysEmpty() async throws {
+        let mesh = await recedingWallMesh()
+        try #require(!mesh.isEmpty)
+        // The wall genuinely continues into the dropped-ray wedge (7.14 m
+        // at the first dropped ray, out to ~100 m): none of it may mesh.
+        // Checked over ALL vertices, referenced by triangles or not.
+        #expect(!mesh.vertices.contains { -$0.z > 6.9 },
+                "no vertex beyond the deepest observed band (measured reach 6.51 m)")
+        // Every vertex hugs the observed wall plane x = 1 + 0.1 d
+        // (measured max deviation 0.028 m): no skin floats in free or
+        // unobserved space.
+        #expect(mesh.vertices.allSatisfy { abs($0.x - (1 - 0.1 * $0.z)) < 0.3 })
+        // And every vertex stays inside the observed-SURFACE ray wedge
+        // (columns px >= 89). The wedge px <= 88 now carries beyond-cap
+        // free-space evidence, but free-space-only voxels are all-positive
+        // and must never form surface.
+        #expect(mesh.vertices.allSatisfy { v in
+            let d = -v.z
+            return d > 0 && 64 + 100 * v.x / d > 87
+        })
     }
 }

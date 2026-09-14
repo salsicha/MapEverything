@@ -62,6 +62,13 @@ nonisolated enum MeshGenerator {
         var cameraTransform: simd_float4x4? = nil
         var intrinsics: simd_float3x3? = nil
         var imageResolution: CGSize? = nil
+        // Clamped carrier points for rays whose measured content lies beyond
+        // the configuration's maximumDepth (the frame's integration cap):
+        // one world-space point AT the cap per (subsampled) beyond-cap
+        // pixel. Never geometry — carve() splats them as pseudo-surfaces so
+        // in-cap phantoms on open-background rays still meet negative
+        // evidence. Empty for uncapped configurations.
+        var beyondCapCarriers: [SIMD3<Float>] = []
     }
 
     static func createDescriptor(from geometry: ARMeshGeometry) -> MeshDescriptor {
@@ -205,6 +212,7 @@ nonisolated enum MeshGenerator {
 
             var positions: [SIMD3<Float>] = []
             var colors: [SIMD3<UInt8>] = []
+            var beyondCapCarriers: [SIMD3<Float>] = []
             var gridIndices = [Int32](repeating: -1, count: rows.count * columns.count)
             var gridDepths = [Float](repeating: .nan, count: rows.count * columns.count)
             positions.reserveCapacity(rows.count * columns.count)
@@ -219,8 +227,28 @@ nonisolated enum MeshGenerator {
                         relativeDepth: relativeDepth,
                         calibration: calibration
                     ),
-                          depth >= configuration.minimumDepth,
-                          depth <= configuration.maximumDepth else {
+                          depth >= configuration.minimumDepth else {
+                        continue
+                    }
+                    guard depth <= configuration.maximumDepth else {
+                        // Valid content measured PAST the cap still proves
+                        // the capped part of its ray free: carry a clamped
+                        // pseudo-surface point at the cap for carve().
+                        // Subsampled 2x2 — carve's 160x120 buffer with its
+                        // 3x3 splat cannot resolve finer anyway.
+                        if configuration.maximumDepth.isFinite,
+                           rowIndex & 1 == 0, columnIndex & 1 == 0 {
+                            let clamped = configuration.maximumDepth
+                            let carrierCamera = simd_float4(
+                                ((Float(x) - cx) / fx) * clamped,
+                                ((cy - Float(y)) / fy) * clamped,
+                                -clamped,
+                                1.0
+                            )
+                            let carrierWorld = simd_mul(transform, carrierCamera)
+                            beyondCapCarriers.append(
+                                SIMD3<Float>(carrierWorld.x, carrierWorld.y, carrierWorld.z))
+                        }
                         continue
                     }
 
@@ -325,7 +353,8 @@ nonisolated enum MeshGenerator {
                 exposureOffset: exposureOffset,
                 cameraTransform: transform,
                 intrinsics: intrinsics,
-                imageResolution: resolution
+                imageResolution: resolution,
+                beyondCapCarriers: beyondCapCarriers
             )
         }
     }

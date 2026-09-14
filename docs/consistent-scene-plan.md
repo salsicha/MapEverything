@@ -41,3 +41,29 @@ tests (fixture: downsampled relative maps inverted from the recorded clouds +
 recorded calibrations/poses/intrinsics); metric = consecutive-frame far-field
 along-ray spread, before vs after. Performance timed on Apple-silicon Mac with
 documented ~3–6× CPU margin to A16.
+
+## Follow-up: far-field admission (street scan, 2026-09)
+
+Field result after stages 1–5: a street scan showed only near-field geometry.
+Replaying the recorded failing bag (fixture via `tools/replay_fixture/`,
+suite `StreetScanReplayTests`) proved the stage-2 support cap collapsed to
+1.75 × LiDAR p95 (6.7–8.8 m) for the whole scan — downstream was lossless —
+because far anchors could not form: certificate accrual at the raw incidence
+cosine needed 4–8 sightings at street range, and the visibility z-buffer's
+splats let near ground cells "occlude" deeper cells of the same surface
+(50–86% of in-frustum anchors killed, deepest first). Fixes, each replay-
+verified: incidence-floored anchor certificates (mature in ≤3 sightings, with
+a demotion/negative-evidence channel so flip-ghost anchors cannot become
+permanent), chained-surface visibility (continuous surfaces keep their deep
+anchors; detached occluders still suppress), a shell-supported fit-inlying
+pseudo-sample horizon on joint-accepted frames only, agreement-gated anchor
+horizons for LiDAR-only frames, beyond-cap free-space carriers (content
+measured past the cap still erodes stale geometry in front of it), a ≥6-corner
+TSDF frontier extraction rule, and the integration ceiling raised 12 → 18 m.
+Street replay: cap 8.8 m pinned → 14.5 m climbing, 12–18 m band empty →
+~19.6k TSDF vertices; scan6 degraded replay saturates the full 18 m ceiling.
+Known intrinsic limit: same-ray monocular spread grows to ~1.9 m median
+beyond 11 m — absorbed by TSDF truncation/precision weighting, and the reason
+the ceiling stays at 18 m. The bag cannot measure beyond-cap gains (published
+clouds are pre-truncated at the recorded cap), so the next street scan is the
+real evaluation.

@@ -59,6 +59,21 @@ actor AccumulatedDepthMesh {
     /// One observation contributes at most 1, so this proves at least two
     /// LiDAR-calibrated sightings, filtering single-frame ghosts.
     static let anchorLidarWeight: Float = 1.5
+    /// Incidence floor for the anchor CERTIFICATE weight alone — the raw
+    /// cosine never counts below 0.5 toward `anchorLidarWeight`. The anchor
+    /// component of `faceWeights` is consumed only by LiDAR-calibrated
+    /// sightings, so the floor cannot inflate fallback provenance. Street
+    /// geometry at range is seen at grazing cosines of ~0.14-0.38, which
+    /// against the 1.5 threshold demanded 4-8 cross-frame sightings a
+    /// panning scan never delivers, so far anchors could never form.
+    /// Resulting sightings-to-mature (accrual is once per cell per frame,
+    /// each sighting clamped to [0.5, 1]):
+    ///   cos >= 0.75          -> 2 sightings (2 x 0.75 = 1.5)
+    ///   cos <  0.75, floored -> 3 sightings (2 x max(cos, 0.5) < 1.5 <= 3 x 0.5)
+    ///   any single frame     -> never (one accrual of at most 1 < 1.5)
+    /// Vertex position/color fusion keeps the true cosine via the
+    /// observation component; only the certificate ledger is floored.
+    static let anchorIncidenceFloor: Float = 0.5
     /// Mesh-propagated observations carry a quarter of their view-quality
     /// weight, so one subsequent frontal LiDAR view dominates up to four
     /// accumulated fallback views of fallback-born geometry.
@@ -75,6 +90,22 @@ actor AccumulatedDepthMesh {
     /// calibration noise never eats true surfaces.
     static let carveToleranceFloor: Float = 0.3
     static let carveToleranceFraction: Float = 0.15
+    /// Anchor-certificate drain: an anchor cell projecting at least this
+    /// margin (fraction of depth, same floor as carving) in front of a
+    /// frame's measured surface is contradicted at the CALIBRATION level —
+    /// any fit consistent with this frame would reject the stored depth as
+    /// an inlier — so its certificate mass halves even though the vertex
+    /// geometry, protected by the wider carve tolerance, survives. The
+    /// fraction mirrors RobustDepthCalibration's 8% inlier band. Without
+    /// this channel a calibration-family-flip ghost skin (measured 11-17%
+    /// of depth in front of the true surface at 8-12 m) sits inside the 15%
+    /// carve tolerance for all depths >= ~9.3 m: once matured it would feed
+    /// pseudo-samples and shell horizons for the rest of the scan with
+    /// nothing able to demote it. Certificate mass re-accrues from
+    /// supporting sightings, so an occasional noisy contradiction of a true
+    /// anchor only suspends it for a frame or two, while a ghost skin is
+    /// contradicted by every correct frame and decays.
+    static let anchorDrainToleranceFraction: Float = 0.08
     /// Each contradiction halves a vertex's mass; below this it tombstones
     /// and its voxel becomes available for fresh geometry.
     static let carveTombstoneWeight: Float = 0.02
@@ -213,15 +244,21 @@ actor AccumulatedDepthMesh {
         // cell so carving stays conservative wherever any nearer surface was
         // seen. Each sample splats a 3x3 neighborhood so gaps between mesh
         // vertices cannot shield phantoms sitting in front of the surface.
+        // Beyond-cap carriers splat too: a pixel whose measured content lies
+        // PAST the integration cap proves the capped part of its ray empty,
+        // so those rays carry a clamped pseudo-surface at the cap — without
+        // them an in-cap phantom on an open-background ray (sky, canyon
+        // opening) would sit on a ray with no measured surface at all and
+        // never be contradicted.
         var measured = [Float](repeating: .infinity, count: gridW * gridH)
         var coverage = 0
-        for vertex in mesh.vertices {
-            let camera = worldToCamera * SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1)
+        func splat(_ point: SIMD3<Float>) {
+            let camera = worldToCamera * SIMD4<Float>(point.x, point.y, point.z, 1)
             let depth = -camera.z
-            guard depth > 0.05 else { continue }
+            guard depth > 0.05 else { return }
             let px = Int((cx + fx * camera.x / depth).rounded())
             let py = Int((cy - fy * camera.y / depth).rounded())
-            guard px >= -1, px <= gridW, py >= -1, py <= gridH else { continue }
+            guard px >= -1, px <= gridW, py >= -1, py <= gridH else { return }
             for row in max(0, py - 1)...min(gridH - 1, py + 1) {
                 for column in max(0, px - 1)...min(gridW - 1, px + 1) {
                     let cell = row * gridW + column
@@ -230,6 +267,8 @@ actor AccumulatedDepthMesh {
                 }
             }
         }
+        for vertex in mesh.vertices { splat(vertex) }
+        for carrier in mesh.beyondCapCarriers { splat(carrier) }
         guard coverage > 32 else { return }
 
         let forward = -SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
@@ -252,15 +291,22 @@ actor AccumulatedDepthMesh {
             guard px >= 0, px < gridW, py >= 0, py < gridH else { continue }
             let surface = measured[py * gridW + px]
             guard surface != .infinity else { continue }
-            let tolerance = max(Self.carveToleranceFloor, Self.carveToleranceFraction * depth)
-            guard depth < surface - tolerance else { continue }
+            // Two tolerances, one contradiction test each. The certificate
+            // drain fires at the calibration-inlier margin (8% of depth):
+            // an anchor whose stored depth any consistent fit would call an
+            // outlier against this frame's surface must stop testifying,
+            // even though its geometry — protected by the wider carve
+            // margin — is not yet provably phantom. Draining is cheap to
+            // recover from (mass re-accrues from supporting sightings);
+            // letting a family-flip ghost keep serving as a calibration
+            // reference is not.
+            let drainTolerance = max(Self.carveToleranceFloor, Self.anchorDrainToleranceFraction * depth)
+            guard depth < surface - drainTolerance else { continue }
 
-            vertices[index].weight = weight * 0.5
-            vertices[index].lidarWeight *= 0.5
-            // A contradicted observation also drains its anchor cell (once
-            // per carve pass per cell): served references drop out as soon
-            // as mass falls below eligibility, fallback streak or not, and
-            // a fully drained cell simply re-accrues from rescans.
+            // A contradicted observation drains its anchor cell (once per
+            // carve pass per cell): served references drop out as soon as
+            // mass falls below eligibility, fallback streak or not, and a
+            // fully drained cell simply re-accrues from rescans.
             if let cellKey = anchorCellKey(for: position), demotedCells.insert(cellKey).inserted,
                var cell = anchorCells[cellKey] {
                 if cell.mass >= Self.anchorLidarWeight { tombstonedAnchorMass = true }
@@ -271,6 +317,12 @@ actor AccumulatedDepthMesh {
                     anchorCells[cellKey] = cell
                 }
             }
+
+            let tolerance = max(Self.carveToleranceFloor, Self.carveToleranceFraction * depth)
+            guard depth < surface - tolerance else { continue }
+
+            vertices[index].weight = weight * 0.5
+            vertices[index].lidarWeight *= 0.5
             if vertices[index].weight < Self.carveTombstoneWeight {
                 vertices[index].weight = 0
                 vertices[index].lidarWeight = 0
@@ -303,8 +355,10 @@ actor AccumulatedDepthMesh {
     /// Per-face view-quality weights. `observation` is the cosine of the
     /// incidence angle attenuated by inverse-square distance beyond
     /// `fullWeightDistance` (drives position/color averaging); `anchor` is the
-    /// incidence term alone — a frontal LiDAR-calibrated sighting at range is
-    /// a valid anchor certificate, and depth-dependent noise is handled by the
+    /// incidence term alone, floored at `anchorIncidenceFloor` — a frontal
+    /// LiDAR-calibrated sighting at range is a valid anchor certificate, a
+    /// grazing one still certifies at half rate (three cross-frame sightings
+    /// to mature instead of 4-8), and depth-dependent noise is handled by the
     /// calibration sigma model instead. Frames without a camera position keep
     /// the historical equal weighting.
     private func faceWeights(
@@ -324,7 +378,7 @@ actor AccumulatedDepthMesh {
             return (Self.minimumObservationWeight, Self.minimumObservationWeight)
         }
         return (min(1, max(Self.minimumObservationWeight, weight)),
-                min(1, max(Self.minimumObservationWeight, cosineIncidence)))
+                min(1, max(Self.anchorIncidenceFloor, cosineIncidence)))
     }
 
     /// Maps incoming 8-bit channels onto the scan's reference exposure by

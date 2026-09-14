@@ -57,8 +57,9 @@ actor TSDFVolume {
     private var reachedCapacity = false
     private var cachedFullMesh: TSDFMesh?
 
-    /// ~24k blocks x 4 KB of voxels ≈ 100 MB ceiling at the default 6 cm.
-    init(voxelSize: Float = 0.06, maximumBlocks: Int = 24_000) {
+    /// ~32k blocks x 4 KB of voxels ≈ 130 MB ceiling at the default 6 cm —
+    /// sized for walking street scans at the 18 m integration ceiling.
+    init(voxelSize: Float = 0.06, maximumBlocks: Int = 32_000) {
         self.voxelSize = voxelSize.isFinite ? max(0.02, voxelSize) : 0.06
         self.maximumBlocks = max(64, maximumBlocks)
     }
@@ -167,12 +168,26 @@ actor TSDFVolume {
                         let iy = Int((cy - fy * camera.y / voxelDepth).rounded())
                         guard ix >= 0, ix < width, iy >= 0, iy < height else { continue }
                         let measured = depth[iy * width + ix]
-                        guard measured.isFinite, measured > 0.05, measured <= maximumDepth else { continue }
-                        let tau = Self.truncation(depth: measured, voxelSize: voxelSize)
-                        let signed = measured - voxelDepth
+                        guard measured.isFinite, measured > 0.05 else { continue }
+                        // A measurement beyond the integration cap writes no
+                        // surface, but it is still negative evidence for the
+                        // capped part of its ray: the content lies PAST the
+                        // cap, so every in-cap voxel clear of the CLAMPED
+                        // carrier's truncation band is observed free space.
+                        // Without this, a spurious in-cap surface on an
+                        // open-background ray (street-canyon opening,
+                        // skyline) could never erode — each correcting
+                        // frame measures beyond the cap and used to skip
+                        // the ray entirely, making the mistake permanent.
+                        let carrier = min(measured, maximumDepth)
+                        let tau = Self.truncation(depth: carrier, voxelSize: voxelSize)
+                        let signed = carrier - voxelDepth
                         if signed < -tau { continue }   // occluded: unobserved
+                        // The clamped carrier is a bound, not a surface:
+                        // voxels inside its band stay unobserved.
+                        if measured > maximumDepth, signed <= tau { continue }
 
-                        let observationWeight = min(1, max(0.08, 4 / (measured * measured))) * max(0.05, min(1, weightScale))
+                        let observationWeight = min(1, max(0.08, 4 / (carrier * carrier))) * max(0.05, min(1, weightScale))
                         let update: Float
                         let weightGain: Float
                         if signed > tau {
@@ -225,9 +240,11 @@ actor TSDFVolume {
     }
 
     /// Extracts the full surface via naive surface nets, re-meshing only
-    /// dirty blocks. One vertex per sign-changing cell placed at the mean of
-    /// its edge zero-crossings; quads across every sign-changing lattice
-    /// edge, wound by the sign, yield a consistent, hole-free surface.
+    /// dirty blocks. One vertex per sign-changing cell (>= 6 of 8 corners
+    /// observed) placed at the mean of its observed edge zero-crossings;
+    /// quads across every observed sign-changing lattice edge, wound by the
+    /// sign, yield a consistent, hole-free surface that reaches the
+    /// observation frontier without skinning unobserved space.
     func extractMesh() -> TSDFMesh {
         if let cachedFullMesh { return cachedFullMesh }
         var vertices: [SIMD3<Float>] = []
@@ -291,18 +308,33 @@ actor TSDFVolume {
 
     /// A cell's surface-net vertex, or nil when the cell has no valid sign
     /// change. Cell (x,y,z) spans voxels (x..x+1, y..y+1, z..z+1).
+    ///
+    /// Frontier cells mesh too: up to two never-observed corners are
+    /// tolerated so a truncated observation extracts out to its frontier
+    /// instead of losing the whole deepest band. Nothing is fabricated for
+    /// unobserved corners — crossings come only from edges whose BOTH
+    /// endpoints are observed — and with >= 6 observed corners the observed
+    /// corners always form a connected subgraph of the cube (Q3 is
+    /// 3-connected), so an observed sign change is exactly an observed edge
+    /// crossing. Quad emission is unchanged (quads only across observed
+    /// sign-changing lattice edges), so no skin ever spans unobserved
+    /// space. Pure function of the lattice: neighboring blocks derive
+    /// identical vertices at their seams.
     private func cellVertex(_ cell: SIMD3<Int32>) -> (position: SIMD3<Float>, color: SIMD3<UInt8>)? {
         var samples: [Sample] = []
         samples.reserveCapacity(8)
+        var observed = 0
         for corner in Self.cellCorners {
             let sampleValue = sample(cell &+ corner)
-            guard sampleValue.valid else { return nil }
+            if sampleValue.valid { observed += 1 }
             samples.append(sampleValue)
         }
+        guard observed >= 6 else { return nil }
         var crossings = 0
         var position = SIMD3<Float>.zero
         var color = SIMD3<Float>.zero
         for (a, b) in Self.cellEdges {
+            guard samples[a].valid, samples[b].valid else { continue }
             let sa = samples[a].sdf, sb = samples[b].sdf
             guard (sa < 0) != (sb < 0) else { continue }
             let t = sa / (sa - sb)

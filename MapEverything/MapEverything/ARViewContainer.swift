@@ -560,7 +560,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
             let statistics = await tsdf.statistics
             let (mesh, fused) = await Self.stoppedSceneMesh(tsdf: tsdf, accumulator: accumulator)
             let reach = mesh.vertices.reduce(Float(0)) { max($0, simd_length($1)) }
-            Self.depthLog.log("stop preview fused=\(fused) vertices=\(mesh.vertices.count) triangles=\(mesh.indices.count / 3) blocks=\(statistics.allocatedBlocks) capped=\(statistics.reachedCapacity) maxReach=\(String(format: "%.1f", reach), privacy: .public)m")
+            let stopLine = "stop preview fused=\(fused) vertices=\(mesh.vertices.count) triangles=\(mesh.indices.count / 3) blocks=\(statistics.allocatedBlocks) capped=\(statistics.reachedCapacity) maxReach=\(String(format: "%.1f", reach))m"
+            Self.depthLog.log("\(stopLine, privacy: .public)")
+            #if DEBUG
+            print("DepthPipeline \(stopLine)")
+            #endif
             guard let self, self.sceneScanID == scanID, !self.isScanning else { return }
             self.delegate?.didUpdateStoppedInspectionScene(self.makeInspectionScene(from: mesh))
         }
@@ -825,6 +829,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 ? "Depth scale unavailable. Scan nearby surfaces first, then move outward."
                 : "Depth scale unavailable. Keep previously scanned surfaces in view."
             Self.depthLog.log("calib DROPPED anchors=\(anchors.count)")
+            #if DEBUG
+            print("DepthPipeline calib DROPPED anchors=\(anchors.count)")
+            #endif
             await MainActor.run {
                 guard workSession.isActive, self.isScanning else { return }
                 self.depthMappingFeedback = guidance
@@ -834,7 +841,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
         let calibration = calibrated.calibration
         let calibrationSource = calibrated.source
-        Self.depthLog.log("calib ok source=\(calibrationSource == .lidar ? "lidar/joint" : "propagated", privacy: .public) cap=\(String(format: "%.1f", calibrated.integrationDepthCap), privacy: .public)m anchors=\(anchors.count) scale=\(String(format: "%.3f", calibration.scale), privacy: .public) offset=\(String(format: "%.3f", calibration.offset), privacy: .public)")
+        let calibrationLine = "calib ok source=\(calibrationSource == .lidar ? "lidar/joint" : "propagated") cap=\(String(format: "%.1f", calibrated.integrationDepthCap))m anchors=\(anchors.count) scale=\(String(format: "%.3f", calibration.scale)) offset=\(String(format: "%.3f", calibration.offset))"
+        Self.depthLog.log("\(calibrationLine, privacy: .public)")
+        #if DEBUG
+        print("DepthPipeline \(calibrationLine)")
+        #endif
         // Stage 2/4: geometry only enters the map where this frame's
         // calibration had supporting evidence.
         let cappedConfiguration = MeshGenerator.DepthAnythingMeshConfiguration(

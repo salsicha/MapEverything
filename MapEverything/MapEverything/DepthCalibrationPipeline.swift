@@ -26,9 +26,15 @@ nonisolated enum DepthCalibrationPipeline {
         /// Frames integrate to at most this multiple of their supporting
         /// samples' 95th-percentile depth.
         var supportDepthFactor: Float = 1.75
-        /// Absolute ceiling on accumulated-scene integration depth; beyond
-        /// it the monocular sigma makes fused geometry mush regardless.
-        var maximumIntegrationDepth: Float = 12
+        /// Absolute ceiling on accumulated-scene integration depth. Chosen
+        /// for street-scale scenes. Measured on the street/scan6 replays:
+        /// inter-frame same-ray spread is ~0.47 m median in the 6-11 m band
+        /// but grows to ~1.9 m median beyond 11 m — intrinsic monocular
+        /// noise that the TSDF absorbs through its range-scaled truncation
+        /// band, 1/z^2 observation weights, and free-space erosion rather
+        /// than through this cap. The ceiling bounds how far that machinery
+        /// must stretch, not where the geometry is trustworthy.
+        var maximumIntegrationDepth: Float = 18
         var propagation = MeshDepthPropagation.Configuration.default
 
         static let `default` = Configuration()
@@ -78,11 +84,23 @@ nonisolated enum DepthCalibrationPipeline {
                                     configuration: configuration),
                agrees(joint, with: lidarSamples, toleranceFloor: 0.12, toleranceFraction: 0.15) != false,
                agrees(joint, with: pseudoSamples, toleranceFloor: 0.3, toleranceFraction: 0.2) != false {
+                // An ACCEPTED joint fit carries its own far evidence: the
+                // pseudo-samples it predicts within the fitter's inlier
+                // tolerance are direct proof the calibration holds at those
+                // depths, so they extend the integration horizon under the
+                // same 1.75x contract LiDAR evidence gets. LiDAR-only and
+                // mesh-propagated frames never receive this population —
+                // without a joint acceptance the far field is extrapolation,
+                // not evidence.
                 return Result(
                     calibration: joint, source: .lidar,
-                    integrationDepthCap: supportCap(lidarSamples: lidarSamples,
-                                                    anchorDepths: anchorDepths,
-                                                    configuration: configuration)
+                    integrationDepthCap: supportCap(
+                        lidarSamples: lidarSamples,
+                        anchorDepths: anchorDepths,
+                        inlyingPseudoDepths: fitInlyingPseudoDepths(calibration: joint,
+                                                                    pseudoSamples: pseudoSamples),
+                        configuration: configuration
+                    )
                 )
             }
 
@@ -93,17 +111,32 @@ nonisolated enum DepthCalibrationPipeline {
             // population joint fitting requires — a stale handful of anchors
             // must never stall mapping (carving self-heals them instead).
             let mapMayVeto = pseudoSamples.count >= configuration.minimumVetoPseudoSamples
-            if let lidarOnly = RobustDepthCalibration.fit(lidarSamples),
-               !mapMayVeto
-               || agrees(lidarOnly, with: pseudoSamples, toleranceFloor: 0.3, toleranceFraction: 0.2) != false {
-                // Visible anchors still testify to the scene's supported
-                // depth even when the fit itself is LiDAR-only.
-                return Result(
-                    calibration: lidarOnly, source: .lidar,
-                    integrationDepthCap: supportCap(lidarSamples: lidarSamples,
-                                                    anchorDepths: anchorDepths,
-                                                    configuration: configuration)
-                )
+            if let lidarOnly = RobustDepthCalibration.fit(lidarSamples) {
+                // The map's testimony is judged once and gates two things:
+                // a substantial population may veto the fit outright, and
+                // the anchor-shell horizon is inherited only from anchors
+                // this fit does not contradict. A frame the map disputes
+                // (joint fit attempted and REJECTED, or the sub-veto
+                // population disagreeing) may still map — LiDAR is trusted
+                // where LiDAR sees — but only to the LiDAR evidence
+                // horizon: inheriting a deep cap from the very anchors
+                // that testify against the fit would write a far skin
+                // displaced by more than the agreement tolerance (2 m at
+                // 10 m) in a single frame, outside the TSDF truncation
+                // band and largely uncarvable.
+                let mapAgreement = agrees(lidarOnly, with: pseudoSamples,
+                                          toleranceFloor: 0.3, toleranceFraction: 0.2)
+                if !mapMayVeto || mapAgreement != false {
+                    // Visible anchors still testify to the scene's supported
+                    // depth even when the fit itself is LiDAR-only — but
+                    // only when they and the fit tell one story.
+                    return Result(
+                        calibration: lidarOnly, source: .lidar,
+                        integrationDepthCap: supportCap(lidarSamples: lidarSamples,
+                                                        anchorDepths: mapAgreement != false ? anchorDepths : [],
+                                                        configuration: configuration)
+                    )
+                }
             }
         }
 
@@ -183,18 +216,67 @@ nonisolated enum DepthCalibrationPipeline {
         return agreeing * 2 >= total
     }
 
+    /// Depths of the pseudo-samples `calibration` predicts within
+    /// RobustDepthCalibration's inlier tolerance (max(0.06, 8% of depth)).
+    /// For an ACCEPTED joint fit these are direct evidence the calibration
+    /// holds at those depths — each is a z-buffer-visible, mass-qualified
+    /// map anchor whose predicted metric depth matches its mapped position —
+    /// which is exactly the support contract LiDAR samples get. Samples the
+    /// fit cannot predict within tolerance testify to nothing and are
+    /// excluded.
+    static func fitInlyingPseudoDepths(
+        calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
+        pseudoSamples: [DepthCalibrationSample]
+    ) -> [Float] {
+        pseudoSamples.compactMap { sample in
+            guard let predicted = DepthAnythingProcessor.calibratedMetricDepth(
+                relativeDepth: Float(sample.relative), calibration: calibration
+            ) else { return nil }
+            return abs(Double(predicted) - sample.depth) <= max(0.06, 0.08 * sample.depth)
+                ? Float(sample.depth) : nil
+        }
+    }
+
+    /// The deepest depth in `depths` whose reference shell [0.7*D, D] holds
+    /// at least 10 of the population's own members, or 0 when no candidate's
+    /// frontier is corroborated. Percentiles over a whole population
+    /// re-dilute against the dense near field at every level (the exact
+    /// statistic that pinned on-device caps inside LiDAR range), and a bare
+    /// maximum lets a LONE deep member certify a horizon by itself — for
+    /// small populations the p95 index IS the maximum. A shell count asks
+    /// the only question that matters: is the frontier itself validated by
+    /// enough independent members?
+    static func shellSupportedHorizon(_ depths: [Float]) -> Float {
+        let sorted = depths.sorted(by: >)
+        var index = 0
+        while index < sorted.count {
+            let candidate = sorted[index]
+            var shell = 0
+            var probe = index
+            while probe < sorted.count, sorted[probe] >= candidate * 0.7 {
+                shell += 1
+                probe += 1
+            }
+            if shell >= 10 { return candidate }
+            index += 1
+        }
+        return 0
+    }
+
     /// The deepest geometry a frame may write: the support factor times the
     /// evidence horizon, clamped to the global ceiling. The horizon is the
-    /// MAXIMUM of each reference population's own 95th percentile — never a
+    /// MAXIMUM of each reference population's own statistic — never a
     /// percentile of the pooled set. Pooling is a contraction on real
     /// devices: thousands of confidence-gated near-field LiDAR samples
     /// numerically drown the few far map anchors, pinning the cap inside
     /// LiDAR range forever (reproduced from scan6 with device-realistic
     /// gating). Each population is a trusted reference in its own right, so
-    /// each extends the horizon independently.
+    /// each extends the horizon independently — but the two map-derived
+    /// populations must corroborate their own frontier via the shell bar.
     static func supportCap(
         lidarSamples: [DepthCalibrationSample],
         anchorDepths: [Float] = [],
+        inlyingPseudoDepths: [Float] = [],
         configuration: Configuration = .default
     ) -> Float {
         var horizon: Float = 0
@@ -202,28 +284,22 @@ nonisolated enum DepthCalibrationPipeline {
             let depths = lidarSamples.map(\.depth).sorted()
             horizon = Float(depths[min(depths.count - 1, depths.count * 19 / 20)])
         }
-        // The anchor horizon is the deepest depth whose reference SHELL is
-        // populated: percentiles over the whole population re-dilute against
-        // the dense near field at every level (the exact statistic that
-        // pinned on-device caps inside LiDAR range), whereas a shell count
-        // only asks whether the frontier itself is validated.
+        // Fit-inlying pseudo-samples of an accepted joint calibration (the
+        // only caller that passes them) are a trusted reference population
+        // in their own right and extend the horizon like the LiDAR
+        // population does — but through the same shell bar the anchor
+        // branch enforces, never a bare percentile: a single deep inlier is
+        // circular evidence (it was a gain-balanced joint-fit constraint,
+        // so the fit conforming to it is expected, not independent
+        // validation) and must not push the cap to the ceiling alone.
+        if !inlyingPseudoDepths.isEmpty {
+            horizon = max(horizon, shellSupportedHorizon(inlyingPseudoDepths))
+        }
+        // The anchor horizon takes the same shell statistic, behind the
+        // stricter >= 30 population gate a fit-independent reference set
+        // must clear.
         if anchorDepths.count >= 30 {
-            let sorted = anchorDepths.sorted(by: >)
-            var index = 0
-            while index < sorted.count {
-                let candidate = sorted[index]
-                var shell = 0
-                var probe = index
-                while probe < sorted.count, sorted[probe] >= candidate * 0.7 {
-                    shell += 1
-                    probe += 1
-                }
-                if shell >= 15 {
-                    horizon = max(horizon, candidate)
-                    break
-                }
-                index += 1
-            }
+            horizon = max(horizon, shellSupportedHorizon(anchorDepths))
         }
         guard horizon > 0 else { return DepthAnythingProcessor.minimumCalibratedDepth }
         return min(configuration.maximumIntegrationDepth,

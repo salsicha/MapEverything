@@ -106,9 +106,15 @@ struct Scan6ReplayTests {
     }
 
     /// Along-ray far-field disagreement between consecutive frames: 2-degree
-    /// direction bins from the shared origin, |difference of median ranges|
-    /// pooled over pairs, restricted to bins whose surfaces sit beyond 6 m.
-    static func farFieldSpread(pointSets: [[SIMD3<Float>]], origin: SIMD3<Float>) -> (median: Double, p90: Double, bins: Int) {
+    /// direction bins from the shared origin, one (surface depth, |difference
+    /// of median ranges|) pair per matched bin, restricted to bins whose
+    /// surfaces sit beyond 6 m. The depth (the pair's deeper median) lets
+    /// callers stratify spread by range, because absolute along-ray spread
+    /// scales with depth (~4-5% of range on this recording) and a horizon
+    /// change therefore shifts the pooled statistic by composition alone.
+    static func farFieldDisagreements(
+        pointSets: [[SIMD3<Float>]], origin: SIMD3<Float>
+    ) -> [(depth: Double, difference: Double)] {
         func binned(_ points: [SIMD3<Float>]) -> [Int: [Float]] {
             var bins: [Int: [Float]] = [:]
             for point in points {
@@ -121,7 +127,7 @@ struct Scan6ReplayTests {
             }
             return bins
         }
-        var differences: [Double] = []
+        var disagreements: [(depth: Double, difference: Double)] = []
         let allBins = pointSets.map(binned)
         for index in 1..<allBins.count {
             let a = allBins[index - 1], b = allBins[index]
@@ -130,12 +136,20 @@ struct Scan6ReplayTests {
                 let ma = Double(ranges.sorted()[ranges.count / 2])
                 let mb = Double(other.sorted()[other.count / 2])
                 guard max(ma, mb) > 6 else { continue }
-                differences.append(abs(ma - mb))
+                disagreements.append((max(ma, mb), abs(ma - mb)))
             }
         }
+        return disagreements
+    }
+
+    static func spreadStatistics(_ differences: [Double]) -> (median: Double, p90: Double, bins: Int) {
         guard !differences.isEmpty else { return (0, 0, 0) }
         let sorted = differences.sorted()
         return (sorted[sorted.count / 2], sorted[min(sorted.count - 1, sorted.count * 9 / 10)], sorted.count)
+    }
+
+    static func farFieldSpread(pointSets: [[SIMD3<Float>]], origin: SIMD3<Float>) -> (median: Double, p90: Double, bins: Int) {
+        spreadStatistics(farFieldDisagreements(pointSets: pointSets, origin: origin).map(\.difference))
     }
 
     static func calibratedPoints(
@@ -217,10 +231,27 @@ struct Scan6ReplayTests {
                 _ = await map.integrate(colored, calibrationSource: result.source)
             }
         }
-        let replay = Self.farFieldSpread(pointSets: replayPoints, origin: origin)
+        let replayDisagreements = Self.farFieldDisagreements(pointSets: replayPoints, origin: origin)
+        let replay = Self.spreadStatistics(replayDisagreements.map(\.difference))
+
+        // Depth-stratified view: the pre-fix pipeline capped integration at
+        // ~8.8 m z (surfaces to ~10.6 m range), so its 0.396 m median spread
+        // was measured over a 6-11 m population. The horizon fixes admit
+        // surfaces past 11 m whose absolute spread scales with range; only
+        // the like-for-like 6-11 m stratum can say whether calibration
+        // consistency itself regressed.
+        let nearStratum = Self.spreadStatistics(
+            replayDisagreements.filter { $0.depth <= 11 }.map(\.difference))
+        let farStratum = Self.spreadStatistics(
+            replayDisagreements.filter { $0.depth > 11 }.map(\.difference))
+        let fractional = replayDisagreements.map { $0.difference / $0.depth }.sorted()
+        let fractionalMedian = fractional.isEmpty ? 0 : fractional[fractional.count / 2]
 
         print("scan6 replay: baseline far-field spread median \(baseline.median) p90 \(baseline.p90) (\(baseline.bins) bins)")
         print("scan6 replay: pipeline far-field spread median \(replay.median) p90 \(replay.p90) (\(replay.bins) bins)")
+        print("scan6 replay: 6-11 m stratum median \(nearStratum.median) p90 \(nearStratum.p90) (\(nearStratum.bins) bins)")
+        print("scan6 replay: >11 m stratum median \(farStratum.median) p90 \(farStratum.p90) (\(farStratum.bins) bins)")
+        print("scan6 replay: fractional spread median \(fractionalMedian)")
         print("scan6 replay: dropped \(dropped)/20, joint/lidar \(sources.filter { $0 == .lidar }.count), propagated \(sources.filter { $0 == .meshPropagated }.count)")
         print("scan6 replay: calibration time total \(calibrationTime) for \(20 - dropped) frames")
 
@@ -228,6 +259,44 @@ struct Scan6ReplayTests {
         try #require(replay.bins > 50, "Replay must retain enough far-field coverage to measure")
         #expect(replay.median < baseline.median * 0.7,
                 "Far-field inter-frame spread must drop by at least 30% (got \(replay.median) vs \(baseline.median))")
+
+        // LAYERING GUARD, stratified. The pre-horizon-fix pipeline measured
+        // 0.396 median / 1.475 p90 — but over a population its ~8.8-11 m
+        // caps had already cropped to ~6-11 m. The horizon fixes now keep
+        // the 11-21 m field those caps deleted, and absolute along-ray
+        // disagreement scales with range, so the pooled statistic rises by
+        // composition (measured 0.68/2.95 pooled, 1.92/3.98 in the >11 m
+        // stratum) without any change in like-for-like consistency. The
+        // guard therefore pins the 6-11 m stratum, where the fixes measure
+        // 0.469/1.508 against the pre-fix 0.396/1.475 (p90 within 2%): a
+        // breach here — not a deeper population, the SAME band getting
+        // noisier — is reintroduced layering and must fail the suite.
+        // Slack is deliberately one-small-step wide, not one-more-creep
+        // wide: the horizon fixes already moved this median +18% (0.396 ->
+        // 0.469) through legitimate composition effects at the bin level,
+        // and the chained-visibility continuity step is sized at the same
+        // ~5%-of-depth scale as the far-field noise, so a further creep of
+        // that magnitude is exactly the signature of depth-continuous
+        // ghost layering becoming calibration-visible. It must fail the
+        // suite, not ship inside a 17% margin. (Track this median in trend
+        // dashboards if it starts walking upward in small steps.)
+        try #require(nearStratum.bins > 400, "The 6-11 m stratum must stay well populated")
+        #expect(nearStratum.median < 0.50,
+                "6-11 m far-field spread median regressed to \(nearStratum.median) (pre-fix 0.396, post-fix 0.469)")
+        #expect(nearStratum.p90 < 1.65,
+                "6-11 m far-field spread p90 regressed to \(nearStratum.p90) (pre-fix 1.475, post-fix 1.508)")
+        // The newly admitted band rides the model's ~5-13% far-field noise;
+        // TSDF fusion absorbs it today (replayFusesIntoTSDF pins one bounded
+        // surface). If it breaches 2.2 m the horizon is growing on evidence
+        // too weak to fuse — blanket trust by another name. The p90 guard
+        // watches the tail the median cannot see: a bimodal ~1.4 m
+        // family-flip skin riding this stratum moves the p90 well before
+        // it moves the median.
+        try #require(farStratum.bins > 100, "The >11 m stratum must exist post-fix")
+        #expect(farStratum.median < 2.2,
+                ">11 m far-field spread median \(farStratum.median) exceeds the fusible band (measured 1.92 at fix time)")
+        #expect(farStratum.p90 < 4.5,
+                ">11 m far-field spread p90 regressed to \(farStratum.p90) (measured 3.98 at fix time)")
     }
 
     @Test("Confidence-gated device LiDAR cannot pin the integration horizon")
@@ -293,12 +362,15 @@ struct Scan6ReplayTests {
         }
         print("scan6 gated: maximum cap \(maximumCap) m, vertices beyond 8 m: \(farVertices)")
         // The pooled-percentile cap PINNED at a 5.8-6.0 m fixed point with
-        // zero far vertices under this degradation. The shell-based horizon
-        // must escape it: the 20-frame clip reaches ~8.2 m and is still
-        // climbing (each frontier shell needs 2-4 frames of anchor mass), so
-        // multi-minute device scans converge to the 12 m ceiling.
-        #expect(maximumCap >= 8, "The horizon must escape the LiDAR fixed point (got \(maximumCap))")
-        #expect(farVertices > 200, "Far geometry must survive confidence-gated LiDAR (got \(farVertices))")
+        // zero far vertices under this degradation, and the raw-incidence
+        // anchor weights plus splat-occluded visibility still held the
+        // 20-frame clip to ~8.2 m. With floored anchor accrual (3 sightings
+        // at grazing incidence) and chained-surface visibility the same clip
+        // now saturates the configured 18 m ceiling within the recording and
+        // carries five-digit far-vertex counts — the multi-minute-scan
+        // convergence, reached in 20 frames.
+        #expect(maximumCap >= 16, "The horizon must climb clear of the LiDAR fixed point toward the 18 m ceiling (got \(maximumCap))")
+        #expect(farVertices > 5_000, "Far geometry must survive confidence-gated LiDAR (got \(farVertices))")
     }
 
     @Test("The TSDF fuses the calibrated scan into one bounded surface")
@@ -365,11 +437,28 @@ struct Scan6ReplayTests {
         try #require(!fused.isEmpty)
         #expect(fused.vertices.count > 5_000)
         // Everything the fused surface contains stays inside the supported
-        // integration range: the 12 m cap is Z-DEPTH, which at the frustum
-        // corner (half-FOV ~36/28 degrees) is ~15.5 m Euclidean, plus the
-        // truncation band and camera motion.
+        // integration range, derived from the configured ceiling instead of
+        // a magic number: the maximumIntegrationDepth cap is Z-DEPTH, which
+        // stretches by the frustum-corner factor sqrt(1 + (cx/fx)^2 +
+        // (cy/fy)^2) in Euclidean range (~1.35 here, so 18 m z -> ~24.3 m),
+        // plus TSDFVolume.truncation's 0.8 m band ceiling and the camera's
+        // own motion across the scan.
         let origin = fixture.frames[0].transform.columns.3
         let cameraOrigin = SIMD3<Float>(origin.x, origin.y, origin.z)
-        #expect(fused.vertices.allSatisfy { simd_length($0 - cameraOrigin) < 16.5 })
+        let ceiling = DepthCalibrationPipeline.Configuration.default.maximumIntegrationDepth
+        let fx = fixture.intrinsics[0][0], fy = fixture.intrinsics[1][1]
+        let cx = fixture.intrinsics[2][0], cy = fixture.intrinsics[2][1]
+        let cornerX = max(cx, Float(fixture.imageResolution.width) - cx) / fx
+        let cornerY = max(cy, Float(fixture.imageResolution.height) - cy) / fy
+        let cornerFactor = (1 + cornerX * cornerX + cornerY * cornerY).squareRoot()
+        let maxTranslation = fixture.frames.map {
+            simd_length(SIMD3($0.transform.columns.3.x, $0.transform.columns.3.y,
+                              $0.transform.columns.3.z) - cameraOrigin)
+        }.max() ?? 0
+        let bound = ceiling * cornerFactor + 0.8 + maxTranslation
+        let maxReach = fused.vertices.map { simd_length($0 - cameraOrigin) }.max() ?? 0
+        print("scan6 tsdf: max Euclidean reach \(maxReach) m, ceiling-derived bound \(bound) m")
+        #expect(fused.vertices.allSatisfy { simd_length($0 - cameraOrigin) < bound },
+                "Fused vertices must stay inside the supported range (max \(maxReach) vs bound \(bound))")
     }
 }

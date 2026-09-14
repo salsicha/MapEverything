@@ -179,6 +179,92 @@ struct MeshDepthPropagationTests {
         #expect(visible == nil)
     }
 
+    @Test("A grazing ground plane keeps deep anchors visible; a frontal occluder still hides what it covers")
+    func grazingGroundPlaneKeepsDeepAnchorsVisible() throws {
+        let width = 518, height = 392
+        let scaleX = Float(width) / Float(imageResolution.width)
+        let scaleY = Float(height) / Float(imageResolution.height)
+        let fx = intrinsics[0][0] * scaleX
+        let fy = intrinsics[1][1] * scaleY
+        let cx = intrinsics[2][0] * scaleX
+        let cy = intrinsics[2][1] * scaleY
+
+        // Street-like geometry on the production anchor grid (0.2 m cells):
+        // a ground plane 1.5 m below the camera receding from 3.4 to 16 m.
+        // At this incidence one 8-px z-buffer cell near the horizon spans
+        // meters of ground depth, so a near cell's splat footprint covers
+        // the rays of deeper cells of the SAME surface — the regime that
+        // killed the street scan's far anchors.
+        let cameraHeight: Float = 1.5
+        var ground: [SIMD3<Float>] = []
+        var inFrustumDepths: [Float] = []
+        for zi in stride(from: Float(3.4), through: 16, by: 0.2) {
+            let halfWidth = 0.7 * zi
+            for xi in stride(from: -halfWidth, through: halfWidth, by: 0.2) {
+                let camera = SIMD4<Float>(xi, -cameraHeight, -zi, 1)
+                let world = transform * camera
+                ground.append(SIMD3<Float>(world.x, world.y, world.z))
+                let px = Int((cx + fx * xi / zi).rounded())
+                let py = Int((cy + fy * cameraHeight / zi).rounded())
+                if px >= 0, px < width, py >= 0, py < height { inFrustumDepths.append(zi) }
+            }
+        }
+
+        let visible = MeshDepthPropagation.visibleAnchorDepths(
+            anchors: ground, depthWidth: width, depthHeight: height,
+            intrinsics: intrinsics, imageResolution: imageResolution, transform: transform
+        )
+        let deepestInFrustum = try #require(inFrustumDepths.max())
+        let deepestVisible = visible.max() ?? 0
+        let farShellCount = visible.filter { $0 >= 0.7 * deepestInFrustum }.count
+        print(String(
+            format: "grazing ground: inFrustum=%d (deepest %.2f) visible=%d (deepest %.2f) farShell=%d",
+            inFrustumDepths.count, deepestInFrustum, visible.count, deepestVisible, farShellCount
+        ))
+        #expect(Float(visible.count) >= 0.85 * Float(inFrustumDepths.count),
+                "Grazing same-surface anchors must survive the z-buffer: \(visible.count)/\(inFrustumDepths.count)")
+        #expect(deepestVisible >= 0.95 * deepestInFrustum,
+                "The deep frontier must stay visible: deepest \(deepestVisible) of \(deepestInFrustum)")
+        // The far shell that feeds supportCap's anchor branch (>= 10 within
+        // [0.7D, D]) and the >= 30 joint-fit gate must survive comfortably.
+        #expect(farShellCount >= 30)
+
+        // The per-cell winner sampling (the pseudo-sample side of the same
+        // z-buffer) must also keep deep cells alive past the joint-fit gate.
+        var ungated = MeshDepthPropagation.Configuration()
+        ungated.minimumSamples = 1
+        ungated.minimumCoverage = 0
+        let winners = try #require(MeshDepthPropagation.visibleAnchors(
+            anchors: ground, depthWidth: width, depthHeight: height,
+            intrinsics: intrinsics, imageResolution: imageResolution,
+            transform: transform, configuration: ungated
+        ))
+        let deepWinners = winners.filter { $0.depth > 8 }.count
+        print("grazing ground: winners=\(winners.count) deepWinners(>8m)=\(deepWinners)")
+        #expect(deepWinners >= 30)
+
+        // A detached frontal occluder — a 2.5 m wall standing on the ground
+        // at 4 m, spanning the full frustum width — must still hide every
+        // ground anchor behind it: continuity chaining may follow a surface,
+        // never jump a real depth gap.
+        var walled = ground
+        for yi in stride(from: -cameraHeight, through: 1.0, by: 0.2) {
+            for xi in stride(from: Float(-2.7), through: 2.7, by: 0.2) {
+                let world = transform * SIMD4<Float>(xi, yi, -4, 1)
+                walled.append(SIMD3<Float>(world.x, world.y, world.z))
+            }
+        }
+        let visibleWithWall = MeshDepthPropagation.visibleAnchorDepths(
+            anchors: walled, depthWidth: width, depthHeight: height,
+            intrinsics: intrinsics, imageResolution: imageResolution, transform: transform
+        )
+        let deepestWithWall = visibleWithWall.max() ?? 0
+        print(String(format: "with wall: visible=%d deepest=%.2f", visibleWithWall.count, deepestWithWall))
+        #expect(deepestWithWall < 5,
+                "Ground behind the 4 m wall must stay hidden (deepest visible \(deepestWithWall))")
+        #expect(!visibleWithWall.isEmpty)
+    }
+
     @Test("Too few anchors refuse to calibrate")
     func rejectsInsufficientSamples() {
         let width = 518, height = 392

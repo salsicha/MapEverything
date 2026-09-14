@@ -111,6 +111,86 @@ struct AccumulatedDepthMeshTests {
         #expect(await map.calibrationAnchors().count == 3)
     }
 
+    /// Dense ground plane at y = -1.5 spanning 6-9 m ahead of a camera at
+    /// the origin: every face's incidence cosine is 1.5/slantRange, i.e.
+    /// 0.16-0.24 — the grazing far-field regime of a street scan.
+    /// `duplicated` appends a second copy one centimetre away so a single
+    /// frame also exercises dense same-frame welds into the same anchor
+    /// cells.
+    private func grazingGroundPlane(color: SIMD3<UInt8>,
+                                    duplicated: Bool = false) -> MeshGenerator.DepthAnythingMeshSnapshot {
+        let columns = 9, rows = 8
+        var vertices: [SIMD3<Float>] = []
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let x = -1 + 2 * Float(column) / Float(columns - 1)
+                let z = -6 - 3 * Float(row) / Float(rows - 1)
+                vertices.append(SIMD3<Float>(x, -1.5, z))
+            }
+        }
+        var indices: [UInt32] = []
+        for row in 0..<(rows - 1) {
+            for column in 0..<(columns - 1) {
+                let a = UInt32(row * columns + column)
+                let b = a + 1
+                let c = a + UInt32(columns)
+                let d = c + 1
+                indices.append(contentsOf: [a, b, c, b, d, c])
+            }
+        }
+        if duplicated {
+            let base = UInt32(vertices.count)
+            let shifted = vertices.map { $0 + SIMD3<Float>(0.01, 0, 0.01) }
+            let shiftedIndices = indices.map { $0 + base }
+            vertices.append(contentsOf: shifted)
+            indices.append(contentsOf: shiftedIndices)
+        }
+        var descriptor = MeshDescriptor()
+        descriptor.positions = MeshBuffers.Positions(vertices)
+        descriptor.primitives = .triangles(indices)
+        return .init(descriptor: descriptor, vertices: vertices, indices: indices,
+                     colors: Array(repeating: color, count: vertices.count),
+                     cameraPosition: .zero)
+    }
+
+    @Test("A grazing far-field ground plane matures anchor cells in three sightings")
+    func grazingGroundPlaneMaturesWithinThreeFrames() async {
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(grazingGroundPlane(color: red))
+        #expect(await map.calibrationAnchors().isEmpty)
+        _ = await map.integrate(grazingGroundPlane(color: red))
+        // Floored sightings weigh 0.5: two frames reach 1.0 < 1.5, so
+        // grazing geometry still cannot mature on two sightings...
+        #expect(await map.calibrationAnchors().isEmpty)
+        _ = await map.integrate(grazingGroundPlane(color: red))
+        let anchors = await map.calibrationAnchors()
+        // ...but the third crosses the threshold exactly (3 x 0.5 = 1.5).
+        // The raw cosines here are 0.16-0.24, which without the incidence
+        // floor would demand 7-10 sightings and starve the far field of
+        // calibration references (all 72 plane cells mature here).
+        #expect(anchors.count >= 60)
+        #expect(anchors.allSatisfy { abs($0.y + 1.5) < 0.01 && $0.z <= -5.99 && $0.z >= -9.01 })
+        // The deepest row (9 m slant range) matured too — the band the
+        // street scan's supportCap horizon needs anchors in.
+        #expect(anchors.contains { simd_length($0) > 8.5 })
+    }
+
+    @Test("One frame can never promote anchor cells, floored weights included")
+    func singleFrameCannotPromoteRegardlessOfFloor() async {
+        // Grazing regime: the incidence floor lifts each sighting to 0.5,
+        // and the duplicated copy re-hits the same anchor cells within the
+        // frame; once-per-cell-per-frame accrual caps the frame's deposit
+        // at 0.5 < 1.5 per cell.
+        let grazing = AccumulatedDepthMesh()
+        _ = await grazing.integrate(grazingGroundPlane(color: red, duplicated: true))
+        #expect(await grazing.calibrationAnchors().isEmpty)
+        // Frontal regime: the certificate weight clamps at 1 < 1.5, so even
+        // a perfect single sighting cannot fake a second frame.
+        let frontal = AccumulatedDepthMesh()
+        _ = await frontal.integrate(wall(z: 10, color: red))
+        #expect(await frontal.calibrationAnchors().isEmpty)
+    }
+
     @Test("Propagated frames refresh anchored color but never move anchored geometry")
     func fallbackFramesDoNotMoveAnchoredVertices() async throws {
         let map = AccumulatedDepthMesh()
@@ -324,6 +404,87 @@ struct AccumulatedDepthMeshTests {
         let mesh = await map.snapshot()
         #expect(mesh.vertices.contains { $0.z == -9 })
         #expect(!mesh.vertices.contains { $0.z == -6 })
+    }
+
+    @Test("The certificate drain fires at the calibration-inlier margin, inside the carve tolerance")
+    func certificateDrainFiresInsideCarveTolerance() async {
+        // Anchors matured at 9.2 m, then a frame measures the same rays'
+        // surface at 10 m. The 0.8 m contradiction is INSIDE the carve
+        // tolerance (max(0.3, 0.15*9.2) = 1.38 — geometry must survive:
+        // it could be honest noise) but OUTSIDE the calibration-inlier
+        // drain margin (max(0.3, 0.08*9.2) = 0.74): a fit consistent with
+        // this frame would reject the stored depth, so the cells must stop
+        // testifying. This is the exact gap a calibration-family-flip
+        // ghost skin (11-17% of depth in front of the true surface) hides
+        // in: without the drain, a matured ghost could never be demoted.
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(z: -9.2, color: red))
+        _ = await map.integrate(triangle(z: -9.2, color: red))
+        #expect(await map.calibrationAnchors().count == 3)
+        _ = await map.integrate(wall(z: 10, color: red))
+        #expect(await map.calibrationAnchors().isEmpty,
+                "A certificate contradicted at the inlier margin must drain")
+        #expect(await map.snapshot().vertices.contains { $0.z == -9.2 },
+                "The geometry itself stays under the carve tolerance's protection")
+    }
+
+    @Test("The certificate drain spares anchors inside the calibration-inlier margin")
+    func certificateDrainSparesInlierAnchors() async {
+        // 9.7 m against a 10 m measurement: the 0.3 m residual is honest
+        // inter-frame noise (max(0.3, 0.08*9.7) = 0.78 margin), so the
+        // anchors keep serving.
+        let map = AccumulatedDepthMesh()
+        _ = await map.integrate(triangle(z: -9.7, color: red))
+        _ = await map.integrate(triangle(z: -9.7, color: red))
+        #expect(await map.calibrationAnchors().count == 3)
+        _ = await map.integrate(wall(z: 10, color: red))
+        #expect(await map.calibrationAnchors().count == 3)
+    }
+
+    /// A frame that saw a small real surface plus beyond-cap content on the
+    /// central rays: no geometry there, only clamped carrier points at the
+    /// 12 m cap, exactly what MeshGenerator emits for a street-canyon
+    /// opening or skyline.
+    private func openBackgroundFrame(color: SIMD3<UInt8>) -> MeshGenerator.DepthAnythingMeshSnapshot {
+        let vertices = [SIMD3<Float>(-0.9, 0, -2), SIMD3<Float>(-0.7, 0, -2), SIMD3<Float>(-0.9, 0.2, -2)]
+        var descriptor = MeshDescriptor()
+        descriptor.positions = MeshBuffers.Positions(vertices)
+        descriptor.primitives = .triangles([0, 1, 2])
+        var intrinsics = matrix_identity_float3x3
+        intrinsics[0][0] = 100
+        intrinsics[1][1] = 100
+        intrinsics[2][0] = 50
+        intrinsics[2][1] = 50
+        var carriers: [SIMD3<Float>] = []
+        for x in stride(from: Float(-4), through: 4, by: 0.5) {
+            for y in stride(from: Float(-4), through: 4, by: 0.5) {
+                carriers.append(SIMD3<Float>(x, y, -12))
+            }
+        }
+        return .init(descriptor: descriptor, vertices: vertices, indices: [0, 1, 2],
+                     colors: Array(repeating: color, count: 3),
+                     cameraPosition: .zero,
+                     cameraTransform: matrix_identity_float4x4,
+                     intrinsics: intrinsics,
+                     imageResolution: CGSize(width: 100, height: 100),
+                     beyondCapCarriers: carriers)
+    }
+
+    @Test("Beyond-cap carriers carve phantoms on open-background rays")
+    func beyondCapCarriersCarveOpenBackgroundPhantoms() async {
+        let map = AccumulatedDepthMesh()
+        // Phantom at 5 m on rays whose true content lies past the cap.
+        _ = await map.integrate(triangle(z: -5, color: green),
+                                calibrationSource: .meshPropagated)
+        #expect(await map.snapshot().vertices.contains { $0.z == -5 })
+        for _ in 0..<6 {
+            _ = await map.integrate(openBackgroundFrame(color: red))
+        }
+        let mesh = await map.snapshot()
+        #expect(!mesh.vertices.contains { $0.z == -5 },
+                "The clamped carrier at the cap proves the phantom's ray empty")
+        // Carriers are evidence, never geometry.
+        #expect(!mesh.vertices.contains { $0.z < -10 })
     }
 
     @Test("Carved-out anchors stop serving as calibration references")

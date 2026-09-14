@@ -9,3 +9,4 @@ bags/
 xcuserdata/
 DerivedData/
 tools/promptda/*.mlpackage
+tools/replay_fixture/decoded_new.npz

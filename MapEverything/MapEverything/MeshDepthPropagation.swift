@@ -45,10 +45,66 @@ nonisolated enum MeshDepthPropagation {
         let depth: Float
     }
 
+    /// One splatted anchor footprint, kept so the occlusion pass can replay
+    /// the z-buffer population in depth order.
+    private struct SplatRecord {
+        var cellX: Int32
+        var cellY: Int32
+        var radius: Int32
+        var depth: Float
+    }
+
+    /// Grazing-aware occlusion horizon: per z-buffer cell, the deepest splat
+    /// CONTINUOUSLY connected to the cell's nearest splat. Testing anchors
+    /// against the nearest splat alone kills far anchors of the same receding
+    /// surface — a street at grazing incidence — because a near cell's
+    /// footprint covers the rays of deeper cells of that surface with a depth
+    /// gap far beyond the visibility tolerance (at 8 m on a ground plane one
+    /// 8-px cell spans ~1 m of surface depth). A continuous surface, however,
+    /// populates every intermediate depth of the cell at the anchor map's own
+    /// quantization (one anchor per `anchorFootprint`), while a genuinely
+    /// detached occluder pair — a wall hiding separate geometry — leaves a
+    /// gap. Walking each cell's splat depths in ascending order and stopping
+    /// at the first gap wider than the continuity step therefore follows
+    /// grazing surfaces to their true depth yet still halts at the near side
+    /// of any detached surface.
+    private static func chainedSurfaceReach(
+        splats: [SplatRecord],
+        nearestDepth: [Float],
+        cellsW: Int,
+        cellsH: Int,
+        anchorFootprint: Float
+    ) -> [Float] {
+        var reach = nearestDepth
+        let ordered = splats.sorted { $0.depth < $1.depth }
+        // Adjacent same-surface anchors differ by up to ~√2 footprints of
+        // depth (diagonal grid steps); the 5% term mirrors the visibility
+        // tolerance so deep links tolerate the same fractional noise.
+        let stepFloor = 1.5 * anchorFootprint
+        for splat in ordered {
+            let step = max(stepFloor, 0.05 * splat.depth)
+            let radius = Int(splat.radius)
+            let cellX = Int(splat.cellX)
+            let cellY = Int(splat.cellY)
+            for y in max(0, cellY - radius)...min(cellsH - 1, cellY + radius) {
+                let rowBase = y * cellsW
+                for x in max(0, cellX - radius)...min(cellsW - 1, cellX + radius) {
+                    let index = rowBase + x
+                    if splat.depth > reach[index], splat.depth <= reach[index] + step {
+                        reach[index] = splat.depth
+                    }
+                }
+            }
+        }
+        return reach
+    }
+
     /// Projects anchors into the relative-depth grid with the same pinhole
     /// convention as MeshGenerator's unprojection, resolves occlusion with a
-    /// footprint-splatted z-buffer, and returns at most one visible anchor per
-    /// coarse cell. Returns nil when the count or coverage gates fail.
+    /// footprint-splatted z-buffer (grazing-aware: same-surface continuity
+    /// extends each cell's occlusion horizon, see chainedSurfaceReach), and
+    /// returns at most one visible anchor per coarse cell. Returns nil when
+    /// the count or coverage gates fail.
     static func visibleAnchors(
         anchors: [SIMD3<Float>],
         depthWidth: Int,
@@ -79,6 +135,8 @@ nonisolated enum MeshDepthPropagation {
 
         var projected: [(x: Int32, y: Int32, depth: Float)] = []
         projected.reserveCapacity(min(anchors.count, 65_536))
+        var splats: [SplatRecord] = []
+        splats.reserveCapacity(min(anchors.count, 65_536))
 
         // Pass 1: project and splat each anchor's physical footprint into the
         // z-buffer, so near surfaces suppress back-surface anchors even in
@@ -106,6 +164,8 @@ nonisolated enum MeshDepthPropagation {
             let radius = min(6, max(1, Int((footprintScale / (depth * Float(down))).rounded())))
             let cellX = px / down
             let cellY = py / down
+            splats.append(SplatRecord(cellX: Int32(cellX), cellY: Int32(cellY),
+                                      radius: Int32(radius), depth: depth))
             for y in max(0, cellY - radius)...min(cellsH - 1, cellY + radius) {
                 for x in max(0, cellX - radius)...min(cellsW - 1, cellX + radius) {
                     let index = y * cellsW + x
@@ -115,14 +175,21 @@ nonisolated enum MeshDepthPropagation {
         }
 
         // Pass 2: an anchor is visible when nothing splatted meaningfully in
-        // front of it in its own cell; keep the nearest visible anchor per
-        // cell so samples stay spread instead of clustering on dense geometry.
+        // front of it in its own cell — where "in front" honors surface
+        // continuity: the occlusion horizon is the deepest splat chained to
+        // the cell's nearest one, so grazing surfaces keep their own far
+        // anchors while detached occluders still suppress. Keep the nearest
+        // visible anchor per cell so samples stay spread instead of
+        // clustering on dense geometry.
+        let reach = chainedSurfaceReach(splats: splats, nearestDepth: cellDepth,
+                                        cellsW: cellsW, cellsH: cellsH,
+                                        anchorFootprint: configuration.anchorFootprint)
         var winnerDepth = [Float](repeating: .infinity, count: cellsW * cellsH)
         var winnerPixel = [Int32](repeating: -1, count: cellsW * cellsH)
         for point in projected {
             let cell = (Int(point.y) / down) * cellsW + Int(point.x) / down
             let tolerance = max(0.10, 0.05 * point.depth)
-            guard point.depth <= cellDepth[cell] + tolerance,
+            guard point.depth <= reach[cell] + tolerance,
                   point.depth < winnerDepth[cell] else { continue }
             winnerDepth[cell] = point.depth
             winnerPixel[cell] = point.y * Int32(depthWidth) + point.x
@@ -178,6 +245,8 @@ nonisolated enum MeshDepthPropagation {
         var cellDepth = [Float](repeating: .infinity, count: cellsW * cellsH)
         var projected: [(cell: Int, depth: Float)] = []
         projected.reserveCapacity(min(anchors.count, 65_536))
+        var splats: [SplatRecord] = []
+        splats.reserveCapacity(min(anchors.count, 65_536))
         let footprintScale = 0.5 * configuration.anchorFootprint * max(abs(fx), abs(fy))
         for anchor in anchors {
             let camera = worldToCamera * SIMD4<Float>(anchor.x, anchor.y, anchor.z, 1)
@@ -194,6 +263,8 @@ nonisolated enum MeshDepthPropagation {
             let cellY = py / down
             projected.append((cellY * cellsW + cellX, depth))
             let radius = min(6, max(1, Int((footprintScale / (depth * Float(down))).rounded())))
+            splats.append(SplatRecord(cellX: Int32(cellX), cellY: Int32(cellY),
+                                      radius: Int32(radius), depth: depth))
             for y in max(0, cellY - radius)...min(cellsH - 1, cellY + radius) {
                 for x in max(0, cellX - radius)...min(cellsW - 1, cellX + radius) {
                     let index = y * cellsW + x
@@ -201,8 +272,13 @@ nonisolated enum MeshDepthPropagation {
                 }
             }
         }
+        // The same grazing-aware horizon as visibleAnchors: the integration
+        // horizon must not be near-biased by same-surface footprint overlap.
+        let reach = chainedSurfaceReach(splats: splats, nearestDepth: cellDepth,
+                                        cellsW: cellsW, cellsH: cellsH,
+                                        anchorFootprint: configuration.anchorFootprint)
         return projected.compactMap { point in
-            point.depth <= cellDepth[point.cell] + max(0.10, 0.05 * point.depth) ? point.depth : nil
+            point.depth <= reach[point.cell] + max(0.10, 0.05 * point.depth) ? point.depth : nil
         }
     }
 
