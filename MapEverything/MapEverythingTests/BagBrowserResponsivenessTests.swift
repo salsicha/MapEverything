@@ -131,4 +131,26 @@ struct BagBrowserResponsivenessTests {
         try await recorder.deleteBagSessionAsync(refreshed)
         #expect(try await recorder.listBagSessionsAsync().isEmpty)
     }
+
+    @Test("Deleting one bag preserves the other saved bags")
+    func deletingOneBagPreservesTheOthers() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let recorder = LocalROS2BagRecorder(baseDirectoryURL: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        recorder.start(sessionID: UUID(), configuration: .init(isEnabled: true, maxChunkBytes: 8_388_608))
+        recorder.stopAndWait()
+        recorder.start(sessionID: UUID(), configuration: .init(isEnabled: true, maxChunkBytes: 8_388_608))
+        recorder.stopAndWait()
+
+        let sessions = try await recorder.listBagSessionsAsync()
+        #expect(sessions.count == 2)
+
+        let deletedSession = try #require(sessions.first)
+        try await recorder.deleteBagSessionAsync(deletedSession)
+
+        let remainingSessions = try await recorder.listBagSessionsAsync()
+        #expect(remainingSessions.count == 1)
+        #expect(remainingSessions.first?.id != deletedSession.id)
+    }
 }

@@ -1110,6 +1110,7 @@ struct LocalROS2BagBrowserView: View {
         Task {
             do {
                 try await recorder.deleteBagSessionAsync(pendingDeletion)
+                sessions.removeAll { $0.id == pendingDeletion.id }
                 await reload()
             } catch {
                 errorMessage = error.localizedDescription
