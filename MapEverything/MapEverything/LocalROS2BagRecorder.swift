@@ -1251,9 +1251,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         // realistic battery-death-mid-scan case), where the default DELETE
         // journal at NORMAL has a documented corruption window, and it lets
         // the read-only preview scanner read concurrently. Each flush
-        // checkpoints with TRUNCATE so the -wal sidecar stays empty between
-        // batches - bags are shared as individual file URLs, so committed
-        // rows must live in the .db3 itself.
+        // checkpoints (PASSIVE) so committed rows migrate into the .db3
+        // itself - bags are shared as individual file URLs - and the final
+        // connection close truncates the -wal sidecar entirely.
         try execute("PRAGMA journal_mode=WAL")
         try execute("PRAGMA synchronous=NORMAL")
         try execute("CREATE TABLE IF NOT EXISTS topics(id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, serialization_format TEXT NOT NULL, offered_qos_profiles TEXT NOT NULL)")
@@ -1471,9 +1471,12 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             consecutiveFlushFailures = 0
             successfulFlushCount += 1
             // Keep committed rows in the .db3 itself (see openChunk's WAL
-            // rationale); an occasional failed checkpoint only defers to the
-            // next one.
-            try? execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            // rationale). PASSIVE never blocks: a TRUNCATE here stalled up
+            // to the full 2 s busy timeout PER FLUSH whenever any reader
+            // connection existed (the preview scanner, or a test harness),
+            // and an occasional incomplete checkpoint only defers pages to
+            // the next one or to the close-time checkpoint.
+            try? execute("PRAGMA wal_checkpoint(PASSIVE)")
 
             let cadenceDue = successfulFlushCount == 1
                 || successfulFlushCount % Self.flushesPerFreeSpaceCheck == 0

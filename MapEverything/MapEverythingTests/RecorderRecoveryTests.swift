@@ -55,12 +55,15 @@ struct RecorderRecoveryTests {
             // SQLite header bytes 18/19 hold the write/read format
             // versions: 2/2 in WAL mode, 1/1 with rollback journals.
             #expect(header.count > 20 && header[18] == 2 && header[19] == 2)
-            // The post-flush TRUNCATE checkpoint must leave committed rows
-            // in the .db3 itself: bags are shared as individual file URLs,
-            // so a non-empty -wal sidecar would silently lose the tail.
-            let walURL = directory.appendingPathComponent("mapeverything_0.db3-wal")
-            let walSize = (try? FileManager.default.attributesOfItem(atPath: walURL.path)[.size] as? NSNumber)?.intValue ?? 0
-            #expect(walSize == 0, "wal sidecar holds \(walSize) bytes after checkpoint")
+            // Bags are shared as individual file URLs, so the .db3 ALONE
+            // must carry the committed rows: read them from a copy made
+            // without the -wal/-shm sidecars, exactly like a recipient of
+            // a shared chunk would.
+            let copyURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("wal-share-check-\(UUID().uuidString).db3")
+            try FileManager.default.copyItem(at: chunkURL, to: copyURL)
+            defer { try? FileManager.default.removeItem(at: copyURL) }
+            #expect(try timestamps(copyURL) == [1])
         }
     }
 
