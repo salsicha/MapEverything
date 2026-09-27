@@ -5,9 +5,9 @@
 </p>
 
 ![iOS](https://img.shields.io/badge/iOS-26.4+-blue.svg?style=for-the-badge&logo=apple)
-![Swift](https://img.shields.io/badge/Swift-5.9-orange.svg?style=for-the-badge&logo=swift)
+![Swift](https://img.shields.io/badge/Swift-6.0-orange.svg?style=for-the-badge&logo=swift)
 ![ARKit](https://img.shields.io/badge/ARKit-LiDAR-black.svg?style=for-the-badge&logo=arkit)
-![ROS2](https://img.shields.io/badge/ROS2-Humble%2FIron-green.svg?style=for-the-badge&logo=ros)
+![ROS2](https://img.shields.io/badge/ROS2-Jazzy-green.svg?style=for-the-badge&logo=ros)
 
 **MapEverything** is a robotics-first mapping payload for iOS. It turns a LiDAR-equipped iPhone or iPad Pro into a lightweight ROS2 sensor node that publishes device pose, low-rate camera frames, GPS, LiDAR point clouds, relative Depth Anything point clouds with overlay calibration, satellite imagery, and DEM/elevation tiles for recording on another ROS2 device.
 
@@ -140,7 +140,7 @@ iOS does not expose broad Wi-Fi access-point scan results or a dependable public
 | Topic Name | ROS 2 Message Type | Update Rate | Description |
 | :--- | :--- | :--- | :--- |
 | `/tf` | `tf2_msgs/msg/TFMessage` | opt-in | Live spatial coordinate frames mapping the relative transform from the mobile `iphone_camera` frame to the world origin `map` frame. |
-| `/mapping/pose` | `geometry_msgs/msg/PoseStamped` | ~10 Hz | Standard 6-DOF SLAM position and orientation tracking. |
+| `/mapping/pose` | `geometry_msgs/msg/PoseStamped` | per ARFrame (~60 Hz) | Standard 6-DOF SLAM position and orientation tracking. |
 | `/mapping/odom` | `nav_msgs/msg/Odometry` | opt-in | Odometry-style pose for robotics consumers. |
 | `/mapping/imu` | `sensor_msgs/msg/Imu` | opt-in | High-fidelity IMU data containing orientation quaternions, angular velocities, and linear accelerations (including gravity). |
 | `/mapping/gps/fix` | `sensor_msgs/msg/NavSatFix` | ~1 Hz | Standard GPS fix, status, and covariance metadata. |
@@ -216,7 +216,7 @@ source install/setup.bash
 ```
 
 #### Step 2: Install the WebSocket Bridge Server
-On your remote Linux workstation or robot computer running **ROS2 (Humble or Iron)**, install the `rosbridge-suite`:
+On your remote Linux workstation or robot computer running **ROS2 (Jazzy, or another recent distro)**, install the `rosbridge-suite`:
 
 ```bash
 sudo apt-get update
