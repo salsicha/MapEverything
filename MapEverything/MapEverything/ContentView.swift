@@ -397,9 +397,26 @@ struct ContentView: View {
         let exportURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MapEverything-scan.usdz")
 
+        // Snapshot a detached copy on the main actor before writing: the
+        // live scene is being rendered (and mutated by Overview toggles)
+        // while the export runs, and the copy also drops the viewer-only
+        // floor, lights, and inspection camera so the USDZ holds just the
+        // scan. clone() shares immutable geometry, so the copy is cheap.
+        let viewerNodeNames: Set<String> = [
+            "inspection_camera",
+            "inspection_floor",
+            "inspection_ambient_light",
+            "inspection_key_light",
+            "inspection_fill_light"
+        ]
+        let exportScene = SCNScene()
+        for child in scene.rootNode.childNodes where !viewerNodeNames.contains(child.name ?? "") {
+            exportScene.rootNode.addChildNode(child.clone())
+        }
+
         // USDZ export can take seconds on large meshes; keep it off the main
-        // thread. The scene is handed off for the duration of the write.
-        let sceneBox = UncheckedSendable(scene)
+        // thread.
+        let sceneBox = UncheckedSendable(exportScene)
         Task.detached(priority: .userInitiated) {
             try? FileManager.default.removeItem(at: exportURL)
             let succeeded = sceneBox.value.write(to: exportURL, options: nil, delegate: nil, progressHandler: nil)

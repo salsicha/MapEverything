@@ -280,8 +280,16 @@ class ARViewController: UIViewController, ARSessionDelegate {
     /// per scan before the error surfaces to the user.
     private var sessionFailureRestarts = 0
 
+    /// Thermal warnings the user should act on; composed with priority over
+    /// the per-frame feedback so the next enhanced frame cannot overwrite
+    /// "save your scan" within a second of it appearing.
+    private var thermalFeedback = ""
+
     private func publishTrackingFeedback() {
-        delegate?.didUpdateTrackingFeedback(trackingStateFeedback.isEmpty ? depthMappingFeedback : trackingStateFeedback)
+        let feedback = !thermalFeedback.isEmpty
+            ? thermalFeedback
+            : (trackingStateFeedback.isEmpty ? depthMappingFeedback : trackingStateFeedback)
+        delegate?.didUpdateTrackingFeedback(feedback)
     }
     
     override func viewDidLoad() {
@@ -304,16 +312,21 @@ class ARViewController: UIViewController, ARSessionDelegate {
             MainActor.assumeIsolated {
                 switch state {
                 case .nominal, .fair:
-                    self.pointProcessingInterval = 0.1 // 10Hz
+                    // Restore the documented 5 Hz default - a 0.1 s restore
+                    // here made the effective rate depend on whether a
+                    // thermal transition ever fired.
+                    self.pointProcessingInterval = 0.2
+                    self.thermalFeedback = ""
                 case .serious:
                     self.pointProcessingInterval = 0.25 // 4Hz - Cooldown mode
-                    self.delegate?.didUpdateTrackingFeedback("Device Heating Up (Throttling scan...)")
+                    self.thermalFeedback = "Device Heating Up (Throttling scan...)"
                 case .critical:
                     self.pointProcessingInterval = 0.5 // 2Hz - Emergency mode
-                    self.delegate?.didUpdateTrackingFeedback("Device Too Hot! Save scan soon.")
+                    self.thermalFeedback = "Device Too Hot! Save scan soon."
                 @unknown default:
                     break
                 }
+                self.publishTrackingFeedback()
             }
         }
     }
@@ -397,16 +410,34 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private func resumeWorldTrackingSession() {
         guard let arView else { return }
         guard let configuration = makeWorldTrackingConfiguration() else { return }
-        if let worldMap = loadSavedWorldMapIfEnabled() {
-            // resetTracking with an initialWorldMap is the standard resume
-            // pattern: tracking restarts, then relocalizes into the saved map.
-            configuration.initialWorldMap = worldMap
-            delegate?.didUpdateTrackingFeedback("Resuming previous scan area…")
-        }
         cumulativePointCount = 0
         clearLiveMeshEntities()
-        arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
-        updateVisualizationMode(currentMode)
+        guard UserDefaults.standard.bool(forKey: Self.resumeWorldMapDefaultsKey),
+              let fileURL = Self.worldMapFileURL,
+              FileManager.default.fileExists(atPath: fileURL.path) else {
+            arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+            updateVisualizationMode(currentMode)
+            return
+        }
+        // World-map archives grow to tens of MB with scan size; reading and
+        // unarchiving synchronously froze the UI for the whole Start tap.
+        delegate?.didUpdateTrackingFeedback("Resuming previous scan area…")
+        let scanID = sceneScanID
+        let configurationBox = UncheckedSendable(configuration)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let worldMapBox = UncheckedSendable(Self.loadSavedWorldMap(from: fileURL))
+            await MainActor.run {
+                guard let self, self.sceneScanID == scanID, let arView = self.arView else { return }
+                if let worldMap = worldMapBox.value {
+                    // resetTracking with an initialWorldMap is the standard
+                    // resume pattern: tracking restarts, then relocalizes
+                    // into the saved map.
+                    configurationBox.value.initialWorldMap = worldMap
+                }
+                arView.session.run(configurationBox.value, options: [.resetTracking, .removeExistingAnchors])
+                self.updateVisualizationMode(self.currentMode)
+            }
+        }
     }
 
     private static let resumeWorldMapDefaultsKey = "resumeWorldMapEnabled"
@@ -438,7 +469,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
             let reason = error?.localizedDescription ?? "world map unavailable"
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self.delegate?.didUpdateTrackingFeedback("Couldn't save scan area: \(reason)")
+                    // The feedback banner renders only while scanning, and
+                    // saving happens after Stop - an error alert is the only
+                    // channel the user can actually see here.
+                    self.delegate?.didFailWithError(NSError(domain: "MapEverything", code: 4, userInfo: [
+                        NSLocalizedDescriptionKey: "Couldn't save the scan area for resuming: \(reason)"
+                    ]))
                 }
             }
             return
@@ -451,17 +487,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 try data.write(to: fileURL, options: [.atomic])
             } catch {
                 await MainActor.run {
-                    self?.delegate?.didUpdateTrackingFeedback("Couldn't save scan area: \(error.localizedDescription)")
+                    self?.delegate?.didFailWithError(NSError(domain: "MapEverything", code: 4, userInfo: [
+                        NSLocalizedDescriptionKey: "Couldn't save the scan area for resuming: \(error.localizedDescription)"
+                    ]))
                 }
             }
         }
     }
 
-    private func loadSavedWorldMapIfEnabled() -> ARWorldMap? {
-        guard UserDefaults.standard.bool(forKey: Self.resumeWorldMapDefaultsKey),
-              let fileURL = Self.worldMapFileURL,
-              FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
-
+    nonisolated private static func loadSavedWorldMap(from fileURL: URL) -> ARWorldMap? {
         do {
             let data = try Data(contentsOf: fileURL)
             guard let worldMap = try NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) else {
@@ -563,17 +597,25 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let accumulator = accumulatedDepthMesh
         let tsdf = tsdfVolume
         let scanID = sceneScanID
-        Task { [weak self] in
+        // Detached: with a 2M-vertex cap, the reach reduce and SCNGeometry
+        // construction (vertex/color/normal buffer copies) are hundreds of
+        // ms to seconds of work that used to land on the main thread the
+        // moment the user tapped Stop.
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
             let statistics = await tsdf.statistics
-            let (mesh, fused) = await Self.stoppedSceneMesh(tsdf: tsdf, accumulator: accumulator)
+            let (mesh, fused) = await ARViewController.stoppedSceneMesh(tsdf: tsdf, accumulator: accumulator)
             let reach = mesh.vertices.reduce(Float(0)) { max($0, simd_length($1)) }
             let stopLine = "stop preview fused=\(fused) vertices=\(mesh.vertices.count) triangles=\(mesh.indices.count / 3) blocks=\(statistics.allocatedBlocks) capped=\(statistics.reachedCapacity) maxReach=\(String(format: "%.1f", reach))m"
-            Self.depthLog.log("\(stopLine, privacy: .public)")
+            ARViewController.depthLog.log("\(stopLine, privacy: .public)")
             #if DEBUG
             print("DepthPipeline \(stopLine)")
             #endif
-            guard let self, self.sceneScanID == scanID, !self.isScanning else { return }
-            self.delegate?.didUpdateStoppedInspectionScene(self.makeInspectionScene(from: mesh))
+            let sceneBox = UncheckedSendable(self.makeInspectionScene(from: mesh))
+            await MainActor.run {
+                guard self.sceneScanID == scanID, !self.isScanning else { return }
+                self.delegate?.didUpdateStoppedInspectionScene(sceneBox.value)
+            }
         }
     }
 
@@ -634,7 +676,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         )
     }
 
-    private func makeInspectionScene(from mesh: ColoredSceneMesh) -> SCNScene? {
+    nonisolated private func makeInspectionScene(from mesh: ColoredSceneMesh) -> SCNScene? {
         guard !mesh.isEmpty else { return nil }
         let scene = SCNScene()
         scene.rootNode.addChildNode(SCNNode(geometry: makeLitInspectionGeometry(
@@ -656,7 +698,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         return scene
     }
 
-    private func makeLitInspectionGeometry(
+    nonisolated private func makeLitInspectionGeometry(
         vertices: [SCNVector3],
         indices: [UInt32],
         tint: UIColor,
@@ -715,7 +757,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         return geometry
     }
 
-    private func inspectionNormals(for vertices: [SCNVector3], indices: [UInt32]) -> [SCNVector3] {
+    nonisolated private func inspectionNormals(for vertices: [SCNVector3], indices: [UInt32]) -> [SCNVector3] {
         guard !vertices.isEmpty else { return [] }
         var accumulated = Array(repeating: SIMD3<Float>(0, 0, 0), count: vertices.count)
 
@@ -1525,6 +1567,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
             guard let configuration = session.configuration ?? makeWorldTrackingConfiguration() else {
                 delegate?.didFailWithError(error)
                 return
+            }
+            if response.deletesWorldMap,
+               let worldTracking = configuration as? ARWorldTrackingConfiguration {
+                // The in-memory configuration still carries the map this
+                // failure just condemned; re-running it unchanged would burn
+                // every restart attempt on the same invalidWorldMap error.
+                worldTracking.initialWorldMap = nil
             }
             sessionFailureRestarts += 1
             delegate?.didUpdateTrackingFeedback("AR session failed — restarting tracking…")
