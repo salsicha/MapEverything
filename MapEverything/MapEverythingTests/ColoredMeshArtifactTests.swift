@@ -27,7 +27,7 @@ struct ColoredMeshArtifactTests {
             vertices: vertices, indices: indices, colors: colors, metadata: [:]
         )
         recorder.recordFinalOverlayMesh(artifact, in: destination)
-        recorder.flushAndWait()
+        recorder.waitForFinalArtifacts()
         let saved = try String(contentsOf: destination.appendingPathComponent(LocalOverlayMeshArtifact.objFileName), encoding: .utf8)
         #expect(saved == artifact.objString())
     }

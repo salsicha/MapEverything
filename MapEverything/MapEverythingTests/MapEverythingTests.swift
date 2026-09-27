@@ -1658,7 +1658,7 @@ struct MapEverythingTests {
             ),
             in: targetDirectoryURL
         )
-        recorder.flushAndWait()
+        recorder.waitForFinalArtifacts()
 
         let session = try #require(try recorder.listBagSessions().first)
         #expect(session.files.contains { $0.name == LocalOverlayMeshArtifact.objFileName && $0.kind == .overlayMesh })

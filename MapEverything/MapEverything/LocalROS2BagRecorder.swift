@@ -151,12 +151,11 @@ nonisolated struct LocalOverlayMeshArtifact: Sendable {
     }
 
     private static func format(_ value: Float) -> String {
-        let finiteValue = value.isFinite ? value : 0
-        return String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), Double(finiteValue))
+        SixDecimalFormat.string(value)
     }
 
     private static func formatColor(_ channel: UInt8) -> String {
-        String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), Double(channel) / 255.0)
+        SixDecimalFormat.colorChannel[Int(channel)]
     }
 }
 
@@ -230,8 +229,39 @@ nonisolated struct LocalPointCloudArtifact: Sendable {
     }
 
     private static func format(_ value: Float) -> String {
-        let finiteValue = value.isFinite ? value : 0
-        return String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), Double(finiteValue))
+        SixDecimalFormat.string(value)
+    }
+}
+
+/// `String(format: "%.6f", locale: POSIX)` for Float inputs, without the
+/// per-call formatting machinery (and the per-call Locale allocation) that
+/// made exporting a street-scale mesh take tens of seconds. Exact: a Float
+/// has a 24-bit significand and 1e6 = 2^6 * 15625 needs 14 bits, so
+/// Double(value) * 1e6 is computed without rounding, and round-half-even on
+/// that exact product is what libc's correctly rounded printf produces.
+nonisolated enum SixDecimalFormat {
+    private static let posix = Locale(identifier: "en_US_POSIX")
+
+    static func string(_ value: Float) -> String {
+        let double = Double(value.isFinite ? value : 0)
+        let scaled = abs(double) * 1_000_000
+        guard scaled < 9e15 else {
+            return String(format: "%.6f", locale: posix, double)
+        }
+        let units = UInt64(scaled.rounded(.toNearestOrEven))
+        let fraction = String(units % 1_000_000)
+        var result = double.sign == .minus ? "-" : ""
+        result += String(units / 1_000_000)
+        result += "."
+        result += String(repeating: "0", count: 6 - fraction.count)
+        result += fraction
+        return result
+    }
+
+    /// 0-255 channel as a 0-1 float with six decimals, precomputed with the
+    /// reference formatter so it is byte-identical by construction.
+    static let colorChannel: [String] = (0...255).map {
+        String(format: "%.6f", locale: posix, Double($0) / 255.0)
     }
 }
 
@@ -519,6 +549,12 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
 
     private let queue: DispatchQueue
     private let previewQueue: DispatchQueue
+    /// Final-artifact encoding (OBJ/PLY/LAS of a whole scan) runs here, never
+    /// on the recording queue: start() is a queue.sync from the main thread,
+    /// so export work parked on the recording queue froze the Start button
+    /// for as long as the previous scan took to encode.
+    private let exportQueue = DispatchQueue(label: "com.mapeverything.localROS2BagExport", qos: .utility)
+    private let pendingExports = DispatchGroup()
     private let listingQueue = DispatchQueue(label: "com.mapeverything.localROS2BagListing", qos: .utility)
     private let fileManager: FileManager
     private let baseDirectoryURL: URL?
@@ -838,39 +874,31 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     func recordFinalOverlayMesh(_ artifact: LocalOverlayMeshArtifact, in directoryURL: URL? = nil) {
-        queue.async {
-            guard !artifact.isEmpty else { return }
-            defer { self.publishLibraryChange() }
-            // An explicit destination belongs to an already-recorded scan.
-            // Its background finalization can outlive the Save Local setting.
-            guard directoryURL != nil || self.configuration.isEnabled,
-                  let targetDirectoryURL = directoryURL ?? self.bagDirectoryURL else { return }
-
+        guard !artifact.isEmpty else { return }
+        exportFinalArtifact(in: directoryURL) { targetDirectoryURL in
+            let objURL = targetDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.objFileName)
+            let metadataURL = targetDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.metadataFileName)
             do {
-                let objURL = targetDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.objFileName)
-                let metadataURL = targetDirectoryURL.appendingPathComponent(LocalOverlayMeshArtifact.metadataFileName)
                 try artifact.objString().write(to: objURL, atomically: true, encoding: .utf8)
                 try artifact.metadataData().write(to: metadataURL, options: [.atomic])
+                return []
             } catch {
-                self.noteError("Failed to write final overlay mesh: \(error.localizedDescription)")
+                return ["Failed to write final overlay mesh: \(error.localizedDescription)"]
             }
         }
     }
 
     func recordFinalPointCloud(_ artifact: LocalPointCloudArtifact, in directoryURL: URL? = nil) {
-        queue.async {
-            guard !artifact.isEmpty else { return }
-            defer { self.publishLibraryChange() }
-            guard directoryURL != nil || self.configuration.isEnabled,
-                  let targetDirectoryURL = directoryURL ?? self.bagDirectoryURL else { return }
-
+        guard !artifact.isEmpty else { return }
+        exportFinalArtifact(in: directoryURL) { targetDirectoryURL in
+            var errors: [String] = []
             do {
                 let plyURL = targetDirectoryURL.appendingPathComponent(LocalPointCloudArtifact.plyFileName)
                 let metadataURL = targetDirectoryURL.appendingPathComponent(LocalPointCloudArtifact.metadataFileName)
                 try artifact.plyString().write(to: plyURL, atomically: true, encoding: .utf8)
                 try artifact.metadataData().write(to: metadataURL, options: [.atomic])
             } catch {
-                self.noteError("Failed to write final point cloud: \(error.localizedDescription)")
+                errors.append("Failed to write final point cloud: \(error.localizedDescription)")
             }
 
             let coloredPoints = artifact.points.map {
@@ -881,12 +909,50 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
                     let lasURL = targetDirectoryURL.appendingPathComponent(LocalPointCloudArtifact.lasFileName)
                     try lasData.write(to: lasURL, options: [.atomic])
                 } catch {
-                    self.noteError("Failed to write final point cloud LAS: \(error.localizedDescription)")
+                    errors.append("Failed to write final point cloud LAS: \(error.localizedDescription)")
                 }
             } else {
-                self.noteError("Failed to encode final point cloud LAS: no finite points.")
+                errors.append("Failed to encode final point cloud LAS: no finite points.")
+            }
+            return errors
+        }
+    }
+
+    /// Resolves the destination on the recording queue (it reads recorder
+    /// state), then encodes and writes on the export queue. Errors hop back
+    /// to the recording queue, which owns lastError.
+    private func exportFinalArtifact(
+        in directoryURL: URL?,
+        _ write: @escaping @Sendable (URL) -> [String]
+    ) {
+        queue.async {
+            // An explicit destination belongs to an already-recorded scan.
+            // Its background finalization can outlive the Save Local setting.
+            guard directoryURL != nil || self.configuration.isEnabled,
+                  let targetDirectoryURL = directoryURL ?? self.bagDirectoryURL else { return }
+            self.pendingExports.enter()
+            self.exportQueue.async {
+                defer {
+                    self.publishLibraryChange()
+                    self.pendingExports.leave()
+                }
+                let errors = write(targetDirectoryURL)
+                guard !errors.isEmpty else { return }
+                self.queue.async {
+                    errors.forEach { self.noteError($0) }
+                }
             }
         }
+    }
+
+    /// Blocks until every final artifact queued so far has been written.
+    /// Never call from the main thread - exports of a large scan take
+    /// seconds; this exists for tests and off-main durability points.
+    func waitForFinalArtifacts() {
+        // Drain the recording queue first so every resolution hop queued
+        // before this call has entered the group.
+        queue.sync {}
+        pendingExports.wait()
     }
 
     private func storageRootURL() throws -> URL {

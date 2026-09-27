@@ -123,7 +123,16 @@ struct BagBrowserResponsivenessTests {
             vertices: [.init(0, 0, 0), .init(1, 0, 0), .init(0, 1, 0)],
             indices: [0, 1, 2], metadata: [:]
         ), in: active.directoryURL)
-        await withCheckedContinuation { continuation in writer.async { continuation.resume() } }
+        // Exports run on their own queue (never the recording queue that
+        // start() syncs on), so wait on the export barrier - off-main.
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                recorder.waitForFinalArtifacts()
+                continuation.resume()
+            }
+        }
+        // The library-change bump is delivered via the main queue.
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
         #expect(recorder.libraryRevision > beforeExport)
         let refreshed = try #require(try await recorder.listBagSessionsAsync().first)
         #expect(refreshed.files.contains { $0.kind == .overlayMesh })

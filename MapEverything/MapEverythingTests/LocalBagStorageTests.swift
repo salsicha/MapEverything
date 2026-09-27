@@ -116,7 +116,7 @@ struct LocalBagStorageTests {
             ),
             in: targetDirectoryURL
         )
-        recorder.flushAndWait()
+        recorder.waitForFinalArtifacts()
 
         let lasURL = targetDirectoryURL.appendingPathComponent(LocalPointCloudArtifact.lasFileName)
         let lasData = try Data(contentsOf: lasURL)
