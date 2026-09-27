@@ -125,8 +125,12 @@ struct RecorderRecoveryTests {
             record(recorder, timestamp: 1)
             recorder.flushAndWait()
             try execute("DROP TRIGGER reject_insert", on: database)
-            // No explicit flush or stop until the retry has persisted the row.
-            let deadline = Date().addingTimeInterval(3)
+            // No explicit flush or stop until the retry has persisted the
+            // row. The deadline is generous because loaded CI runners have
+            // stretched the 0.25 s retry cadence past a 3 s window (the
+            // poll exits as soon as the row lands, so this costs nothing
+            // when healthy).
+            let deadline = Date().addingTimeInterval(20)
             while try timestamps(chunk).isEmpty, Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.02)
             }
@@ -162,7 +166,9 @@ struct RecorderRecoveryTests {
             try execute("CREATE TRIGGER reject_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'test'); END", on: database)
             record(recorder, timestamp: 1)
             recorder.flushAndWait()
-            let deadline = Date().addingTimeInterval(3)
+            // Generous for loaded CI runners; exits the moment the bounded
+            // retries give up.
+            let deadline = Date().addingTimeInterval(20)
             while recorder.isAcceptingRecords, Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.02)
             }
