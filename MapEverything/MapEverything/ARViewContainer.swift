@@ -442,6 +442,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
     private static let resumeWorldMapDefaultsKey = "resumeWorldMapEnabled"
 
+    /// The archive is a geometric fingerprint of the scanned space; turning
+    /// the resume setting off must remove it rather than leaving it behind
+    /// indefinitely (deleting sessions never covered it).
+    static func deleteSavedWorldMapArchive() {
+        guard let url = worldMapFileURL else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     private static var worldMapFileURL: URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
             .appendingPathComponent("MapEverythingWorldMap.armap")

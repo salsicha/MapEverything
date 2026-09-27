@@ -705,6 +705,9 @@ struct ContentView: View {
                     Text("Resume previous scan area")
                         .font(.caption2)
                 }
+                .onChange(of: resumeWorldMapEnabled) { _, enabled in
+                    if !enabled { ARViewController.deleteSavedWorldMapArchive() }
+                }
                 .controlSize(.mini)
 
                 Toggle(isOn: $cborTransportEnabled) {

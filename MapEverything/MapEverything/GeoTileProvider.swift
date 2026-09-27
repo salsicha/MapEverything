@@ -413,6 +413,30 @@ final class GeoTileCache {
         let baseURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
         rootURL = baseURL.appendingPathComponent("GeoTiles", isDirectory: true)
+        Self.pruneExpiredTiles(under: rootURL)
+    }
+
+    /// Cached tile paths are a coarse (tile-granularity) trace of everywhere
+    /// the app ever scanned; without pruning that history accumulated
+    /// indefinitely and outlived every session deletion.
+    nonisolated private static func pruneExpiredTiles(
+        under rootURL: URL, olderThan interval: TimeInterval = 30 * 24 * 3600
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            let fileManager = FileManager.default
+            guard let enumerator = fileManager.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]
+            ) else { return }
+            let cutoff = Date().addingTimeInterval(-interval)
+            for case let url as URL in enumerator {
+                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                      values.isRegularFile == true,
+                      let modified = values.contentModificationDate,
+                      modified < cutoff else { continue }
+                try? fileManager.removeItem(at: url)
+            }
+        }
     }
 
     func load(provider: GeoTileProvider, coordinate: GeoTileCoordinate, time: String?) -> Data? {

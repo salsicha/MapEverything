@@ -8,16 +8,28 @@ track users, or send sensor data to the developer.
 ## Sensor and Mapping Data
 
 MapEverything processes camera images, depth information, LiDAR point clouds,
-device pose, location, Bluetooth observations, current-network Wi-Fi
-information, and diagnostics on the device.
+device pose, motion (IMU) data, location, Bluetooth observations,
+current-network Wi-Fi information, and diagnostics on the device.
 
 If the user enables ROS publishing, selected data is sent only to the ROS2
 recorder endpoint configured by that user. The developer does not operate,
-receive, or have access to that endpoint or its data.
+receive, or have access to that endpoint or its data. The optional session
+and radio streams (off by default) include the device name, an app-install
+identifier (identifierForVendor), and current-network Wi-Fi details
+(SSID/BSSID); recordings that include those streams carry the same values,
+so review them before sharing a bag publicly.
+
+If the user enables Resume Scan Area, an ARKit world-map archive (feature
+points describing the scanned space) is stored on the device; it is deleted
+when the setting is turned off.
 
 If the user enables Save Local, mapping data is stored on the device in local
-bag files. These files leave the device only when the user explicitly shares
-them. Users can delete saved sessions from the app.
+bag files. The app never uploads these files; they leave the device only when
+the user explicitly shares them, or as part of a device or iCloud backup if
+the user has backups enabled. Users can delete saved sessions from the app.
+Satellite/elevation tiles fetched during scanning are cached on the device
+(a coarse, tile-granularity trace of scan locations); the cache is pruned
+automatically after 30 days.
 
 ## Map and Elevation Providers
 
