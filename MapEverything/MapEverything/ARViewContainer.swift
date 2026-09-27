@@ -158,11 +158,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
     }
 
     nonisolated private struct DepthAnythingMappingFrame: @unchecked Sendable {
-        let calibratedPoints: [ColoredPoint]
         let calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration
         let calibrationSource: DepthCalibrationSource
         let relativeDepthSize: CGSize
         let meshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
+        let relative: RelativeDepthMap
+        let integrationDepthCap: Float
     }
 
     var arView: ARView? // Using RealityKit's ARView
@@ -840,8 +841,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         workSession: ScanWorkSession,
         accumulator: AccumulatedDepthMesh,
         tsdf: TSDFVolume,
-        shouldBuildPointCloud: Bool,
-        meshConfiguration: MeshGenerator.DepthAnythingMeshConfiguration
+        shouldBuildPointCloud: Bool
     ) async -> DepthAnythingMappingFrame? {
         // Rate-limit so the model only runs at ~enhancedFrameInterval. A skipped
         // frame leaves the current Depth Anything mesh in place instead of falling
@@ -910,7 +910,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
         print("DepthPipeline \(calibrationLine)")
         #endif
         // Stage 2/4: geometry only enters the map where this frame's
-        // calibration had supporting evidence.
+        // calibration had supporting evidence. The map always integrates the
+        // resolution it was designed for: switching to the full-resolution
+        // overlay grid whenever a stream (or Save Local) had a point-cloud
+        // target quadrupled the fused vertices and made every frame cost
+        // ~2 s on device, 4x below the design rate.
+        let meshConfiguration = MeshGenerator.DepthAnythingMeshConfiguration.accumulatedScene
         let cappedConfiguration = MeshGenerator.DepthAnythingMeshConfiguration(
             step: meshConfiguration.step,
             minimumDepth: meshConfiguration.minimumDepth,
@@ -927,34 +932,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
             configuration: cappedConfiguration, cameraImage: cameraImage,
             exposureOffset: exposureOffset
         )
-        if meshSnapshot != nil {
-            await integrateTSDF(
-                tsdf: tsdf, relative: relative, calibration: calibration,
-                cameraImage: cameraImage, intrinsics: intrinsics,
-                imageResolution: imageResolution, transform: transform,
-                maximumDepth: calibrated.integrationDepthCap,
-                source: calibrated.source, workSession: workSession
-            )
-            guard workSession.isActive, !Task.isCancelled else { return nil }
-        }
-        let calibratedPoints: [ColoredPoint]
-        if shouldBuildPointCloud, let meshSnapshot,
-           meshSnapshot.colors.count == meshSnapshot.vertices.count {
-            // Reuse projection and RGB sampling already done by mesh creation.
-            calibratedPoints = zip(meshSnapshot.vertices, meshSnapshot.colors).map {
-                ColoredPoint(position: $0.0, color: $0.1)
-            }
-        } else if shouldBuildPointCloud {
-            // An isolated valid depth point can exist without any valid faces.
-            calibratedPoints = pointCloudProcessor.processDepthAnythingPointCloud(
-                cameraImage: cameraImage, intrinsics: intrinsics,
-                imageResolution: imageResolution, transform: transform,
-                relativeDepthMap: relative, calibration: calibration
-            )
-        } else {
-            calibratedPoints = []
-        }
-
         await MainActor.run {
             guard workSession.isActive, self.isScanning else { return }
             if calibrationSource == .lidar {
@@ -979,13 +956,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
             }
             self.publishTrackingFeedback()
         }
-        guard !calibratedPoints.isEmpty || meshSnapshot != nil else { return nil }
+        guard shouldBuildPointCloud || meshSnapshot != nil else { return nil }
         return DepthAnythingMappingFrame(
-            calibratedPoints: calibratedPoints,
             calibration: calibration,
             calibrationSource: calibrationSource,
             relativeDepthSize: CGSize(width: CGFloat(relative.width), height: CGFloat(relative.height)),
-            meshSnapshot: meshSnapshot
+            meshSnapshot: meshSnapshot,
+            relative: relative,
+            integrationDepthCap: calibrated.integrationDepthCap
         )
     }
 
@@ -1001,57 +979,41 @@ class ARViewController: UIViewController, ARSessionDelegate {
         transform: simd_float4x4,
         maximumDepth: Float,
         source: DepthCalibrationSource,
-        workSession: ScanWorkSession
-    ) async {
+        workSession: ScanWorkSession,
+        integrateIntoVolume: Bool = true,
+        buildPointCloud: Bool = false
+    ) async -> [ColoredPoint] {
         let width = relative.width
         let height = relative.height
-        var metric = [Float](repeating: .nan, count: width * height)
-        relative.withReadAccess { reader in
-            for y in 0..<height {
-                for x in 0..<width {
-                    if let depth = DepthAnythingProcessor.calibratedMetricDepth(
-                        relativeDepth: reader.value(atX: x, y: y), calibration: calibration
-                    ) {
-                        metric[y * width + x] = depth
-                    }
-                }
-            }
-        }
+        let (metric, tsdfColors) = PointCloudProcessor.metricDepthAndColors(
+            relative: relative, calibration: calibration, cameraImage: cameraImage
+        )
 
-        var tsdfColors: [SIMD3<UInt8>]?
-        if CVPixelBufferGetPlaneCount(cameraImage) >= 2 {
-            CVPixelBufferLockBaseAddress(cameraImage, .readOnly)
-            if let yBase = CVPixelBufferGetBaseAddressOfPlane(cameraImage, 0),
-               let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(cameraImage, 1) {
-                let yPlane = UnsafePointer(yBase.assumingMemoryBound(to: UInt8.self))
-                let cbcrPlane = UnsafePointer(cbcrBase.assumingMemoryBound(to: UInt8.self))
-                let yBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(cameraImage, 0)
-                let cbcrBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(cameraImage, 1)
-                let imageWidth = CVPixelBufferGetWidth(cameraImage)
-                let imageHeight = CVPixelBufferGetHeight(cameraImage)
-                var colors = [SIMD3<UInt8>](repeating: SIMD3(255, 255, 255), count: metric.count)
-                for y in 0..<height {
-                    for x in 0..<width where metric[y * width + x].isFinite {
-                        colors[y * width + x] = PointCloudProcessor.sampleCameraColor(
-                            depthX: x, depthY: y, depthWidth: width, depthHeight: height,
-                            imageWidth: imageWidth, imageHeight: imageHeight,
-                            yPlane: yPlane, yBytesPerRow: yBytesPerRow,
-                            cbcrPlane: cbcrPlane, cbcrBytesPerRow: cbcrBytesPerRow
-                        )
-                    }
-                }
-                tsdfColors = colors
-            }
-            CVPixelBufferUnlockBaseAddress(cameraImage, .readOnly)
+        if integrateIntoVolume {
+            _ = await tsdf.integrate(
+                depth: metric, colors: tsdfColors, width: width, height: height,
+                intrinsics: intrinsics, imageResolution: imageResolution,
+                transform: transform, maximumDepth: maximumDepth,
+                weightScale: source == .meshPropagated
+                    ? AccumulatedDepthMesh.fallbackObservationWeightPenalty : 1,
+                workSession: workSession
+            )
         }
-
-        _ = await tsdf.integrate(
-            depth: metric, colors: tsdfColors, width: width, height: height,
-            intrinsics: intrinsics, imageResolution: imageResolution,
-            transform: transform, maximumDepth: maximumDepth,
-            weightScale: source == .meshPropagated
-                ? AccumulatedDepthMesh.fallbackObservationWeightPenalty : 1,
-            workSession: workSession
+        guard buildPointCloud else { return [] }
+        guard let tsdfColors else {
+            // Only non-biplanar camera buffers lack sampled colors here.
+            return pointCloudProcessor.processDepthAnythingPointCloud(
+                cameraImage: cameraImage, intrinsics: intrinsics,
+                imageResolution: imageResolution, transform: transform,
+                relativeDepthMap: relative, calibration: calibration
+            )
+        }
+        // Every valid pixel at full resolution and uncapped - the semantics
+        // the calibration topic's metadata documents - from the depth and
+        // colors computed above, so no second per-pixel pass is needed.
+        return PointCloudProcessor.backProject(
+            metricDepth: metric, colors: tsdfColors, width: width, height: height,
+            intrinsics: intrinsics, imageResolution: imageResolution, transform: transform
         )
     }
 
@@ -1296,7 +1258,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
             && !isPublishingCameraImage
         let shouldRefreshSurfelVisualization = currentMode == .surfels
             && timestamp - lastSurfelVisualizationTime >= surfelVisualizationInterval
-        let shouldPublishDepthMesh = topicRegistry.isStreamEnabled(.mesh) && bridge.hasPublishOrBufferTarget
 
         if shouldPublishCameraImage {
             lastCameraImagePublishTime = timestamp
@@ -1362,15 +1323,30 @@ class ARViewController: UIViewController, ARSessionDelegate {
                     workSession: workSession,
                     accumulator: accumulator,
                     tsdf: tsdf,
-                    shouldBuildPointCloud: shouldPublishPointCloud || shouldRefreshSurfelVisualization,
-                    meshConfiguration: shouldPublishDepthMesh || shouldPublishPointCloud ? .overlay : .accumulatedScene
+                    shouldBuildPointCloud: shouldPublishPointCloud || shouldRefreshSurfelVisualization
                 )
             } else {
                 mappingFrame = nil
             }
             guard workSession.isActive, !Task.isCancelled else { return }
 
-            if let mappingFrame, let meshSnapshot = mappingFrame.meshSnapshot {
+            var depthAnythingPointCloud: [ColoredPoint] = []
+            if let mappingFrame {
+                // One full-resolution pass computes every pixel's metric
+                // depth and camera color; it feeds the TSDF and, when a
+                // stream wants it, the published cloud. It runs concurrently
+                // with the vertex map (independent actors), so a frame costs
+                // the slower of the two rather than their sum.
+                async let depthPass: [ColoredPoint] = self.integrateTSDF(
+                    tsdf: tsdf, relative: mappingFrame.relative, calibration: mappingFrame.calibration,
+                    cameraImage: cameraImageBox.value, intrinsics: intrinsics,
+                    imageResolution: imageResolution, transform: transform,
+                    maximumDepth: mappingFrame.integrationDepthCap,
+                    source: mappingFrame.calibrationSource, workSession: workSession,
+                    integrateIntoVolume: mappingFrame.meshSnapshot != nil,
+                    buildPointCloud: shouldPublishPointCloud || shouldRefreshSurfelVisualization
+                )
+                if let meshSnapshot = mappingFrame.meshSnapshot {
                 let stats = await accumulator.integrate(meshSnapshot, workSession: workSession,
                                                         viewpoint: capturedViewpoint,
                                                         calibrationSource: mappingFrame.calibrationSource)
@@ -1385,10 +1361,22 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 workSession.withPublishing {
                     ROS2BridgeClient.shared.publishDepthAnythingMesh(meshSnapshot, timestamp: timestamp)
                 }
+                }
+                depthAnythingPointCloud = await depthPass
             }
 
-            let depthAnythingPointCloud = mappingFrame?.calibratedPoints ?? []
-            let newPoints = mappingFrame?.calibratedPoints ?? []
+            // The surfel map is a map: like the mesh, it only admits depth
+            // this frame's calibration had evidence for.
+            let newPoints: [ColoredPoint]
+            if let mappingFrame, shouldRefreshSurfelVisualization {
+                let worldToCamera = transform.inverse
+                let cap = mappingFrame.integrationDepthCap
+                newPoints = depthAnythingPointCloud.filter {
+                    -(worldToCamera * SIMD4<Float>($0.position.x, $0.position.y, $0.position.z, 1)).z <= cap
+                }
+            } else {
+                newPoints = []
+            }
 
             if shouldPublishPointCloud {
                 // Keep the calibrated Depth Anything payload full-resolution; LiDAR stays sparse.

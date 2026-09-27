@@ -132,6 +132,59 @@ struct MetalDepthParityTests {
         }
     }
 
+    @Test("The shared depth pass back-projects exactly the CPU point cloud")
+    func testSharedDepthPassMatchesCPUPointCloud() throws {
+        // The published full-resolution cloud is derived from the TSDF's
+        // per-pixel depth and colors instead of a second projection pass; it
+        // must be the same points, in the same order, with the same colors.
+        let depthWidth = 37
+        let depthHeight = 23
+        var depthData = [Float](repeating: 0, count: depthWidth * depthHeight)
+        for index in 0..<depthData.count {
+            switch index % 7 {
+            case 0: depthData[index] = .nan
+            case 1: depthData[index] = -0.5
+            case 2: depthData[index] = 0
+            case 3: depthData[index] = 1e-9
+            case 4: depthData[index] = 25.0
+            default: depthData[index] = 0.05 + Float(index % 40) * 0.02
+            }
+        }
+        let relativeDepthMap = RelativeDepthMap(width: depthWidth, height: depthHeight, data: depthData)
+        let calibration = DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 0.5, offset: 0.001)
+        let cameraImage = try makeMetalCompatibleYCbCrBuffer(width: 64, height: 48)
+        let intrinsics = simd_float3x3(columns: (
+            SIMD3<Float>(500, 0, 0), SIMD3<Float>(0, 510, 0), SIMD3<Float>(310, 245, 1)
+        ))
+        let resolution = CGSize(width: 64, height: 48)
+        let angle: Float = 0.35
+        let transform = simd_float4x4(
+            SIMD4<Float>(cos(angle), 0, -sin(angle), 0),
+            SIMD4<Float>(0, 1, 0, 0),
+            SIMD4<Float>(sin(angle), 0, cos(angle), 0),
+            SIMD4<Float>(0.3, -1.2, 2.05, 1)
+        )
+
+        let reference = PointCloudProcessor().processDepthAnythingPointCloudCPU(
+            cameraImage: cameraImage, intrinsics: intrinsics, imageResolution: resolution,
+            transform: transform, relativeDepthMap: relativeDepthMap, calibration: calibration
+        )
+        let (metric, colors) = PointCloudProcessor.metricDepthAndColors(
+            relative: relativeDepthMap, calibration: calibration, cameraImage: cameraImage
+        )
+        let shared = PointCloudProcessor.backProject(
+            metricDepth: metric, colors: try #require(colors), width: depthWidth, height: depthHeight,
+            intrinsics: intrinsics, imageResolution: resolution, transform: transform
+        )
+
+        try #require(shared.count == reference.count)
+        #expect(reference.count > 100)
+        for (a, b) in zip(shared, reference) {
+            #expect(simd_distance(a.position, b.position) < max(1e-5, 1e-6 * simd_length(b.position)))
+            #expect(a.color == b.color)
+        }
+    }
+
     @Test("Metal path rejects buffers it cannot bind, forcing CPU fallback")
     func testMetalRejectsNonPlanarBuffer() throws {
         guard let metal = DepthPointCloudMetalProcessor() else { return }

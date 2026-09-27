@@ -67,3 +67,28 @@ beyond 11 m — absorbed by TSDF truncation/precision weighting, and the reason
 the ceiling stays at 18 m. The bag cannot measure beyond-cap gains (published
 clouds are pre-truncated at the recorded cap), so the next street scan is the
 real evaluation.
+
+## Follow-up: frame rate (daylight pan, 2026-09)
+
+A daylight street pan showed holes and mild distortion. The bag showed depth
+frames every ~2.1 s instead of the 0.5 s design interval, with every other
+topic locked to them. Profiling the replayed frames at device resolution put
+the cause in the frame path: with any point-cloud target (Save Local counts),
+it fused the full-resolution overlay mesh into the vertex map (4x the
+designed vertices) and built that mesh only to publish its vertices. Debug
+builds, which Xcode's Run action installs, made those loops ~15x slower
+still. Fix: the map always integrates the `accumulatedScene` resolution;
+the published cloud is back-projected from the TSDF pass's per-pixel depth
+and colors (identical to the CPU projection, and now uncapped as the
+calibration metadata always documented); and TSDF and vertex-map fusion run
+concurrently. Per frame on the simulator: 1116 -> 302 ms Debug, 78 -> 32 ms
+optimized.
+
+The holes were the far side of the street: the integration cap stayed at
+5-8 m because far anchors need three sightings and a pan at 0.47 Hz moves
+regions out of view after ~3.5 frames. Two faster-ratchet alternatives were
+measured on the replay and rejected - negative inverse-depth offsets (mixed:
+better 4-6 m accuracy, worse mid-range completeness and agreement) and
+two-sighting maturation (far completeness 37 -> 73% on the pan, but >11 m
+layering p90 3.98 -> 10.5 m on scan6) - leaving frame rate as the lever that
+does not trade away consistency. Numbers are pinned in PanScanReplayTests.

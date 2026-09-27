@@ -577,6 +577,90 @@ nonisolated struct PointCloudProcessor {
 
     /// CPU reference implementation; the Metal kernel mirrors this math and
     /// the parity test compares the two.
+    /// Per-pixel calibrated metric depth (NaN = invalid) on the relative
+    /// map's grid, plus the camera color at every valid pixel when the
+    /// camera buffer is biplanar YCbCr (nil otherwise). One pass feeds both
+    /// TSDF integration and the published full-resolution cloud.
+    static func metricDepthAndColors(
+        relative: RelativeDepthMap,
+        calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
+        cameraImage: CVPixelBuffer
+    ) -> (metric: [Float], colors: [SIMD3<UInt8>]?) {
+        let width = relative.width
+        let height = relative.height
+        var metric = [Float](repeating: .nan, count: width * height)
+        relative.withReadAccess { reader in
+            for y in 0..<height {
+                for x in 0..<width {
+                    if let depth = DepthAnythingProcessor.calibratedMetricDepth(
+                        relativeDepth: reader.value(atX: x, y: y), calibration: calibration
+                    ) {
+                        metric[y * width + x] = depth
+                    }
+                }
+            }
+        }
+
+        guard CVPixelBufferGetPlaneCount(cameraImage) >= 2 else { return (metric, nil) }
+        CVPixelBufferLockBaseAddress(cameraImage, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(cameraImage, .readOnly) }
+        guard let yBase = CVPixelBufferGetBaseAddressOfPlane(cameraImage, 0),
+              let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(cameraImage, 1) else { return (metric, nil) }
+        let yPlane = UnsafePointer(yBase.assumingMemoryBound(to: UInt8.self))
+        let cbcrPlane = UnsafePointer(cbcrBase.assumingMemoryBound(to: UInt8.self))
+        let yBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(cameraImage, 0)
+        let cbcrBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(cameraImage, 1)
+        let imageWidth = CVPixelBufferGetWidth(cameraImage)
+        let imageHeight = CVPixelBufferGetHeight(cameraImage)
+        var colors = [SIMD3<UInt8>](repeating: SIMD3(255, 255, 255), count: metric.count)
+        for y in 0..<height {
+            for x in 0..<width where metric[y * width + x].isFinite {
+                colors[y * width + x] = sampleCameraColor(
+                    depthX: x, depthY: y, depthWidth: width, depthHeight: height,
+                    imageWidth: imageWidth, imageHeight: imageHeight,
+                    yPlane: yPlane, yBytesPerRow: yBytesPerRow,
+                    cbcrPlane: cbcrPlane, cbcrBytesPerRow: cbcrBytesPerRow
+                )
+            }
+        }
+        return (metric, colors)
+    }
+
+    /// World-space colored points from an already calibrated metric depth
+    /// image (NaN = invalid) and per-pixel colors on the same grid, with the
+    /// projection-table convention processDepthAnythingPointCloudCPU uses.
+    static func backProject(
+        metricDepth: [Float],
+        colors: [SIMD3<UInt8>],
+        width: Int,
+        height: Int,
+        intrinsics: simd_float3x3,
+        imageResolution: CGSize,
+        transform: simd_float4x4
+    ) -> [ColoredPoint] {
+        guard width > 0, height > 0, metricDepth.count == width * height, colors.count == metricDepth.count,
+              imageResolution.width > 0, imageResolution.height > 0 else { return [] }
+        let scaleX = Float(width) / Float(imageResolution.width)
+        let scaleY = Float(height) / Float(imageResolution.height)
+        let fx = intrinsics[0][0] * scaleX, fy = intrinsics[1][1] * scaleY
+        let cx = intrinsics[2][0] * scaleX, cy = intrinsics[2][1] * scaleY
+        guard fx.isFinite, fy.isFinite, cx.isFinite, cy.isFinite,
+              abs(fx) > 1e-5, abs(fy) > 1e-5 else { return [] }
+        var points: [ColoredPoint] = []
+        points.reserveCapacity(metricDepth.count)
+        for y in 0..<height {
+            let cameraYFactor = (cy - Float(y)) / fy
+            for x in 0..<width {
+                let depth = metricDepth[y * width + x]
+                guard depth.isFinite else { continue }
+                let world = simd_mul(transform, simd_float4((Float(x) - cx) / fx * depth, cameraYFactor * depth, -depth, 1))
+                points.append(ColoredPoint(position: simd_float3(world.x, world.y, world.z),
+                                           color: colors[y * width + x]))
+            }
+        }
+        return points
+    }
+
     func processDepthAnythingPointCloudCPU(
         cameraImage pixelBuffer: CVPixelBuffer,
         intrinsics: simd_float3x3,
