@@ -946,6 +946,7 @@ struct LocalROS2BagBrowserView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var sessions: [LocalROS2BagSession] = []
     @State private var isLoading = true
+    @State private var hasLoadedOnce = false
     @State private var reloadID = UUID()
     @State private var pendingDeletion: LocalROS2BagSession?
     @State private var errorMessage: String?
@@ -954,7 +955,7 @@ struct LocalROS2BagBrowserView: View {
     var body: some View {
         NavigationStack {
             List {
-                if sessions.isEmpty && isLoading {
+                if sessions.isEmpty && isLoading && !hasLoadedOnce {
                     ProgressView("Loading saved scans…")
                 } else if sessions.isEmpty {
                     ContentUnavailableView(
@@ -1075,7 +1076,10 @@ struct LocalROS2BagBrowserView: View {
         previewScanTask?.cancel()
         previewScanTask = nil
         defer {
-            if reloadID == requestID { isLoading = false }
+            if reloadID == requestID {
+                isLoading = false
+                hasLoadedOnce = true
+            }
         }
 
         do {
@@ -1127,8 +1131,11 @@ struct LocalROS2BagBrowserView: View {
         Task {
             do {
                 try await recorder.deleteBagSessionAsync(pendingDeletion)
+                // Optimistic removal for instant UI; the libraryRevision
+                // bump from the delete already schedules the authoritative
+                // relist, so a second explicit reload here only doubled the
+                // disk enumeration and preview rescans per swipe-delete.
                 sessions.removeAll { $0.id == pendingDeletion.id }
-                await reload()
             } catch {
                 errorMessage = error.localizedDescription
             }

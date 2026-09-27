@@ -179,6 +179,33 @@ struct MeshDepthPropagationTests {
         #expect(visible == nil)
     }
 
+    @Test("The horizon population honors sub-sampling-range occluders")
+    func horizonHonorsNearOccluders() {
+        let width = 128, height = 96
+        let configuration = MeshDepthPropagation.Configuration()
+        // Same regime as nearOccluderSuppressesHiddenAnchors, judged on the
+        // supportCap horizon population: a wall at 0.2 m is below the
+        // sampling range but must still hide the far anchor behind it.
+        // visibleAnchorDepths used to DROP sub-range anchors before the
+        // splat pass, so the hidden anchor certified the horizon whenever
+        // a near surface filled part of the frame.
+        let occluder = worldPoint(gridX: 64, gridY: 48, depth: 0.2, depthWidth: width, depthHeight: height)
+        let hidden = worldPoint(gridX: 64, gridY: 48, depth: 5, depthWidth: width, depthHeight: height)
+        let depths = MeshDepthPropagation.visibleAnchorDepths(
+            anchors: [occluder, hidden], depthWidth: width, depthHeight: height,
+            intrinsics: intrinsics, imageResolution: imageResolution,
+            transform: transform, configuration: configuration
+        )
+        #expect(depths.isEmpty, "occluder is below sampling range, hidden anchor is occluded (got \(depths))")
+        // Without the occluder the far anchor testifies normally.
+        let unoccluded = MeshDepthPropagation.visibleAnchorDepths(
+            anchors: [hidden], depthWidth: width, depthHeight: height,
+            intrinsics: intrinsics, imageResolution: imageResolution,
+            transform: transform, configuration: configuration
+        )
+        #expect(unoccluded == [5])
+    }
+
     @Test("A grazing ground plane keeps deep anchors visible; a frontal occluder still hides what it covers")
     func grazingGroundPlaneKeepsDeepAnchorsVisible() throws {
         let width = 518, height = 392

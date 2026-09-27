@@ -1206,6 +1206,43 @@ struct MapEverythingTests {
         #expect(stats.latest?.failedMessages == 0)
     }
 
+    @Test("Publish queue bounds queued bytes, not just entry count")
+    func testPublishQueueByteBudget() async throws {
+        let stats = PublishQueueStatsRecorder()
+        let sends = PublishQueueSendRecorder()
+        var configuration = PublishQueue.Configuration(
+            capacity: 100,
+            maxRetries: 0,
+            retryDelayMilliseconds: 1,
+            dropPolicy: .dropOldestPublish
+        )
+        configuration.maxPendingBytes = 3_000
+        let queue = PublishQueue(configuration: configuration) { data, completion in
+            sends.record(data: data, completion: completion)
+        }
+        queue.onStatsChange = stats.record
+
+        // Entry 0 goes straight in flight; entries 1-2 fill the 3 KB
+        // backlog budget, and each further arrival must evict the oldest
+        // QUEUED publish (entries 1 then 2) even though the entry count
+        // (100) is nowhere near exhausted.
+        for index in 0..<5 {
+            queue.enqueueEncodedPayload(
+                Data(repeating: UInt8(index), count: 1_024), op: "publish", topic: "/bytes/\(index)"
+            )
+        }
+        #expect(await waitUntil { stats.latest?.droppedMessages == 2 && stats.latest?.depth == 3 })
+        #expect(stats.latest?.lastError?.contains("/bytes/2") == true)
+
+        // An oversized single payload still sends once the backlog drains.
+        let drained = PublishQueueSendRecorder()
+        let big = PublishQueue(configuration: configuration) { data, completion in
+            drained.record(data: data, completion: completion)
+        }
+        big.enqueueEncodedPayload(Data(repeating: 7, count: 10_000), op: "publish", topic: "/bytes/huge")
+        #expect(await waitUntil { drained.sentPayloads.count == 1 })
+    }
+
     @Test("Publish queue counts the in-flight send against capacity")
     func testPublishQueueBackpressureCountsInFlightSend() async throws {
         let stats = PublishQueueStatsRecorder()

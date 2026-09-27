@@ -73,6 +73,11 @@ nonisolated final class PublishQueue: @unchecked Sendable {
         let maxRetries: Int
         let retryDelayMilliseconds: Int
         let dropPolicy: DropPolicy
+        /// Byte budget over the queued payloads. The entry-count cap alone
+        /// let a stalled socket pin ~200+ MB of queued multi-MB mesh and
+        /// point-cloud payloads (120 entries with no size bound) during an
+        /// already memory-hungry ARKit session.
+        var maxPendingBytes: Int = 24 * 1_048_576
 
         static let `default` = Configuration(
             capacity: 120,
@@ -241,16 +246,26 @@ nonisolated final class PublishQueue: @unchecked Sendable {
     }
 
     private func makeRoom(for entry: Entry) -> Bool {
-        guard outstandingCount >= configuration.capacity else { return true }
+        var pendingBytes = pending.reduce(0) { $0 + $1.data.count }
+        func withinBudgets() -> Bool {
+            // The byte budget bounds the queued BACKLOG: with the queue
+            // drained, even a payload larger than the whole budget still
+            // sends (bounded by there being one of it).
+            outstandingCount < configuration.capacity
+                && (pending.isEmpty || pendingBytes + entry.data.count <= configuration.maxPendingBytes)
+        }
+        guard !withinBudgets() else { return true }
 
         switch configuration.dropPolicy {
         case .dropOldestPublish:
-            if let publishIndex = pending.firstIndex(where: { $0.op == "publish" }) {
+            while !withinBudgets(),
+                  let publishIndex = pending.firstIndex(where: { $0.op == "publish" }) {
                 let dropped = pending.remove(at: publishIndex)
+                pendingBytes -= dropped.data.count
                 droppedMessages += 1
                 recordError("Dropped queued message for \(dropped.topic): publish queue full.")
-                return true
             }
+            if withinBudgets() { return true }
 
             if entry.op == "publish" {
                 droppedMessages += 1

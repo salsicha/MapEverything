@@ -144,7 +144,9 @@ struct BagBrowserResponsivenessTests {
         recorder.stopAndWait()
 
         let sessions = try await recorder.listBagSessionsAsync()
-        #expect(sessions.count == 2)
+        // A failed start (e.g. the free-disk-space guard on a full CI box)
+        // must stop here, not cascade into misleading delete assertions.
+        try #require(sessions.count == 2)
 
         let deletedSession = try #require(sessions.first)
         try await recorder.deleteBagSessionAsync(deletedSession)

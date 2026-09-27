@@ -114,7 +114,10 @@ struct MappingSessionHistoryDetailView: View {
                     .onSubmit {
                         saveNotes()
                     }
-                    .onChange(of: session.notes) { _, _ in
+                    // Saving on every keystroke did a synchronous SwiftData
+                    // disk write per character; leaving the screen commits
+                    // whatever was typed.
+                    .onDisappear {
                         saveNotes()
                     }
             }

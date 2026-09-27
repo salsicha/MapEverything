@@ -247,11 +247,17 @@ nonisolated enum MeshDepthPropagation {
         projected.reserveCapacity(min(anchors.count, 65_536))
         var splats: [SplatRecord] = []
         splats.reserveCapacity(min(anchors.count, 65_536))
+        // Occlusion is decoupled from the sampling range exactly as in
+        // visibleAnchors: an anchored surface nearer than the minimum
+        // sampling depth still hides everything behind it - dropping such
+        // anchors entirely let occluded far anchors certify the horizon
+        // whenever a near wall filled part of the frame.
+        let minimumOccluderDepth: Float = 0.05
         let footprintScale = 0.5 * configuration.anchorFootprint * max(abs(fx), abs(fy))
         for anchor in anchors {
             let camera = worldToCamera * SIMD4<Float>(anchor.x, anchor.y, anchor.z, 1)
             let depth = -camera.z
-            guard depth >= configuration.depthRange.lowerBound,
+            guard depth >= minimumOccluderDepth,
                   depth <= configuration.depthRange.upperBound else { continue }
             let gridX = cx + fx * camera.x / depth
             let gridY = cy - fy * camera.y / depth
@@ -261,7 +267,9 @@ nonisolated enum MeshDepthPropagation {
             guard px >= 0, px < depthWidth, py >= 0, py < depthHeight else { continue }
             let cellX = px / down
             let cellY = py / down
-            projected.append((cellY * cellsW + cellX, depth))
+            if depth >= configuration.depthRange.lowerBound {
+                projected.append((cellY * cellsW + cellX, depth))
+            }
             let radius = min(6, max(1, Int((footprintScale / (depth * Float(down))).rounded())))
             splats.append(SplatRecord(cellX: Int32(cellX), cellY: Int32(cellY),
                                       radius: Int32(radius), depth: depth))

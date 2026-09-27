@@ -289,8 +289,12 @@ actor TSDFVolume {
         return Sample(
             sdf: Float(voxelData.sdf),
             // Any genuine surface observation counts (a single far-field
-            // sighting carries 0.08); free-space-only voxels stay below
-            // this and, being all-positive, can never form a surface.
+            // sighting carries 0.08). Free-space-only voxels DO cross this
+            // after a few frames (each free-space update accrues 0.25x
+            // gain), but their SDF stays at the positive clamp so no sign
+            // change - and thus no surface - can form; counting observed
+            // empty space toward the frontier rule's observed corners is
+            // intended.
             valid: Float(voxelData.weight) > 0.06,
             color: SIMD3<Float>(Float(voxelData.red), Float(voxelData.green), Float(voxelData.blue))
         )
