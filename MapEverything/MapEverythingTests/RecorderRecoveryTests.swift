@@ -28,6 +28,42 @@ struct RecorderRecoveryTests {
         )
     }
 
+    @Test("A crash mid-recording leaves metadata.yaml listing the committed rows")
+    func crashMidRecordingLeavesReadableMetadata() throws {
+        try withRecorder { recorder, directory, _ in
+            record(recorder, timestamp: 1)
+            record(recorder, timestamp: 2)
+            recorder.flushAndWait()
+            // No stop(): read the artifacts exactly as external rosbag2
+            // tooling would find them after a jetsam or battery death.
+            // Before the periodic metadata snapshot, this file permanently
+            // claimed "message_count: 0" with no chunk files listed.
+            let metadataURL = directory.appendingPathComponent("metadata.yaml")
+            let metadata = try String(contentsOf: metadataURL, encoding: .utf8)
+            #expect(metadata.contains("message_count: 2"))
+            #expect(metadata.contains("mapeverything_0.db3"))
+        }
+    }
+
+    @Test("Chunk databases run in WAL journal mode with an empty sidecar after flush")
+    func chunkDatabasesUseWALJournal() throws {
+        try withRecorder { recorder, directory, _ in
+            record(recorder, timestamp: 1)
+            recorder.flushAndWait()
+            let chunkURL = directory.appendingPathComponent("mapeverything_0.db3")
+            let header = try Data(contentsOf: chunkURL)
+            // SQLite header bytes 18/19 hold the write/read format
+            // versions: 2/2 in WAL mode, 1/1 with rollback journals.
+            #expect(header.count > 20 && header[18] == 2 && header[19] == 2)
+            // The post-flush TRUNCATE checkpoint must leave committed rows
+            // in the .db3 itself: bags are shared as individual file URLs,
+            // so a non-empty -wal sidecar would silently lose the tail.
+            let walURL = directory.appendingPathComponent("mapeverything_0.db3-wal")
+            let walSize = (try? FileManager.default.attributesOfItem(atPath: walURL.path)[.size] as? NSNumber)?.intValue ?? 0
+            #expect(walSize == 0, "wal sidecar holds \(walSize) bytes after checkpoint")
+        }
+    }
+
     private func open(_ url: URL) throws -> OpaquePointer {
         var database: OpaquePointer?
         let result = sqlite3_open(url.path, &database)

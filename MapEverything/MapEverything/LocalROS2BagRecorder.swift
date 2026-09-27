@@ -510,6 +510,11 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     private static let lowDiskSpaceWarningBytes: Int64 = 2 * 1_073_741_824
     private static let minimumFreeBytesWhileRecording: Int64 = 100 * 1_048_576
     private static let flushesPerFreeSpaceCheck = 64
+    /// A flush can carry one arbitrarily large message, so the disk-space
+    /// re-check must also trigger on bytes written - counting flushes alone
+    /// let 64 multi-MB point-cloud batches outrun the 100 MB floor into
+    /// SQLITE_FULL.
+    private static let bytesPerFreeSpaceCheck = 32 * 1_048_576
     private static let insertMessageSQL = "INSERT INTO messages(id, topic_id, timestamp, data) VALUES (?, ?, ?, ?)"
 
     private let queue: DispatchQueue
@@ -543,6 +548,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     private var artifactDirectorySnapshot: URL?
     private var consecutiveFlushFailures = 0
     private var successfulFlushCount = 0
+    private var bytesSinceFreeSpaceCheck = 0
     private var pendingWrites: [PendingWrite] = []
     private var pendingWriteBytes = 0
     private var pendingFlushWorkItem: DispatchWorkItem?
@@ -614,6 +620,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             self.lastErrorAt = nil
             self.consecutiveFlushFailures = 0
             self.successfulFlushCount = 0
+            self.bytesSinceFreeSpaceCheck = 0
 
             guard configuration.isEnabled else {
                 self.publishStats(isRecording: false)
@@ -679,6 +686,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             } catch {
                 self.recordTransientFailure("Failed to flush local rosbag: \(error.localizedDescription)")
             }
+            // Backgrounding is a likely last chance to run: whatever is
+            // committed so far must be listed in metadata.yaml.
+            if self.acceptsRecords { self.writeMetadataSnapshot() }
         }
     }
 
@@ -1237,6 +1247,14 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         // lock must delay the writer's COMMIT, not fail it.
         sqlite3_busy_timeout(database, 2_000)
 
+        // WAL + synchronous=NORMAL is corruption-safe on power loss (the
+        // realistic battery-death-mid-scan case), where the default DELETE
+        // journal at NORMAL has a documented corruption window, and it lets
+        // the read-only preview scanner read concurrently. Each flush
+        // checkpoints with TRUNCATE so the -wal sidecar stays empty between
+        // batches - bags are shared as individual file URLs, so committed
+        // rows must live in the .db3 itself.
+        try execute("PRAGMA journal_mode=WAL")
         try execute("PRAGMA synchronous=NORMAL")
         try execute("CREATE TABLE IF NOT EXISTS topics(id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, serialization_format TEXT NOT NULL, offered_qos_profiles TEXT NOT NULL)")
         try execute("CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, topic_id INTEGER NOT NULL, timestamp INTEGER NOT NULL, data BLOB NOT NULL)")
@@ -1249,6 +1267,9 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         closeDatabase()
         try openChunk(index: currentChunkIndex + 1)
         currentChunkStartNanoseconds = timestampNanoseconds
+        // The completed chunk must be listed even if the app never reaches
+        // a clean stop.
+        writeMetadata()
     }
 
     private func closeCurrentBag(writeMetadata: Bool) {
@@ -1378,6 +1399,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
 
             currentChunkMessageCount += txMessageCount
             currentChunkBytes += txBytes
+            bytesSinceFreeSpaceCheck += txBytes
             currentChunkStartNanoseconds = currentChunkStartNanoseconds ?? txStartNanoseconds
             if let txEndNanoseconds {
                 currentChunkEndNanoseconds = txEndNanoseconds
@@ -1448,14 +1470,26 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
 
             consecutiveFlushFailures = 0
             successfulFlushCount += 1
+            // Keep committed rows in the .db3 itself (see openChunk's WAL
+            // rationale); an occasional failed checkpoint only defers to the
+            // next one.
+            try? execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
-            if acceptsRecords,
-               successfulFlushCount % Self.flushesPerFreeSpaceCheck == 0,
-               let bagDirectoryURL,
-               let freeBytes = availableDiskCapacityBytes(at: bagDirectoryURL),
-               freeBytes < Self.minimumFreeBytesWhileRecording {
-                stopRecordingForLowDiskSpace()
-                return
+            let cadenceDue = successfulFlushCount == 1
+                || successfulFlushCount % Self.flushesPerFreeSpaceCheck == 0
+                || bytesSinceFreeSpaceCheck >= Self.bytesPerFreeSpaceCheck
+            if acceptsRecords, cadenceDue {
+                bytesSinceFreeSpaceCheck = 0
+                // A crash, jetsam, or battery death must leave a bag that
+                // standard rosbag2 tooling can read: metadata.yaml was
+                // previously written only at start (empty) and clean stop.
+                writeMetadataSnapshot()
+                if let bagDirectoryURL,
+                   let freeBytes = availableDiskCapacityBytes(at: bagDirectoryURL),
+                   freeBytes < Self.minimumFreeBytesWhileRecording {
+                    stopRecordingForLowDiskSpace()
+                    return
+                }
             }
 
             if publishStatsAfterFlush {
@@ -1544,6 +1578,17 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw SQLiteError(database: database, fallback: "SQLite step failed")
         }
+    }
+
+    /// Rewrites metadata.yaml INCLUDING the still-open chunk, so an abrupt
+    /// end mid-recording leaves the bag readable by rosbag2 tooling. The
+    /// temporary finalize is rolled back so the real finalize later records
+    /// final counts.
+    private func writeMetadataSnapshot() {
+        let saved = bagFiles
+        finalizeCurrentChunk()
+        writeMetadata()
+        bagFiles = saved
     }
 
     private func writeMetadata() {
@@ -1690,7 +1735,11 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         lastError = message
         lastErrorAt = Date()
         acceptsRecords = false
+        // The rows committed before the failure are still in the chunks;
+        // list them so the bag stays readable outside this app.
+        finalizeCurrentChunk()
         closeDatabase()
+        writeMetadata()
         publishStats(isRecording: false)
     }
 
