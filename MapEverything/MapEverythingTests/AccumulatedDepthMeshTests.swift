@@ -499,6 +499,38 @@ struct AccumulatedDepthMeshTests {
         #expect(await map.calibrationAnchors().isEmpty)
     }
 
+    @Test("Carve-removed cells re-accrue without duplicating or leaking the anchor index")
+    func drainedCellsReaccrueWithoutDuplicates() async {
+        let map = AccumulatedDepthMesh()
+        // A receding series of carving walls: each wall's cells are later
+        // contradicted by the deeper walls behind it, so many cells fully
+        // drain OUT of the map (mass < 0.1) - the removal path the order
+        // index must survive.
+        for pass in 0..<8 {
+            _ = await map.integrate(wall(z: 10 + Float(pass) * 0.5, color: red))
+        }
+        let churned = await map.anchorIndexCounts()
+        #expect(churned.ordered > churned.live, "the churn must remove cells (\(churned))")
+        // Replaying the same walls deepest-first re-creates removed cells
+        // without re-contradicting them (nothing shallower follows them).
+        for pass in (0..<8).reversed() {
+            _ = await map.integrate(wall(z: 10 + Float(pass) * 0.5, color: red))
+        }
+        let replayed = await map.anchorIndexCounts()
+        #expect(replayed.live > churned.live,
+                "the replay must re-create removed cells (\(churned) -> \(replayed))")
+        // Re-accrual of a cell the index already lists must not append it
+        // again: a duplicate double-counts the cell toward the calibration
+        // horizon's shell gate, and an index that grows for every
+        // re-created cell burns the 65k anchor budget on a long
+        // carve-churn scan until no new anchor can ever form. Pre-fix the
+        // index grew one-for-one with re-created cells.
+        #expect(replayed.ordered - churned.ordered < replayed.live - churned.live,
+                "index must not grow per re-created cell (\(churned) -> \(replayed))")
+        let anchors = await map.calibrationAnchors()
+        #expect(Set(anchors).count == anchors.count)
+    }
+
     @Test("A carved voxel accepts fresh geometry afterwards")
     func carvedVoxelAcceptsFreshGeometry() async {
         let map = AccumulatedDepthMesh()

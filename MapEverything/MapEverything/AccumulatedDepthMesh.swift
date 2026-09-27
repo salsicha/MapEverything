@@ -133,7 +133,15 @@ actor AccumulatedDepthMesh {
         var mass: Float
     }
     private var anchorCells: [SIMD3<Int>: AnchorCell] = [:]
+    /// Deterministic insertion order over anchor cells. Fully drained
+    /// cells' keys may linger here until compaction (membership is tracked
+    /// in anchorOrderKeys so re-accrual never appends a duplicate), and the
+    /// anchor budget is checked against LIVE cells — otherwise a long
+    /// carve-churn scan leaks the budget into dead keys until no new
+    /// anchor can ever form, and duplicated keys double-count one cell
+    /// toward the calibration horizon's shell gate.
     private var anchorOrder: [SIMD3<Int>] = []
+    private var anchorOrderKeys: Set<SIMD3<Int>> = []
     private var cachedAnchorPositions: [SIMD3<Float>]?
     private var aliveVertexCount = 0
 
@@ -527,10 +535,29 @@ actor AccumulatedDepthMesh {
             cell.mass = mass + anchorWeight
             anchorCells[key] = cell
         } else {
-            guard anchorOrder.count < Self.maximumAnchors else { return }
+            guard anchorCells.count < Self.maximumAnchors else { return }
             anchorCells[key] = AnchorCell(position: position, mass: anchorWeight)
-            anchorOrder.append(key)
+            if anchorOrderKeys.insert(key).inserted {
+                anchorOrder.append(key)
+            }
+            compactAnchorOrderIfNeeded()
         }
+    }
+
+    /// Test hook: order-index length vs live cell count. The index may
+    /// briefly exceed the live count (drained keys pending compaction) but
+    /// must never hold duplicate keys.
+    func anchorIndexCounts() -> (ordered: Int, live: Int) {
+        (anchorOrder.count, anchorCells.count)
+    }
+
+    /// Sheds fully drained cells' keys from the order index once they
+    /// outnumber the live cells, keeping index memory proportional to the
+    /// live anchor set while preserving insertion order.
+    private func compactAnchorOrderIfNeeded() {
+        guard anchorOrder.count > 256, anchorOrder.count > anchorCells.count * 2 else { return }
+        anchorOrder.removeAll { anchorCells[$0] == nil }
+        anchorOrderKeys = Set(anchorOrder)
     }
 
     private func anchorCellKey(for position: SIMD3<Float>) -> SIMD3<Int>? {
