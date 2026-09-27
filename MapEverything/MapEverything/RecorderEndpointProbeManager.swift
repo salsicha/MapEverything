@@ -193,7 +193,7 @@ final class RecorderEndpointProbeManager: NSObject, ObservableObject, URLSession
         activeProbeID = probeID
         isProbeInFlight = true
 
-        let task = URLSession.shared.webSocketTask(with: URLRequest(url: url))
+        let task = RecorderCertificatePinningDelegate.pinnedSession.webSocketTask(with: URLRequest(url: url))
         task.delegate = self
         activeTask = task
         task.resume()
@@ -263,6 +263,52 @@ final class RecorderEndpointProbeManager: NSObject, ObservableObject, URLSession
     }
 
     private func runThroughputProbe(
+        task: URLSessionWebSocketTask,
+        probeID: UUID,
+        roundTripTimeMilliseconds: Double
+    ) {
+        // rosauth parity with the bridge: when a shared secret is
+        // configured, the auth op must be the first rosbridge message this
+        // socket sends or the server drops it - and the probe then reports
+        // a misleading endpoint failure against a healthy recorder.
+        if let authPayload = authenticationPayload() {
+            send(payload: authPayload, task: task, probeID: probeID) { [weak self] authError in
+                guard let self, self.activeProbeID == probeID else { return }
+                if let authError {
+                    self.completeProbe(
+                        probeID,
+                        sample: self.failureSample("Throughput probe auth failed: \(authError.localizedDescription)")
+                    )
+                    return
+                }
+                self.advertiseAndPublish(
+                    task: task, probeID: probeID,
+                    roundTripTimeMilliseconds: roundTripTimeMilliseconds
+                )
+            }
+            return
+        }
+        advertiseAndPublish(task: task, probeID: probeID, roundTripTimeMilliseconds: roundTripTimeMilliseconds)
+    }
+
+    private func authenticationPayload() -> Data? {
+        guard let secret = RosbridgeAuthSecretStore.load(), !secret.isEmpty,
+              let host = URL(string: recorderURL)?.host else { return nil }
+        let now = Int(Date().timeIntervalSince1970)
+        let message = RosbridgeAuth.authMessage(
+            secret: secret,
+            client: "MapEverything-iOS",
+            destination: host,
+            rand: UUID().uuidString,
+            t: now,
+            level: "user",
+            end: now + 120
+        )
+        guard JSONSerialization.isValidJSONObject(message) else { return nil }
+        return try? JSONSerialization.data(withJSONObject: message, options: [])
+    }
+
+    private func advertiseAndPublish(
         task: URLSessionWebSocketTask,
         probeID: UUID,
         roundTripTimeMilliseconds: Double

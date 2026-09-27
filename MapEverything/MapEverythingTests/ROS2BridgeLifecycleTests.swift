@@ -226,6 +226,14 @@ struct CBOREncoderTests {
     func testUnsupportedValue() {
         #expect(CBOREncoder.encode(["v": Date()]) == nil)
     }
+
+    @Test("UInt64 values above Int64.max encode as unsigned, not negative")
+    func testLargeUnsignedValues() {
+        #expect(hex(CBOREncoder.encode(["v": NSNumber(value: UInt64.max)]))
+                == "a161761bffffffffffffffff")
+        #expect(hex(CBOREncoder.encode(["v": NSNumber(value: UInt64(Int64.max) + 1)]))
+                == "a161761b8000000000000000")
+    }
 }
 
 struct RosbridgeAuthTests {
@@ -263,6 +271,24 @@ struct RosbridgeAuthTests {
 }
 
 struct CertificatePinningTests {
+    @Test("A configured pin rejects mismatched and unreadable chains")
+    func testPinIsEnforced() {
+        let pin = String(repeating: "ab", count: 32)
+        // No pin configured: system trust decides.
+        #expect(RecorderCertificatePinningDelegate.disposition(expected: "", leafFingerprint: "anything")
+                == .performDefaultHandling)
+        // Matching leaf: trusted explicitly (self-signed recorders).
+        #expect(RecorderCertificatePinningDelegate.disposition(expected: pin, leafFingerprint: pin)
+                == .useCredential)
+        // Mismatch must CANCEL, never fall back to system trust - a
+        // publicly-trusted MITM certificate would pass default handling.
+        #expect(RecorderCertificatePinningDelegate.disposition(expected: pin, leafFingerprint: String(repeating: "cd", count: 32))
+                == .cancelAuthenticationChallenge)
+        #expect(RecorderCertificatePinningDelegate.disposition(expected: pin, leafFingerprint: nil)
+                == .cancelAuthenticationChallenge)
+    }
+
+
     @Test("Fingerprints normalize to bare lowercase hex")
     func testNormalization() {
         #expect(RecorderCertificatePinningDelegate.normalizedFingerprint("AB:CD ef") == "abcdef")

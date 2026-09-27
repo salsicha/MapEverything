@@ -53,6 +53,10 @@ nonisolated enum CBOREncoder {
             let objCType = String(cString: number.objCType)
             if objCType == "f" || objCType == "d" {
                 appendDouble(number.doubleValue, to: &output)
+            } else if objCType == "Q" {
+                // Values above Int64.max keep the unsigned objCType; going
+                // through int64Value would encode UInt64.max as -1.
+                appendHeader(major: 0, length: number.uint64Value, to: &output)
             } else {
                 appendInteger(number.int64Value, to: &output)
             }
