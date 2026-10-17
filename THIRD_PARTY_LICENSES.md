@@ -4,11 +4,26 @@ MapEverything itself is released under the MIT License (see [LICENSE](LICENSE)).
 This repository additionally redistributes the following third-party work,
 which remains under its own license.
 
-## Depth Anything V2 (Small)
+## Depth Anything 3 (Small)
+
+`MapEverything/MapEverything/models/DepthAnything3SmallF16.mlpackage` is a
+Core ML FP16 conversion of ByteDance Seed's **DA3-Small** depth branch.
+
+- Source: <https://github.com/ByteDance-Seed/Depth-Anything-3> /
+  <https://huggingface.co/depth-anything/DA3-SMALL>
+- Model revision: `e08cab65ca0ec38e7826075418411ab90cab4da3`
+- License: Apache License 2.0 (full text below)
+- Adaptations: fixed-shape positional tensors, native-camera image orientation,
+  ImageNet normalization, and reciprocal output for the existing calibration
+  interface. Camera-pose and auxiliary outputs are omitted. See
+  `tools/da3/convert_da3_coreml.py` for conversion and numerical validation.
+
+## Depth Anything V2 (Small, legacy resource)
 
 `MapEverything/MapEverything/models/DepthAnythingV2SmallF16.mlpackage` is a
 Core ML (FP16) conversion of the **Depth Anything V2 Small** monocular depth
-estimation model.
+estimation model. It is retained in the repository but excluded from the app
+target; live inference now uses DA3-Small.
 
 - Authors: Lihe Yang, Bingyi Kang, Zilong Huang, Zhen Zhao, Xiaogang Xu,
   Jiashi Feng, Hengshuang Zhao (Depth Anything V2, NeurIPS 2024)

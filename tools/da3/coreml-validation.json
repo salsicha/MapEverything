@@ -1,0 +1,56 @@
+[
+  {
+    "frame": "frame-000.png",
+    "mean_relative_error": 0.0003738102677743882,
+    "p99_relative_error": 0.0011320911929942668,
+    "seconds": 0.07262354204431176
+  },
+  {
+    "frame": "frame-006.png",
+    "mean_relative_error": 0.0003429483331274241,
+    "p99_relative_error": 0.0010555668734014037,
+    "seconds": 0.034080084413290024
+  },
+  {
+    "frame": "frame-012.png",
+    "mean_relative_error": 0.0004381868930067867,
+    "p99_relative_error": 0.001414749934338034,
+    "seconds": 0.0333254998549819
+  },
+  {
+    "frame": "frame-018.png",
+    "mean_relative_error": 0.0009892904199659824,
+    "p99_relative_error": 0.004043938638642432,
+    "seconds": 0.03334054118022323
+  },
+  {
+    "frame": "frame-024.png",
+    "mean_relative_error": 0.006272758357226849,
+    "p99_relative_error": 0.008542008185759188,
+    "seconds": 0.03322874987497926
+  },
+  {
+    "frame": "frame-030.png",
+    "mean_relative_error": 0.0005902157281525433,
+    "p99_relative_error": 0.0019658436183817695,
+    "seconds": 0.03297487506642938
+  },
+  {
+    "frame": "frame-036.png",
+    "mean_relative_error": 0.002774258144199848,
+    "p99_relative_error": 0.004948496655561031,
+    "seconds": 0.03310724999755621
+  },
+  {
+    "frame": "frame-042.png",
+    "mean_relative_error": 0.0016985897673293948,
+    "p99_relative_error": 0.0063837945228442565,
+    "seconds": 0.03392666578292847
+  },
+  {
+    "frame": "frame-048.png",
+    "mean_relative_error": 0.0014953300124034286,
+    "p99_relative_error": 0.005034585157409311,
+    "seconds": 0.03335662465542555
+  }
+]

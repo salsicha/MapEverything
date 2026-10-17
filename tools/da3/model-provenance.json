@@ -1,0 +1,11 @@
+{
+  "source_revision": "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4",
+  "model_revision": "e08cab65ca0ec38e7826075418411ab90cab4da3",
+  "input": "RGB landscape 518x392",
+  "output": "inverse_depth [1,392,518], native camera axes",
+  "files": {
+    "Manifest.json": "e497119c26bd6699880086232d8c6b866a109394acfa695e7695d062e71c58b4",
+    "Data/com.apple.CoreML/model.mlmodel": "124be1a4175f9c6f20a3fd2835f7009413fcac70684c2742de0234922b86f71b",
+    "Data/com.apple.CoreML/weights/weight.bin": "6f43c4003623249f0861618123bc266cd807cf35aab296c56ce24a20edd8e49e"
+  }
+}

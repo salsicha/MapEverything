@@ -905,7 +905,7 @@ struct MapEverythingTests {
             "stamp": ["sec": 10, "nanosec": 20],
             "frame_id": "iphone_camera"
         ]
-        let calibration = DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 2.5, offset: 0.25)
+        let calibration = DepthAnythingProcessor.MaximumLikelihoodCalibration(scale: 2.5, offset: 0)
 
         let msg = ROS2BridgeClient.makeDepthAnythingCalibrationMessage(
             calibration: calibration,
@@ -925,9 +925,9 @@ struct MapEverythingTests {
         #expect(msg["relative_depth_width"] as? Int == 518)
         #expect(msg["relative_depth_height"] as? Int == 518)
         #expect(msg["scale"] as? Double == 2.5)
-        #expect(msg["offset"] as? Double == 0.25)
+        #expect(msg["offset"] as? Double == 0)
         #expect(msg["equation"] as? String == "metric_depth_m = 1.0 / (scale * relative_depth + offset)")
-        #expect((msg["metadata_json"] as? String)?.contains("affine_invariant_inverse_depth") == true)
+        #expect((msg["metadata_json"] as? String)?.contains("scale_only_depth") == true)
         #expect((msg["metadata_json"] as? String)?.contains("pointcloud_coordinate_frame") == true)
         #expect((msg["metadata_json"] as? String)?.contains("calibration_only") == true)
         #expect((msg["metadata_json"] as? String)?.contains("overlay_mesh_uses_calibrated_depth") == true)

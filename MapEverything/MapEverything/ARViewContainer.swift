@@ -872,10 +872,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
         guard workSession.isActive, !Task.isCancelled else { return nil }
-        // Every frame calibrates against LiDAR AND the accumulated map's
-        // anchors jointly (docs/consistent-scene-plan.md): the map constrains
-        // the far field LiDAR cannot see, so consecutive frames stop placing
-        // the same distant surfaces at different depths.
+        // DA3 uses a same-frame LiDAR scale across the entire image.
+        // LiDAR-anchored map geometry can bridge frames with missing LiDAR.
         let anchors = await accumulator.calibrationAnchors()
         guard workSession.isActive, !Task.isCancelled else { return nil }
         guard let calibrated = DepthCalibrationPipeline.calibrate(
@@ -885,7 +883,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
             anchors: anchors,
             intrinsics: intrinsics,
             imageResolution: imageResolution,
-            transform: transform
+            transform: transform,
+            configuration: .depthAnything3
         ) else {
             let guidance = anchors.count < MeshDepthPropagation.Configuration.default.minimumSamples
                 ? "Depth scale unavailable. Scan nearby surfaces first, then move outward."
@@ -909,8 +908,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
         #if DEBUG
         print("DepthPipeline \(calibrationLine)")
         #endif
-        // Stage 2/4: geometry only enters the map where this frame's
-        // calibration had supporting evidence. The map always integrates the
+        // DA3 extrapolates the LiDAR-derived scale up to the global integration
+        // ceiling. The map always integrates the
         // resolution it was designed for: switching to the full-resolution
         // overlay grid whenever a stream (or Save Local) had a point-cloud
         // target quadrupled the fused vertices and made every frame cost

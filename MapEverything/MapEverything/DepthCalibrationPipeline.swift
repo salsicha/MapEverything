@@ -12,6 +12,8 @@ import simd
 nonisolated enum DepthCalibrationPipeline {
 
     struct Configuration: Sendable {
+        /// DA3 uses scale only. Legacy DA2 replays retain affine inverse depth.
+        var scaleOnly = false
         /// Map pseudo-sample weights are normalized so their total equals
         /// this fraction of the LiDAR total — the balance validated by the
         /// scan6 simulation (-58% far-field spread at 1.0).
@@ -38,6 +40,11 @@ nonisolated enum DepthCalibrationPipeline {
         var propagation = MeshDepthPropagation.Configuration.default
 
         static let `default` = Configuration()
+        static var depthAnything3: Configuration {
+            var value = Configuration()
+            value.scaleOnly = true
+            return value
+        }
     }
 
     struct Result {
@@ -60,6 +67,26 @@ nonisolated enum DepthCalibrationPipeline {
         let lidarSamples = DepthAnythingProcessor.lidarCalibrationSamples(
             relative: relative, lidarDepthMap: lidarDepthMap, lidarConfidenceMap: lidarConfidenceMap
         )
+        if configuration.scaleOnly {
+            // Apply scale across the full DA3 image, including rays without
+            // LiDAR. Do not inherit DA2's LiDAR-support crop or bias a measured
+            // scale with the model's own previously predicted far surfaces.
+            if let fit = RobustDepthCalibration.fitScaleOnly(lidarSamples) {
+                return Result(calibration: fit, source: .lidar,
+                              integrationDepthCap: configuration.maximumIntegrationDepth)
+            }
+            // LiDAR-anchored map geometry can bridge missing LiDAR frames.
+            if let fit = MeshDepthPropagation.fitCalibration(
+                anchors: anchors, relative: relative, intrinsics: intrinsics,
+                imageResolution: imageResolution, transform: transform,
+                lidarDepthMap: lidarDepthMap, lidarConfidenceMap: lidarConfidenceMap,
+                configuration: configuration.propagation, scaleOnly: true
+            ) {
+                return Result(calibration: fit, source: .meshPropagated,
+                              integrationDepthCap: configuration.maximumIntegrationDepth)
+            }
+            return nil
+        }
         // Pseudo-samples skip the count/coverage gates here: for a JOINT fit
         // even a partial far-field constraint helps, and acceptance is judged
         // by the fit gates plus the agreement checks below. The gates still

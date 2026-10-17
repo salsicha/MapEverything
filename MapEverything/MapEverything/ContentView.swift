@@ -273,7 +273,7 @@ struct ContentView: View {
                     Text(isPreparingMapper ? "Preparing Mapper" : readinessLabel)
                         .font(.headline.weight(.semibold))
                     if isPreparingMapper {
-                        Text("Warming Depth Anything")
+                        Text("Warming Depth Anything 3")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.72))
                     }

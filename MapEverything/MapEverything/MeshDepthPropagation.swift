@@ -303,7 +303,8 @@ nonisolated enum MeshDepthPropagation {
         transform: simd_float4x4,
         lidarDepthMap: CVPixelBuffer? = nil,
         lidarConfidenceMap: CVPixelBuffer? = nil,
-        configuration: Configuration = .default
+        configuration: Configuration = .default,
+        scaleOnly: Bool = false
     ) -> DepthAnythingProcessor.MaximumLikelihoodCalibration? {
         guard let samples = pseudoDepthSamples(
             anchors: anchors,
@@ -313,7 +314,8 @@ nonisolated enum MeshDepthPropagation {
             transform: transform,
             configuration: configuration
         ) else { return nil }
-        guard let fit = RobustDepthCalibration.fit(samples) else { return nil }
+        guard let fit = scaleOnly ? RobustDepthCalibration.fitScaleOnly(samples)
+                                  : RobustDepthCalibration.fit(samples) else { return nil }
 
         if let lidarDepthMap,
            DepthAnythingProcessor.sparseLiDARAgreement(

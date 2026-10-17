@@ -2,13 +2,10 @@
 //  DepthAnythingProcessor.swift
 //  MapEverything
 //
-//  Loads Apple's Depth Anything V2 Core ML model and fuses its dense
-//  relative-depth output with sparse LiDAR depth to produce metric depth.
-//
-//  Setup: download the .mlpackage from
-//    https://huggingface.co/apple/coreml-depth-anything-v2-small
-//  and drag it into the Xcode project. Expected resource name:
-//    "DepthAnythingV2SmallF16" (.mlmodelc after compilation).
+//  Runs DA3-Small while scanning. The graph returns reciprocal DA3 depth in
+//  native camera coordinates; CPU/Metal keep their inverse-depth contract.
+//  DA3 calibration fixes offset=0 and fits only scale.
+//  Rebuild with tools/da3/convert_da3_coreml.py.
 //
 
 import Foundation
@@ -26,11 +23,11 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
     private let inferenceLock = NSLock()
     private let outputName: String
     private let inputSize: Int
+    private let inputHeight: Int
 
-    /// Affine-invariant inverse-depth calibration for Depth Anything V2 output.
-    /// The network predicts relative inverse depth (disparity), so metric depth
-    /// is recovered with `metric_depth_m = 1 / (scale * relative + offset)`.
-    /// `scale` and `offset` are inverse-depth coefficients in 1/m.
+    /// Shared inverse-depth representation, including legacy DA2 recordings.
+    /// DA3's graph returns 1 / predicted_depth; calibration always uses offset=0,
+    /// making metric depth a positive multiple of the network's predicted depth.
     struct MaximumLikelihoodCalibration: Sendable {
         let scale: Float
         let offset: Float
@@ -46,9 +43,9 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
 
     /// Loads the model from the app bundle. Returns nil if the model is missing,
     /// which lets the rest of the app continue working without depth enhancement.
-    init?(modelResourceName: String = "DepthAnythingV2SmallF16") {
+    init?(modelResourceName: String = "DepthAnything3SmallF16") {
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndNeuralEngine
+        config.computeUnits = .all
 
         var modelURL: URL?
         if let url = Bundle.main.url(forResource: modelResourceName, withExtension: "mlmodelc") {
@@ -71,22 +68,18 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         self.model = loadedModel
         self.relativeDepthRequest = request
 
-        guard let inName = loadedModel.modelDescription.inputDescriptionsByName.keys.first,
-              let outName = loadedModel.modelDescription.outputDescriptionsByName.keys.first else {
+        guard let input = loadedModel.modelDescription.inputDescriptionsByName["image"]?.imageConstraint,
+              loadedModel.modelDescription.outputDescriptionsByName["inverse_depth"] != nil else {
             return nil
         }
-        self.outputName = outName
-
-        if let imageConstraint = loadedModel.modelDescription.inputDescriptionsByName[inName]?.imageConstraint {
-            self.inputSize = imageConstraint.pixelsWide
-        } else {
-            self.inputSize = 518
-        }
+        self.outputName = "inverse_depth"
+        self.inputSize = input.pixelsWide
+        self.inputHeight = input.pixelsHigh
     }
 
-    /// Runs Depth Anything V2 on the given camera image and returns a dense relative-depth map.
-    /// Uses Vision framework so preprocessing (resize, format conversion, normalization)
-    /// is handled automatically based on the model's input constraints.
+    /// Runs DA3 on this exact image. Vision resizes the native sensor image;
+    /// orientation and ImageNet normalization are embedded in the graph.
+    /// Output reciprocal depth is aligned with the original image rays.
     func inferRelativeDepth(from cameraImage: CVPixelBuffer) -> RelativeDepthMap? {
         inferenceLock.lock()
         defer { inferenceLock.unlock() }
@@ -106,6 +99,7 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
 
         if let featureObservations = relativeDepthRequest.results as? [VNCoreMLFeatureValueObservation] {
             for observation in featureObservations {
+                guard observation.featureName == outputName else { continue }
                 let feature = observation.featureValue
                 if let array = feature.multiArrayValue {
                     return RelativeDepthMap(fromMultiArray: array, size: inputSize)
@@ -129,7 +123,7 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
             inputSize,
-            inputSize,
+            inputHeight,
             kCVPixelFormatType_32BGRA,
             attributes as CFDictionary,
             &pixelBuffer
@@ -138,13 +132,14 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         guard status == kCVReturnSuccess, let pixelBuffer else { return }
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         if let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) {
-            memset(baseAddress, 0, CVPixelBufferGetBytesPerRow(pixelBuffer) * inputSize)
+            memset(baseAddress, 0, CVPixelBufferGetBytesPerRow(pixelBuffer) * inputHeight)
         }
         CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
 
         _ = inferRelativeDepth(from: pixelBuffer)
     }
 
+    /// Legacy DA2 replay helper. Live DA3 uses DepthCalibrationPipeline.depthAnything3.
     /// Calibrates a Depth Anything relative depth map into metric depth using LiDAR.
     /// LiDAR samples are used only to estimate the affine inverse-depth transform;
     /// every valid Depth Anything pixel is then kept on the calibrated monocular surface.
@@ -206,6 +201,8 @@ nonisolated final class DepthAnythingProcessor: @unchecked Sendable {
         return RelativeDepthMap(width: relative.width, height: relative.height, data: fusedData)
     }
 
+    /// Legacy DA2 affine fit for replay/compatibility callers. Live DA3 passes
+    /// its scale-only calibration explicitly to the point-cloud and mesh paths.
     static func maximumLikelihoodCalibration(
         relative: RelativeDepthMap,
         lidarDepthMap: CVPixelBuffer,

@@ -15,6 +15,33 @@ nonisolated struct DepthCalibrationSample {
 nonisolated enum RobustDepthCalibration {
     private typealias Calibration = DepthAnythingProcessor.MaximumLikelihoodCalibration
 
+    /// DA3 predicts depth up to scale, not affine disparity. Its Core ML adapter
+    /// returns reciprocal depth, so median(depth * relative) is the metric
+    /// multiplier. Store its reciprocal in the CPU/Metal inverse-depth contract.
+    /// A flat wall constrains this one-parameter fit; no offset/pole is introduced.
+    static func fitScaleOnly(_ input: [DepthCalibrationSample]) -> DepthAnythingProcessor.MaximumLikelihoodCalibration? {
+        let samples = input.filter {
+            $0.relative.isFinite && $0.relative > 0 && $0.depth.isFinite && $0.depth > 0 &&
+            $0.weight.isFinite && $0.weight > 0
+        }
+        guard samples.count > 50 else { return nil }
+        let ratios = samples.map { $0.depth * $0.relative }.sorted()
+        let middle = ratios.count / 2
+        let multiplier = ratios.count.isMultiple(of: 2)
+            ? (ratios[middle - 1] + ratios[middle]) / 2 : ratios[middle]
+        let scale = Float(1 / multiplier)
+        guard scale.isFinite, scale > 0 else { return nil }
+        let inliers = samples.reduce(0) { count, sample in
+            let predicted = 1 / (Double(scale) * sample.relative)
+            // Match the pipeline's independent LiDAR agreement tolerance.
+            // A one-parameter depth fit cannot absorb shape error with an
+            // offset; DA2's tighter affine-fit gate rejected good DA3 frames.
+            return count + (abs(predicted - sample.depth) <= max(0.12, sample.depth * 0.15) ? 1 : 0)
+        }
+        guard inliers > 50, Double(inliers) >= Double(samples.count) * 0.65 else { return nil }
+        return Calibration(scale: scale, offset: 0)
+    }
+
     static func fit(_ input: [DepthCalibrationSample]) -> DepthAnythingProcessor.MaximumLikelihoodCalibration? {
         let samples = input.filter {
             $0.relative.isFinite && $0.relative > 0 && $0.depth.isFinite && $0.depth > 0 &&
