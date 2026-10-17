@@ -164,6 +164,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let meshSnapshot: MeshGenerator.DepthAnythingMeshSnapshot?
         let relative: RelativeDepthMap
         let integrationDepthCap: Float
+        let depthInputTimestamps: [TimeInterval]
     }
 
     var arView: ARView? // Using RealityKit's ARView
@@ -175,6 +176,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 if isScanning {
                     cancelFrameWork()
                     scanWorkSession = ScanWorkSession()
+                    multiViewEnabledForScan = UserDefaults.standard.bool(forKey: DA3WindowGeometry.enabledStorageKey)
                     // Old tasks retain their own actors, so a suspended
                     // mutation cannot repopulate the next scan's map.
                     surfelMap = ColoredSurfelMap()
@@ -218,6 +220,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var lastEnhancedFrameTime: TimeInterval = 0
     private let enhancedFrameInterval: TimeInterval = 0.5 // Run Depth Anything at ~2 fps
     private var isRunningEnhancedInference = false
+    private var multiViewEnabledForScan = false
+    private var windowProcessor: DA3WindowProcessor?
+    private var multiViewFeedback = ""
 
     var currentMode: VisualizationMode = .none
     private var lastPointProcessingTime: TimeInterval = 0
@@ -290,7 +295,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         let feedback = !thermalFeedback.isEmpty
             ? thermalFeedback
             : (trackingStateFeedback.isEmpty ? depthMappingFeedback : trackingStateFeedback)
-        delegate?.didUpdateTrackingFeedback(feedback)
+        delegate?.didUpdateTrackingFeedback(feedback.isEmpty ? multiViewFeedback : feedback)
     }
     
     override func viewDidLoad() {
@@ -353,6 +358,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
     private func cancelFrameWork() {
         scanWorkSession.cancel()
+        // A suspended old task keeps its own processor; it cannot populate the
+        // next scan/tracking epoch's keyframe history.
+        windowProcessor = nil
+        multiViewFeedback = ""
+        lastEnhancedFrameTime = 0
         frameProcessingTask?.cancel()
         cameraImageTask?.cancel()
         mapPublishTask?.cancel()
@@ -848,7 +858,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         // back to LiDAR-derived visual mapping.
         let canRun: Bool = await MainActor.run {
             guard workSession.isActive, isScanning,
-                  timestamp - lastEnhancedFrameTime >= enhancedFrameInterval,
+                  timestamp - lastEnhancedFrameTime >= (multiViewEnabledForScan ? 1.0 : enhancedFrameInterval),
                   !isRunningEnhancedInference else { return false }
             lastEnhancedFrameTime = timestamp
             isRunningEnhancedInference = true
@@ -864,13 +874,41 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
 
         guard let processor = depthAnythingProcessor else { return nil }
+        let window: DA3WindowProcessor? = await MainActor.run {
+            guard workSession.isActive, self.scanWorkSession === workSession,
+                  self.multiViewEnabledForScan else { return nil }
+            if ProcessInfo.processInfo.thermalState == .serious {
+                self.windowProcessor = nil
+                self.multiViewFeedback = "Multi-view paused while iPhone cools down. Using normal depth."
+                return nil
+            }
+            if self.windowProcessor == nil { self.windowProcessor = DA3WindowProcessor() }
+            self.multiViewFeedback = ""
+            return self.windowProcessor
+        }
 
         // Scene brightness is judged per enhanced frame (~1 Hz): a passive
         // RGB model cannot extend depth into unlit space, and the feedback
         // below should say so instead of blaming calibration.
         let sceneMedianLuma = SceneLuminance.medianLuma(of: cameraImage)
 
-        guard let relative = processor.inferRelativeDepth(from: cameraImage) else { return nil }
+        let windowResult = window?.inferNewest(
+            image: cameraImage,
+            camera: .init(timestamp: timestamp, transform: transform,
+                          intrinsics: intrinsics, resolution: imageResolution),
+            workSession: workSession
+        )
+        guard workSession.isActive, !Task.isCancelled else { return nil }
+        if windowResult?.failed == true {
+            await MainActor.run {
+                guard workSession.isActive, self.scanWorkSession === workSession else { return }
+                self.multiViewFeedback = "Multi-view unavailable. Using normal depth for this scan."
+                self.publishTrackingFeedback()
+            }
+        }
+        // Only the newest depth is decoded and integrated. Context images are
+        // never fused again, and cameraImage still supplies this frame's colors.
+        guard let relative = windowResult?.depth ?? processor.inferRelativeDepth(from: cameraImage) else { return nil }
         guard workSession.isActive, !Task.isCancelled else { return nil }
         // DA3 uses a same-frame LiDAR scale across the entire image.
         // LiDAR-anchored map geometry can bridge frames with missing LiDAR.
@@ -962,7 +1000,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
             relativeDepthSize: CGSize(width: CGFloat(relative.width), height: CGFloat(relative.height)),
             meshSnapshot: meshSnapshot,
             relative: relative,
-            integrationDepthCap: calibrated.integrationDepthCap
+            integrationDepthCap: calibrated.integrationDepthCap,
+            depthInputTimestamps: windowResult?.timestamps ?? [timestamp]
         )
     }
 
@@ -1393,6 +1432,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                         ROS2BridgeClient.shared.publishDepthAnythingCalibration(
                             mappingFrame.calibration,
                             source: mappingFrame.calibrationSource,
+                            depthInputTimestamps: mappingFrame.depthInputTimestamps,
                             relativeDepthSize: mappingFrame.relativeDepthSize,
                             imageResolution: imageResolution,
                             timestamp: timestamp

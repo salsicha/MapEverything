@@ -1,0 +1,101 @@
+{
+  "summary": [
+    {
+      "mode": "da3-single",
+      "variant": "scaled",
+      "frames": 30,
+      "test_samples": 14083,
+      "absrel": 0.06866067804820666,
+      "mae_m": 0.19928792774405535,
+      "rmse_m": 0.2994377776249601,
+      "delta125": 0.9645115151855024,
+      "coverage": 1.0,
+      "sessions": {
+        "0": {
+          "absrel": 0.05794688520054972,
+          "mae_m": 0.14912932194095607,
+          "rmse_m": 0.20072179652144637,
+          "delta125": 0.9752261298773208,
+          "coverage": 1.0
+        },
+        "1": {
+          "absrel": 0.0793744708958636,
+          "mae_m": 0.2494465335471545,
+          "rmse_m": 0.39815375872847375,
+          "delta125": 0.9537969004936838,
+          "coverage": 1.0
+        }
+      },
+      "pair_count": 41,
+      "pair_median_relative_distance": 0.05257254633821408,
+      "pair_median_distance_m": 0.14376702039672606,
+      "total_seconds": 1.08745849551633,
+      "median_seconds_per_newest_output": 0.03411504114046693
+    },
+    {
+      "mode": "da3-window",
+      "variant": "scaled",
+      "frames": 30,
+      "test_samples": 14083,
+      "absrel": 0.06247433795992652,
+      "mae_m": 0.1809551560603651,
+      "rmse_m": 0.28222296555450105,
+      "delta125": 0.9717294881713897,
+      "coverage": 1.0,
+      "sessions": {
+        "0": {
+          "absrel": 0.0501885796018306,
+          "mae_m": 0.12973493574129055,
+          "rmse_m": 0.18483759132040653,
+          "delta125": 0.9830090930702957,
+          "coverage": 1.0
+        },
+        "1": {
+          "absrel": 0.07476009631802244,
+          "mae_m": 0.23217537637943966,
+          "rmse_m": 0.37960833978859554,
+          "delta125": 0.9604498832724836,
+          "coverage": 1.0
+        }
+      },
+      "pair_count": 41,
+      "pair_median_relative_distance": 0.05227796535413385,
+      "pair_median_distance_m": 0.17455886605094537,
+      "total_seconds": 4.235823875293136,
+      "median_seconds_per_newest_output": 0.17296554101631045
+    }
+  ],
+  "photogrammetry": {
+    "pairs": 19,
+    "usable_match_observations": 616,
+    "far_match_observations": 108,
+    "far_pairs": 6
+  },
+  "method": "Equal-weight per-frame held-out LiDAR metrics; 32px checkerboard split, train-only median multiplicative scale. Pair metric: median across pairs of median 3D disagreement / mean camera-z depth on mutual SIFT matches with <1px known-pose epipolar error. No confidence filtering or depth clipping.",
+  "causal_outputs": 31,
+  "three_view_outputs": 22,
+  "single_frame_fallbacks": 9,
+  "validation": {
+    "app_tests_passed": 216,
+    "suites": 35,
+    "production_swift_causal_selections": 31,
+    "production_swift_pose_encodings": 22,
+    "production_swift_lidar_fits_accepted": 30,
+    "production_swift_lidar_fits_attempted": 30,
+    "device_benchmarked": false
+  },
+  "source_recordings": {
+    "bag_count": 5,
+    "unique_sessions": 2,
+    "rgb_frames": 49,
+    "lidar_frames": 47
+  },
+  "limitations": [
+    "No independent ground truth beyond LiDAR range.",
+    "Exported RGB and sparse LiDAR; original full-resolution images and confidence buffers absent.",
+    "Fixed causal 1 Hz opportunity schedule; device inference overruns and frame drops not simulated.",
+    "Same-frame LiDAR sets scale; output is not natively metric.",
+    "Timing is M5 Mac Core ML, not iPhone; excludes mesh fusion and model load."
+  ],
+  "warm_three_view_median_seconds_per_newest_output": 0.17476510419510305
+}

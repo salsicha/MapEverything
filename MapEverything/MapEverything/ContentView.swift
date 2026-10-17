@@ -48,6 +48,7 @@ struct ContentView: View {
     @AppStorage("ros2Enabled") private var ros2Enabled: Bool = false
     @AppStorage("ros2WebSocketURL") private var ros2WebSocketURL: String = "ws://192.168.1.100:9090"
     @AppStorage(LocalROS2BagRecorderConfiguration.enabledStorageKey) private var localROS2BagStorageEnabled: Bool = false
+    @AppStorage(DA3WindowGeometry.enabledStorageKey) private var da3MultiViewEnabled = false
     @AppStorage("resumeWorldMapEnabled") private var resumeWorldMapEnabled: Bool = false
     @AppStorage("recorderCertificateSHA256Fingerprint") private var recorderCertificateSHA256Fingerprint: String = ""
 
@@ -701,6 +702,18 @@ struct ContentView: View {
     private var advancedSettingsDisclosure: some View {
         DisclosureGroup(isExpanded: $showAdvancedSettings) {
             VStack(alignment: .leading, spacing: 10) {
+                Toggle(isOn: $da3MultiViewEnabled) {
+                    Text("Multi-view depth (experimental)")
+                        .font(.caption2)
+                }
+                .controlSize(.mini)
+                .disabled(isScanning)
+                .accessibilityIdentifier("da3MultiViewToggle")
+                Text("Uses three camera views for depth. More power and memory; off by default. Applies to your next scan.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Toggle(isOn: $resumeWorldMapEnabled) {
                     Text("Resume previous scan area")
                         .font(.caption2)

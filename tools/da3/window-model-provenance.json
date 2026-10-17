@@ -1,0 +1,11 @@
+{
+  "source_revision": "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4",
+  "model_revision": "e08cab65ca0ec38e7826075418411ab90cab4da3",
+  "input": "3 RGB landscape 518x392 images; poses [1,3,9], normalized upright c2w translation, quaternion XYZW, FOV h/w",
+  "output": "inverse_depth [1,392,518], newest only, native camera axes",
+  "files": {
+    "Data/com.apple.CoreML/model.mlmodel": "94115053332639a0074771eabfb881101e172f1f9228376211ac84369caeb68f",
+    "Data/com.apple.CoreML/weights/weight.bin": "3da4ac24ff8e7c1a611631ceb7ec2cf906537eff7ac37ba62de8ca51e9aa2e1a",
+    "Manifest.json": "5e679f235a8bee02f7293910bbfb69106925902b5dc160014e32ec89815e9da0"
+  }
+}

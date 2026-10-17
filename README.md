@@ -278,7 +278,31 @@ Configure your RViz2 workspace using the settings below:
 ### Surface Mapping Architecture
 `MappingSessionManager` owns the record-mode lifecycle, enabled streams, recorder URL, bridge transport, and session metadata. SwiftData persists the active mapping schema through `MapEverythingModelSchema`, including `MappingSessionModel`, `SensorStreamModel`, and `GeoTileModel`.
 
-The mapping stack has one primary capture path. ARKit world tracking provides the camera pose, Depth Anything 3 Small generates dense depth while scanning, LiDAR supplies an independent sparse point cloud and scale calibration, and GPS/ENU registration adds geospatial context when available. DA3 runs on sampled frames with one inference in flight (target: up to 2 Hz); it does not wait for the complete recording. Its Core ML graph returns reciprocal depth in the original camera-image coordinates. Calibration fits a positive scale with zero offset and applies it to the full image, including pixels beyond LiDAR coverage. The accumulated scene retains its existing 18 m integration ceiling and surface-fusion checks. A LiDAR-anchored map can bridge frames without sufficient LiDAR. Colors come from the exact inference input image. Whole-recording, multi-view DA3 refinement is not part of the on-device pipeline. `/mapping/session` and `/mapping/status` report the mapping engine, enabled streams, recorder configuration, local bag state, geotile state, and diagnostics.
+The mapping stack has one primary capture path. ARKit world tracking provides the camera pose, Depth Anything 3 Small generates dense depth while scanning, LiDAR supplies an independent sparse point cloud and scale calibration, and GPS/ENU registration adds geospatial context when available. DA3 runs on sampled frames with one inference in flight (target: up to 2 Hz); it does not wait for the complete recording. Its Core ML graph returns reciprocal depth in the original camera-image coordinates. Calibration fits a positive scale with zero offset and applies it to the full image, including pixels beyond LiDAR coverage. The accumulated scene retains its existing 18 m integration ceiling and surface-fusion checks. A LiDAR-anchored map can bridge frames without sufficient LiDAR. Colors come from the exact inference input image. Whole-recording refinement is not part of the on-device pipeline. An optional causal multi-view mode is described below. `/mapping/session` and `/mapping/status` report the mapping engine, enabled streams, recorder configuration, local bag state, geotile state, and diagnostics.
+
+**Optional multi-view depth:** In **Advanced**, enable **Multi-view depth (experimental)** before starting a scan. It is off by default and remembers your choice. Normal mode keeps single-frame DA3 at up to 2 Hz and never loads the window model. Multi-view mode targets up to 1 Hz, with one inference in flight and no queued backlog. It retains two resized past keyframes and predicts only the newest view using the three-view DA3 graph and ARKit pose conditioning. Each output is calibrated against its own LiDAR and colored with its own camera image, then integrated once. Context views are not reintegrated. No full-recording pass runs when scanning stops.
+
+Keyframes need at least 4 cm translation or 3° rotation; context older than 5 seconds, more than 1.5 m away, or rotated over 45° is discarded. While gathering context or stationary, the app uses normal depth. Tracking loss, scan stop, and a new scan discard the window. The model loads lazily, outside the UI thread; serious thermal pressure suspends multi-view and falls back to normal depth, while critical thermal pressure pauses depth scanning. A model failure falls back with a visible message. `/mapping/depth_anything/calibration` metadata records `single_frame` or `causal_window_3`, the actual input timestamps in system-uptime seconds, and whether poses conditioned the prediction.
+
+The three-view export is reproducible with `tools/da3/convert_da3_window_coreml.py`, using the same pinned DA3 source, weights, and environment as the single-view converter. It accepts normalized upright camera pose encodings, checks them against the official camera encoder, runs cross-view attention, and decodes only the newest view. `tools/da3/window-model-provenance.json` records the bundled file hashes; `window-coreml-validation.json` records FP16 parity with official FP32 depth. The extra bundled model is about 76 MiB, but is not loaded in normal mode.
+
+Local causal replay (requires the DA3 inference dependencies plus Core ML, NumPy, Pillow, SciPy, and OpenCV):
+
+```sh
+# Keep extracted frames and predictions local; never commit private recordings.
+python tools/depth_comparison/prepare.py scans /tmp/da3-window-replay/extracted
+PYTHONPATH=/path/to/Depth-Anything-3/src python tools/da3/replay_window.py \
+  --data /tmp/da3-window-replay/extracted --output /tmp/da3-window-replay \
+  --single-model MapEverything/MapEverything/models/DepthAnything3SmallF16.mlpackage \
+  --window-model MapEverything/MapEverything/models/DepthAnything3WindowF16.mlpackage
+swiftc -module-cache-path /tmp/da3-module-cache \
+  MapEverything/MapEverything/DA3WindowGeometry.swift \
+  MapEverything/MapEverything/RobustDepthCalibration.swift \
+  tools/da3/validate_window_replay.swift -o /tmp/validate-da3-window
+/tmp/validate-da3-window /tmp/da3-window-replay/swift-validation.json
+```
+
+The included replay summary (`tools/da3/window-replay-results.json`) covers five supplied bags containing two unique recordings / 49 RGB frames. The 1 Hz causal schedule selects 31 outputs (22 multi-view, 9 single-view fallbacks), with held-out LiDAR for 30. Calibrated relative depth error was 6.25% versus 6.87% for single-frame DA3 on the same frames. Relative cross-view disagreement was effectively unchanged (5.23% versus 5.26%); absolute disagreement increased (17.5 cm versus 14.4 cm). This is not distant-surface ground truth or a guarantee of improvement on every scan. M5 Mac warm multi-view inference takes about 175 ms versus 34 ms for single-frame; these are per output, not amortized across three inputs. iPhone throughput, peak memory, and sustained thermals remain unmeasured. Replay uses exported RGB and sparse LiDAR, not the original full-resolution capture and confidence buffers, and does not simulate device scheduling overruns.
 
 ### Outlier Filtration Pipeline
 The point cloud goes through three distinct stages of cleanup before publishing or recording:

@@ -839,6 +839,7 @@ class ROS2BridgeClient: ObservableObject {
     nonisolated func publishDepthAnythingCalibration(
         _ calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
         source: DepthCalibrationSource = .lidar,
+        depthInputTimestamps: [TimeInterval] = [],
         relativeDepthSize: CGSize,
         imageResolution: CGSize,
         timestamp: TimeInterval
@@ -850,6 +851,7 @@ class ROS2BridgeClient: ObservableObject {
         let msg = Self.makeDepthAnythingCalibrationMessage(
             calibration: calibration,
             source: source,
+            depthInputTimestamps: depthInputTimestamps,
             header: createHeader(frameId: FrameID.iphoneCamera, timestamp: timestamp),
             relativeDepthSize: relativeDepthSize,
             imageResolution: imageResolution,
@@ -909,6 +911,7 @@ class ROS2BridgeClient: ObservableObject {
     nonisolated static func makeDepthAnythingCalibrationMessage(
         calibration: DepthAnythingProcessor.MaximumLikelihoodCalibration,
         source: DepthCalibrationSource = .lidar,
+        depthInputTimestamps: [TimeInterval] = [],
         header: [String: Any],
         relativeDepthSize: CGSize,
         imageResolution: CGSize,
@@ -921,7 +924,10 @@ class ROS2BridgeClient: ObservableObject {
             "metric_reconstruction": "metric_depth_m = 1.0 / (scale * relative_depth + offset); every valid Depth Anything pixel is projected with that metric depth",
             "depth_model": "DA3-SMALL",
             "model_revision": "e08cab65ca0ec38e7826075418411ab90cab4da3",
-            "inference_mode": "single_frame",
+            "inference_mode": depthInputTimestamps.count == 3 ? "causal_window_3" : "single_frame",
+            "input_frame_timestamps_uptime_s": depthInputTimestamps,
+            "output_view": "newest",
+            "pose_conditioned": depthInputTimestamps.count == 3,
             "relative_depth_representation": "reciprocal_da3_depth",
             "calibration_model": "scale_only_depth",
             "calibration_fit_constraint": "positive_scale_zero_offset",

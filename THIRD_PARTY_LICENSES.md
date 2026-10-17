@@ -6,8 +6,9 @@ which remains under its own license.
 
 ## Depth Anything 3 (Small)
 
-`MapEverything/MapEverything/models/DepthAnything3SmallF16.mlpackage` is a
-Core ML FP16 conversion of ByteDance Seed's **DA3-Small** depth branch.
+`MapEverything/MapEverything/models/DepthAnything3SmallF16.mlpackage` and
+`MapEverything/MapEverything/models/DepthAnything3WindowF16.mlpackage` are
+Core ML FP16 conversions of ByteDance Seed's **DA3-Small** depth branch.
 
 - Source: <https://github.com/ByteDance-Seed/Depth-Anything-3> /
   <https://huggingface.co/depth-anything/DA3-SMALL>
@@ -16,7 +17,10 @@ Core ML FP16 conversion of ByteDance Seed's **DA3-Small** depth branch.
 - Adaptations: fixed-shape positional tensors, native-camera image orientation,
   ImageNet normalization, and reciprocal output for the existing calibration
   interface. Camera-pose and auxiliary outputs are omitted. See
-  `tools/da3/convert_da3_coreml.py` for conversion and numerical validation.
+  `tools/da3/convert_da3_coreml.py` for single-frame conversion and validation.
+  The optional three-view model retains the camera encoder and cross-view
+  attention, accepts normalized pose encodings, and decodes only the newest
+  depth. See `tools/da3/convert_da3_window_coreml.py`.
 
 ## Depth Anything V2 (Small, legacy resource)
 
