@@ -13,7 +13,7 @@
 
 The default record profile publishes camera frames at a conservative 2 Hz and publishes downsampled LiDAR clouds, relative Depth Anything clouds, and Depth Anything calibration instead of surfel maps so the iPhone can spend its budget on AR tracking, dense depth inference, GPS/geotile context, and reliable WebSocket publishing. Mesh, IMU, radio, and diagnostic topics remain implemented for opt-in debug or field profiles.
 
-MapEverything is intentionally a single record-mode publisher by default. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. An off-by-default local SQLite bag option can mirror published topics into chunked rosbag2-style files on device for field fallback or later conversion.
+MapEverything is intentionally a single record-mode publisher by default. The iPhone starts and stops ROS2 publication; topic selection, rosbag retention, replay, and discard policy are handled by the external recorder. An off-by-default local MCAP bag option can mirror published topics into chunked rosbag2-style files on device for field fallback or later conversion.
 
 The mapping architecture now uses one surface reconstruction path: ARKit pose tracking plus Depth Anything dense depth, with LiDAR kept as a separate point-cloud stream and calibration source. GPS, satellite imagery, and DEM context run alongside the same pipeline indoors or outdoors.
 
@@ -43,7 +43,7 @@ See [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md) for the
  rosbridge WebSocket publishers + external rosbag recorder
              |
              v
- optional local SQLite bag chunks
+ optional local MCAP bag chunks
 ```
 
 ### 1. Surface Mapping Pipeline
@@ -53,14 +53,14 @@ See [docs/robotics-mapping-concept.md](docs/robotics-mapping-concept.md) for the
 * **Geospatial Context:** GPS, heading, ENU frame registration, satellite imagery, and DEM/elevation tiles run alongside the surface pipeline so outdoor datasets carry terrain and map context rather than only local AR geometry.
 
 ### 2. ROS and Local Bag Recording
-MapEverything treats the external ROS2 recorder as the authoritative dataset sink. The iPhone publishes synchronized pose, camera, point cloud, GPS, geotile, DEM, radio, and diagnostics topics through rosbridge, while an optional on-device fallback mirrors those same rosbridge JSON payloads into chunked rosbag2-style SQLite files.
+MapEverything treats the external ROS2 recorder as the authoritative dataset sink. The iPhone publishes synchronized pose, camera, point cloud, GPS, geotile, DEM, radio, and diagnostics topics through rosbridge, while an optional on-device fallback mirrors those same rosbridge JSON payloads into size-rotated MCAP files.
 
-Local bag storage is off by default and controlled from the main recording surface. The **Save Local** control enables or disables on-device chunking, and **Share Local Bags** opens the recorded-session browser for deleting old sessions or sharing `metadata.yaml` and `.db3` chunks through the iOS share sheet.
+Local bag storage is off by default and controlled from the main recording surface. The **Save Local** control enables or disables on-device chunking, and **Share Local Bags** opens the recorded-session browser for deleting old sessions or sharing `metadata.yaml` and `.mcap` files through the iOS share sheet.
 
 ### 3. Record-Mode Operator Experience
 * **Single Mapping Surface:** The first screen is the live mapping view with start/stop, local bag save, local bag share, ROS bridge IP entry, and published-topic chips.
 * **Stopped Map Inspection:** After stopping a scan, the reconstructed surface mesh remains centered on screen for touch-driven pan, tilt, and pinch inspection.
-* **Field Recording Fallback:** The local bag controls mirror outgoing ROS publish payloads into chunked SQLite files on device when enabled, then expose those chunks through the share sheet.
+* **Field Recording Fallback:** The local bag controls mirror outgoing ROS publish payloads into size-rotated MCAP files on device when enabled, then expose those chunks through the share sheet.
 
 ---
 
@@ -70,8 +70,8 @@ Local bag storage is off by default and controlled from the main recording surfa
 1. Download, build, and run the app from **Xcode 26.4 or later** on a LiDAR-equipped iOS device (e.g., iPhone 12 Pro or newer, iPad Pro 2020 or newer).
 2. Authorize **Camera Permissions** on launch.
 3. Enter the recorder workstation address in the **ROS bridge IP** field. The app builds a `ws://<host>:9090` rosbridge URL unless you enter a full WebSocket URL.
-4. Toggle **ROS** on when publishing to a remote rosbridge recorder. Leave it off when using only local SQLite bag capture.
-5. Tap **Save Local** before recording if you want on-device chunked SQLite bag files for field fallback.
+4. Toggle **ROS** on when publishing to a remote rosbridge recorder. Leave it off when using only local MCAP bag capture.
+5. Tap **Save Local** before recording if you want on-device size-rotated MCAP bag files for field fallback.
 
 ---
 
@@ -83,7 +83,7 @@ Local bag storage is off by default and controlled from the main recording surfa
    * *Thermal State Throttling:* MapEverything monitors CPU temperature. If the device starts heating up, the frame-processing interval is automatically scaled down to avoid thermal crashes.
 4. Watch the bottom topic chips for the advertised `/mapping/...` topics and the recorder panel for queue depth, dropped publish count, local buffer count, and local bag message count.
 5. Tap **Stop Mapping**. Publication stops, AR capture pauses, and the current mesh remains available for on-device inspection with pan, tilt, and pinch gestures.
-6. Tap **Share Local Bags** to list recorded bag sessions and share individual `metadata.yaml` or `.db3` chunks.
+6. Tap **Share Local Bags** to list recorded bag sessions and share individual `metadata.yaml` or `.mcap` files.
 
 ---
 
@@ -100,13 +100,13 @@ The current ROS topic namespace is `/mapping`.
 
 Transport decision: MapEverything continues to use `rosbridge_suite` over WebSocket in this build. A native binary bridge is not enabled until there is a maintained iOS ROS2/DDS client or companion ROS2 binary receiver and a throughput benchmark showing rosbridge is insufficient.
 
-**Transport encoding:** JSON text frames are the default rosbridge encoding. CBOR is an experimental opt-in in the app's Advanced settings and requires a rosbridge build that accepts incoming CBOR frames. The local SQLite bag always records the JSON payloads regardless of the wire encoding, so [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) is unaffected.
+**Transport encoding:** JSON text frames are the default rosbridge encoding. CBOR is an experimental opt-in in the app's Advanced settings and requires a rosbridge build that accepts incoming CBOR frames. The local MCAP bag always records the JSON payloads regardless of the wire encoding, so [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) is unaffected.
 
 The companion ROS2 custom message package lives in [ros2/mapeverything_msgs](ros2/mapeverything_msgs). Build it in your recorder workspace before launching rosbridge or recording bags. Full setup notes are in [docs/ros2-companion-package.md](docs/ros2-companion-package.md), validation procedures are in [docs/validation-plan.md](docs/validation-plan.md), and a starter RViz config is available at [ros2/rviz/mapeverything.rviz](ros2/rviz/mapeverything.rviz).
 
-Local SQLite bag storage is controlled by the **Save Local** button and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/metadata.yaml` directory with size-rotated `.db3` chunks using the rosbag2 SQLite table layout. The **Share Local Bags** button opens a browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.db3` files through the iOS share sheet. The browser caches per-session preview metadata and camera thumbnails in hidden sidecar files so repeated scans of saved bags stay quick. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
+Local MCAP bag storage is controlled by the **Save Local** button and is off by default. When enabled, MapEverything mirrors outgoing rosbridge publish payloads into a `ROS2Bags/<session>/` directory with `metadata.yaml` with size-rotated `.mcap` files using the MCAP container format. The **Share Local Bags** button opens a browser for listing recorded bag sessions, deleting old sessions, and sharing individual `metadata.yaml` or `.mcap` files through the iOS share sheet. Older SQLite `.db3` sessions remain browsable and shareable. The browser caches per-session preview metadata and camera thumbnails in hidden sidecar files so repeated scans of saved bags stay quick. These local chunks use `serialization_format: rosbridge_json`; native ROS2 replay requires conversion to CDR messages or a compatible bridge-side importer.
 
-Use [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) to convert shared local chunks into a native ROS2 bag. Run it from a sourced ROS2 workspace that can import `rosbag2_py`, `rclpy`, and `mapeverything_msgs`:
+Use [tools/mapeverything-local-bag-to-ros2.py](tools/mapeverything-local-bag-to-ros2.py) to convert shared local chunks into a native ROS2 bag. Run it from a sourced ROS2 workspace that can import `rosbag2_py`, `rclpy`, and `mapeverything_msgs`, with the MCAP Python reader (`pip install mcap`) and ROS MCAP storage plugin installed:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -117,7 +117,11 @@ ros2 bag info converted/<session>_native
 ros2 bag play converted/<session>_native
 ```
 
-The converter also accepts individual `.db3` chunks, supports `--dry-run` inspection without ROS2 imports, and can use `--skip-unknown` or `--type /topic=pkg/msg/Type` when a message package is unavailable or a topic type needs overriding.
+The converter accepts new `.mcap` files and legacy `.db3` chunks, defaults to native ROS2 MCAP output (`--storage-id sqlite3` retains legacy output), supports `--dry-run` inspection without ROS2 imports, and can use `--skip-unknown` or `--type /topic=pkg/msg/Type` when a message package is unavailable or a topic type needs overriding.
+
+The app's MCAP uses JSON channel encoding with unchanged rosbridge publish envelopes, JSON schemas, and ROS type metadata. The Python recorder writes native ROS2 CDR in MCAP. App files still need the converter for native `ros2 bag play`; changing the container does not change message serialization. Local MCAP is uncompressed and unindexed, streamed in bounded batches with a valid footer after each flush. An interrupted final write leaves complete earlier records recoverable by the app scanner or MCAP recovery tooling. The converter sorts unindexed app MCAP on temporary disk, keeping large recordings out of RAM; temporary files are removed when conversion finishes.
+
+Recording checks: `python -m unittest discover -s tools/tests` (install `mcap`; macOS also runs the production Swift writer against the independent MCAP reader). `tools/tests/mcap_ros_roundtrip.py` runs the optional live ROS2 recorder and app-to-native converter round trip in a sourced ROS environment. The depth-comparison extractor accepts app `.mcap` and legacy `.db3` inputs.
 
 ### Radio Telemetry Notes
 
@@ -175,7 +179,7 @@ python3 tools/rosbridge-throughput-benchmark.py --dry-run --duration 5
 python3 tools/rosbridge-throughput-benchmark.py --url ws://<RECORDER_IP>:9090 --duration 60
 ```
 
-To run rosbridge and record chunked rosbag2 SQLite files from one terminal, use:
+To run rosbridge and record size-rotated ROS2 MCAP files from one terminal, use:
 
 ```bash
 python3 tools/run-rosbridge-recorder.py \
@@ -184,9 +188,9 @@ python3 tools/run-rosbridge-recorder.py \
   --chunk-size-mb 512
 ```
 
-The helper records the default advertised MapEverything topics, rotates `.db3`
-bag chunks with `--max-bag-size`, and accepts `--include-optional`,
-`--topic /extra/topic`, or `--record-all` for broader capture profiles.
+The helper records the default advertised MapEverything topics, rotates `.mcap`
+files with `--max-bag-size`, and accepts `--include-optional`,
+`--topic /extra/topic`, or `--record-all` for broader capture profiles. MCAP is the default; `--storage sqlite3` explicitly selects the legacy format. Install `ros-$ROS_DISTRO-rosbag2-storage-mcap` on a native ROS host; the Docker image already includes it.
 
 ### App Store Publishing
 

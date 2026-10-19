@@ -17,17 +17,31 @@ def cloud(m):
     n=int(m['width'])*int(m['height']); step=m['point_step']
     return np.stack([np.ndarray((n,),'<f4',b,offset=fields[k],strides=(step,)) for k in ['x','y','z']],axis=1)
 
+def bag_messages(path):
+    if path.suffix == '.mcap':
+        from mcap.reader import make_reader
+        with path.open('rb') as stream:
+            for _, channel, message in make_reader(stream).iter_messages(topics=TOPICS, log_time_order=False):
+                if channel.message_encoding != 'json' or channel.metadata.get('serialization_format') != 'rosbridge_json':
+                    raise ValueError('Depth comparison expects app rosbridge JSON MCAP, not native ROS2 CDR')
+                yield channel.topic, message.data
+    else:
+        connection=sqlite3.connect(f'file:{path.resolve()}?mode=ro',uri=True)
+        try:
+            yield from connection.execute('select t.name,m.data from messages m join topics t on t.id=m.topic_id')
+        finally:
+            connection.close()
+
+
 def prepare(source,output):
     output.mkdir(parents=True,exist_ok=True); topics={t:{} for t in TOPICS}; provenance=[];duplicates=0
-    for p in sorted(source.glob('*.db3')):
+    for p in sorted([*source.glob('*.db3'), *source.glob('*.mcap')]):
         provenance.append({'file':p.name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size})
-        c=sqlite3.connect(f'file:{p.resolve()}?mode=ro',uri=True)
-        for name,data in c.execute('select t.name,m.data from messages m join topics t on t.id=m.topic_id'):
+        for name,data in bag_messages(p):
             if name not in TOPICS:continue
             m=json.loads(data)['msg'];t=stamp(m)
             if t in topics[name]:duplicates+=1
             topics[name][t]=m
-        c.close()
     frames=[];previous=None;session=-1
     for t,m in sorted(topics['/mapping/camera/image/compressed'].items()):
         if previous is None or t-previous>10_000_000_000:session+=1

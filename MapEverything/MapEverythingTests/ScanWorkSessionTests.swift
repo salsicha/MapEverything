@@ -1,5 +1,4 @@
 import Foundation
-import SQLite3
 import Testing
 import simd
 @testable import MapEverything
@@ -110,18 +109,10 @@ struct ScanWorkSessionTests {
     }
 
     private func messageCount(in directory: URL) throws -> Int {
-        var database: OpaquePointer?
-        let result = sqlite3_open_v2(
-            directory.appendingPathComponent("mapeverything_0.db3").path,
-            &database, SQLITE_OPEN_READONLY, nil
-        )
-        defer { sqlite3_close(database) }
-        try #require(result == SQLITE_OK)
-        var statement: OpaquePointer?
-        try #require(sqlite3_prepare_v2(database, "SELECT COUNT(*) FROM messages", -1, &statement, nil) == SQLITE_OK)
-        defer { sqlite3_finalize(statement) }
-        try #require(sqlite3_step(statement) == SQLITE_ROW)
-        return Int(sqlite3_column_int(statement, 0))
+        var count = 0
+        try LocalMCAPReader.scan(directory.appendingPathComponent("mapeverything_0.mcap"),
+                                 includePayload: { _ in false }) { _ in count += 1 }
+        return count
     }
 
     private actor Gate {

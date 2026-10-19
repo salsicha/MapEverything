@@ -20,6 +20,10 @@ nonisolated struct LocalROS2BagRecorderConfiguration: Equatable, Sendable {
 
     let isEnabled: Bool
     let maxChunkBytes: Int
+    // SQLite remains available for legacy tooling/tests; every app-loaded
+    // configuration and ordinary initializer now defaults to MCAP.
+    var storageFormat: StorageFormat = .mcap
+    enum StorageFormat: String, Sendable { case mcap, sqlite3 }
 
     var chunkSizeMB: Int {
         max(1, maxChunkBytes / 1_048_576)
@@ -279,6 +283,8 @@ nonisolated struct LocalROS2BagRecorderStats: Equatable, Sendable {
     let lastError: String?
     let lastErrorAt: Date?
 
+    let storageIdentifier: String
+
     init(
         isEnabled: Bool = false,
         isRecording: Bool = false,
@@ -291,8 +297,10 @@ nonisolated struct LocalROS2BagRecorderStats: Equatable, Sendable {
         startedAt: Date? = nil,
         stoppedAt: Date? = nil,
         lastError: String? = nil,
-        lastErrorAt: Date? = nil
+        lastErrorAt: Date? = nil,
+        storageIdentifier: String = LocalROS2BagRecorder.storageIdentifier
     ) {
+        self.storageIdentifier = storageIdentifier
         self.isEnabled = isEnabled
         self.isRecording = isRecording
         self.bagDirectoryURL = bagDirectoryURL
@@ -312,7 +320,7 @@ nonisolated struct LocalROS2BagRecorderStats: Equatable, Sendable {
             "enabled": isEnabled,
             "recording": isRecording,
             "serialization_format": LocalROS2BagRecorder.serializationFormat,
-            "storage_identifier": LocalROS2BagRecorder.storageIdentifier,
+            "storage_identifier": storageIdentifier,
             "bag_directory": bagDirectoryURL?.path ?? "",
             "current_chunk": currentChunkURL?.lastPathComponent ?? "",
             "chunk_count": chunkCount,
@@ -331,7 +339,7 @@ nonisolated struct LocalROS2BagRecorderStats: Equatable, Sendable {
             "enabled": String(isEnabled),
             "recording": String(isRecording),
             "serialization_format": LocalROS2BagRecorder.serializationFormat,
-            "storage_identifier": LocalROS2BagRecorder.storageIdentifier,
+            "storage_identifier": storageIdentifier,
             "bag_directory": bagDirectoryURL?.path ?? "",
             "current_chunk": currentChunkURL?.lastPathComponent ?? "",
             "chunk_count": String(chunkCount),
@@ -349,6 +357,7 @@ nonisolated struct LocalROS2BagFile: Identifiable, Hashable, Sendable {
     enum Kind: String {
         case metadata
         case sqliteChunk
+        case mcapChunk
         case overlayMesh
         case overlayMeshMetadata
         case pointCloud
@@ -359,6 +368,7 @@ nonisolated struct LocalROS2BagFile: Identifiable, Hashable, Sendable {
             switch self {
             case .metadata: return "Metadata"
             case .sqliteChunk: return "SQLite Chunk"
+            case .mcapChunk: return "MCAP Chunk"
             case .overlayMesh: return "Overlay Mesh"
             case .overlayMeshMetadata: return "Overlay Mesh Metadata"
             case .pointCloud: return "Point Cloud"
@@ -370,7 +380,7 @@ nonisolated struct LocalROS2BagFile: Identifiable, Hashable, Sendable {
         var iconName: String {
             switch self {
             case .metadata: return "doc.text"
-            case .sqliteChunk: return "cylinder.split.1x2"
+            case .sqliteChunk, .mcapChunk: return "cylinder.split.1x2"
             case .overlayMesh: return "cube.transparent"
             case .overlayMeshMetadata: return "curlybraces.square"
             case .pointCloud: return "point.3.connected.trianglepath.dotted"
@@ -415,7 +425,7 @@ nonisolated struct LocalROS2BagSession: Identifiable, Hashable, Sendable {
     }
 
     var chunkCount: Int {
-        files.filter { $0.kind == .sqliteChunk }.count
+        files.filter { $0.kind == .sqliteChunk || $0.kind == .mcapChunk }.count
     }
 
     var byteCountLabel: String {
@@ -500,7 +510,7 @@ nonisolated enum LocalROS2BagPreviewLoadingMode: Sendable {
 nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Sendable {
     static let shared = LocalROS2BagRecorder()
     static let serializationFormat = "rosbridge_json"
-    static let storageIdentifier = "sqlite3"
+    static let storageIdentifier = "mcap"
 
     // Assigned only on the main queue for SwiftUI observation.
     @MainActor @Published private(set) var stats = LocalROS2BagRecorderStats()
@@ -558,6 +568,8 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     private let listingQueue = DispatchQueue(label: "com.mapeverything.localROS2BagListing", qos: .utility)
     private let fileManager: FileManager
     private let baseDirectoryURL: URL?
+    private var mcapWriter: LocalMCAPWriter?
+    private var hasOpenChunk: Bool { database != nil || mcapWriter != nil }
     private var database: OpaquePointer?
     private var bagDirectoryURL: URL?
     private var currentChunkURL: URL?
@@ -577,7 +589,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     private var lastError: String?
     private var lastErrorAt: Date?
     private var acceptsRecords = false
-    // Lock-guarded mirror of (acceptsRecords && isEnabled && database != nil)
+    // Lock-guarded mirror of (acceptsRecords && isEnabled && hasOpenChunk)
     // so publisher threads can check acceptance without hopping onto the queue.
     private let acceptanceFlagLock = NSLock()
     private var acceptingRecordsFlag = false
@@ -615,12 +627,12 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             return lastError
         }
         if stats.isRecording {
-            return "Local SQLite rosbag recording active"
+            return "Local bag recording active"
         }
         if stats.isEnabled {
-            return "Local SQLite rosbag recording enabled"
+            return "Local bag recording enabled"
         }
-        return "Local SQLite rosbag recording disabled"
+        return "Local bag recording disabled"
     }
 
     var isAcceptingRecords: Bool {
@@ -628,7 +640,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     private func refreshAcceptanceFlag() {
-        let value = acceptsRecords && configuration.isEnabled && database != nil
+        let value = acceptsRecords && configuration.isEnabled && hasOpenChunk
         acceptanceFlagLock.withLock {
             acceptingRecordsFlag = value
             artifactDirectorySnapshot = configuration.isEnabled ? bagDirectoryURL : nil
@@ -776,7 +788,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
                 // Wait off the UI thread for queued writes/stop to finish.
                 // Never scan a chunk while the recorder is still writing it.
                 let isActiveSession = self.queue.sync {
-                    (self.acceptsRecords || self.database != nil)
+                    (self.acceptsRecords || self.hasOpenChunk)
                         && self.bagDirectoryURL?.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path
                 }
                 let loadingMode: LocalROS2BagPreviewLoadingMode = isActiveSession ? .cachedOnly : .scanIfNeeded
@@ -796,7 +808,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
 
     func deleteBagSession(_ session: LocalROS2BagSession) throws {
         let isActiveSession = queue.sync {
-            (self.acceptsRecords || self.database != nil)
+            (self.acceptsRecords || self.hasOpenChunk)
                 && self.bagDirectoryURL?.standardizedFileURL.path == session.directoryURL.standardizedFileURL.path
         }
 
@@ -856,7 +868,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         timestampNanoseconds: Int64 = LocalROS2BagRecorder.nowNanoseconds()
     ) {
         queue.async {
-            guard self.acceptsRecords, self.configuration.isEnabled, self.database != nil else { return }
+            guard self.acceptsRecords, self.configuration.isEnabled, self.hasOpenChunk else { return }
 
             do {
                 try self.enqueuePendingWrite(
@@ -975,7 +987,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             options: [.skipsHiddenFiles]
         )
         .filter { url in
-            url.pathExtension == "db3"
+            url.pathExtension == "db3" || url.pathExtension == "mcap"
                 || url.lastPathComponent == "metadata.yaml"
                 || url.lastPathComponent == LocalOverlayMeshArtifact.objFileName
                 || url.lastPathComponent == LocalOverlayMeshArtifact.metadataFileName
@@ -992,6 +1004,8 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             let kind: LocalROS2BagFile.Kind
             if url.lastPathComponent == "metadata.yaml" {
                 kind = .metadata
+            } else if url.pathExtension == "mcap" {
+                kind = .mcapChunk
             } else if url.pathExtension == "db3" {
                 kind = .sqliteChunk
             } else if url.lastPathComponent == LocalOverlayMeshArtifact.objFileName {
@@ -1086,10 +1100,10 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         var endedAtNanoseconds: Int64?
         var thumbnailSourceData: Data?
 
-        for file in files where file.kind == .sqliteChunk {
+        for file in files where file.kind == .sqliteChunk || file.kind == .mcapChunk {
             // An unreadable chunk means the preview would undercount; fail the
             // scan rather than caching a wrong preview under a stable key.
-            guard let chunkPreview = sqlitePreview(from: file.url) else { return nil }
+            guard let chunkPreview = file.kind == .mcapChunk ? mcapPreview(from: file.url) : sqlitePreview(from: file.url) else { return nil }
             messageCount += chunkPreview.messageCount
             topicNames.formUnion(chunkPreview.topicNames)
 
@@ -1118,7 +1132,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         )
     }
 
-    private struct SQLitePreview {
+    private struct BagChunkPreview {
         let messageCount: Int
         let topicNames: Set<String>
         let startedAtNanoseconds: Int64?
@@ -1126,7 +1140,30 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         let thumbnailSourceData: Data?
     }
 
-    private func sqlitePreview(from url: URL) -> SQLitePreview? {
+    private func mcapPreview(from url: URL) -> BagChunkPreview? {
+        var count = 0, names = Set<String>()
+        var start: Int64?, end: Int64?, thumbnail: Data?
+        do {
+            try LocalMCAPReader.scan(url, includePayload: {
+                thumbnail == nil && $0 == ROS2TopicRegistry.shared.topic(.cameraCompressed)
+            }) { message in
+                count += 1
+                names.insert(message.topic)
+                start = min(start ?? message.timestamp, message.timestamp)
+                end = max(end ?? message.timestamp, message.timestamp)
+                if thumbnail == nil, !message.data.isEmpty,
+                   let envelope = try? JSONSerialization.jsonObject(with: message.data) as? [String: Any],
+                   let msg = envelope["msg"] as? [String: Any], let encoded = msg["data"] as? String {
+                    thumbnail = Data(base64Encoded: encoded)
+                }
+            }
+            return BagChunkPreview(messageCount: count, topicNames: names,
+                                 startedAtNanoseconds: start, endedAtNanoseconds: end,
+                                 thumbnailSourceData: thumbnail)
+        } catch { return nil }
+    }
+
+    private func sqlitePreview(from url: URL) -> BagChunkPreview? {
         var database: OpaquePointer?
         guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
             if let database {
@@ -1158,7 +1195,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         let topics = sqliteTopicNames(database: database)
         let thumbnailData = sqliteFirstCameraImageData(database: database)
 
-        return SQLitePreview(
+        return BagChunkPreview(
             messageCount: messageCount,
             topicNames: topics,
             startedAtNanoseconds: start,
@@ -1278,6 +1315,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         pendingWrites.removeAll()
         pendingWriteBytes = 0
         database = nil
+        mcapWriter = nil
         bagDirectoryURL = nil
         currentChunkURL = nil
         currentChunkIndex = 0
@@ -1297,7 +1335,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             throw NSError(domain: "LocalROS2BagRecorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Bag directory unavailable"])
         }
 
-        let chunkURL = bagDirectoryURL.appendingPathComponent("mapeverything_\(index).db3")
+        let chunkURL = bagDirectoryURL.appendingPathComponent("mapeverything_\(index).\(configuration.storageFormat == .mcap ? "mcap" : "db3")")
         currentChunkURL = chunkURL
         currentChunkIndex = index
         currentChunkBytes = 0
@@ -1305,6 +1343,12 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         currentChunkStartNanoseconds = nil
         currentChunkEndNanoseconds = nil
         topicsInsertedInCurrentChunk.removeAll()
+
+        if configuration.storageFormat == .mcap {
+            mcapWriter = try LocalMCAPWriter(url: chunkURL)
+            refreshAcceptanceFlag()
+            return
+        }
 
         if sqlite3_open_v2(chunkURL.path, &database, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
             throw SQLiteError(database: database, fallback: "Unable to open SQLite chunk")
@@ -1378,6 +1422,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     private func closeDatabase() {
+        mcapWriter = nil
         if let database {
             sqlite3_close(database)
         }
@@ -1420,7 +1465,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     private func flushPendingWrites(publishStatsAfterFlush: Bool) throws {
         cancelPendingFlush()
         guard !pendingWrites.isEmpty else { return }
-        guard configuration.isEnabled, database != nil else {
+        guard configuration.isEnabled, hasOpenChunk else {
             pendingWrites.removeAll()
             pendingWriteBytes = 0
             return
@@ -1446,9 +1491,16 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         var txNextMessageID = nextMessageID
 
         func beginTransaction() throws {
-            try execute("BEGIN IMMEDIATE TRANSACTION")
-            transactionOpen = true
-            messageStatement = try prepare(Self.insertMessageSQL)
+            if let mcapWriter {
+                // begin can fail after truncating the previous footer; the
+                // catch path must restore it even before a message is written.
+                transactionOpen = true
+                try mcapWriter.begin()
+            } else {
+                try execute("BEGIN IMMEDIATE TRANSACTION")
+                transactionOpen = true
+                messageStatement = try prepare(Self.insertMessageSQL)
+            }
         }
 
         func closeStatement() {
@@ -1460,7 +1512,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
 
         func commitTransaction() throws {
             closeStatement()
-            try execute("COMMIT")
+            if let mcapWriter { try mcapWriter.commit() } else { try execute("COMMIT") }
             transactionOpen = false
 
             currentChunkMessageCount += txMessageCount
@@ -1491,7 +1543,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         func rollbackTransaction() {
             closeStatement()
             if transactionOpen {
-                try? execute("ROLLBACK")
+                if let mcapWriter { try? mcapWriter.rollback() } else { try? execute("ROLLBACK") }
                 transactionOpen = false
             }
         }
@@ -1542,7 +1594,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             // connection existed (the preview scanner, or a test harness),
             // and an occasional incomplete checkpoint only defers pages to
             // the next one or to the close-time checkpoint.
-            try? execute("PRAGMA wal_checkpoint(PASSIVE)")
+            if database != nil { try? execute("PRAGMA wal_checkpoint(PASSIVE)") }
 
             let cadenceDue = successfulFlushCount == 1
                 || successfulFlushCount % Self.flushesPerFreeSpaceCheck == 0
@@ -1597,6 +1649,10 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     private func insertTopic(_ topic: TopicInfo) throws {
+        if let mcapWriter {
+            try mcapWriter.channel(id: topic.id, topic: topic.name, type: topic.type)
+            return
+        }
         let sql = "INSERT OR IGNORE INTO topics(id, name, type, serialization_format, offered_qos_profiles) VALUES (?, ?, ?, ?, ?)"
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -1617,6 +1673,10 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         data: Data,
         statement: OpaquePointer?
     ) throws {
+        if let mcapWriter {
+            try mcapWriter.message(id: id, channel: topicID, timestamp: timestampNanoseconds, data: data)
+            return
+        }
         sqlite3_bind_int64(statement, 1, id)
         sqlite3_bind_int64(statement, 2, topicID)
         sqlite3_bind_int64(statement, 3, timestampNanoseconds)
@@ -1683,7 +1743,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
         var lines: [String] = [
             "rosbag2_bagfile_information:",
             "  version: 8",
-            "  storage_identifier: \(Self.storageIdentifier)",
+            "  storage_identifier: \(configuration.storageFormat.rawValue)",
             "  duration:",
             "    nanoseconds: \(duration)",
             "  starting_time:",
@@ -1742,12 +1802,12 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     }
 
     private func publishStats(isRecording: Bool) {
-        let hasOpenUnfinalizedChunk = database != nil
+        let hasOpenUnfinalizedChunk = hasOpenChunk
             && currentChunkURL != nil
             && !bagFiles.contains(where: { $0.relativePath == currentChunkURL?.lastPathComponent })
         let stats = LocalROS2BagRecorderStats(
             isEnabled: configuration.isEnabled,
-            isRecording: isRecording && configuration.isEnabled && database != nil,
+            isRecording: isRecording && configuration.isEnabled && hasOpenChunk,
             bagDirectoryURL: bagDirectoryURL,
             currentChunkURL: currentChunkURL,
             chunkCount: bagFiles.count + (hasOpenUnfinalizedChunk ? 1 : 0),
@@ -1757,7 +1817,8 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
             startedAt: startedAt,
             stoppedAt: stoppedAt,
             lastError: lastError,
-            lastErrorAt: lastErrorAt
+            lastErrorAt: lastErrorAt,
+            storageIdentifier: configuration.storageFormat.rawValue
         )
 
         DispatchQueue.main.async {
@@ -1778,7 +1839,7 @@ nonisolated final class LocalROS2BagRecorder: ObservableObject, @unchecked Senda
     private func noteError(_ message: String) {
         lastError = message
         lastErrorAt = Date()
-        publishStats(isRecording: acceptsRecords && database != nil)
+        publishStats(isRecording: acceptsRecords && hasOpenChunk)
     }
 
     // Write failures keep the database open and recording alive; only

@@ -1358,7 +1358,7 @@ struct MapEverythingTests {
         let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
         recorder.start(
             sessionID: UUID(),
-            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576, storageFormat: .sqlite3)
         )
 
         let registry = ROS2TopicRegistry(
@@ -1531,7 +1531,7 @@ struct MapEverythingTests {
         let sessionID = try #require(UUID(uuidString: "11111111-2222-3333-4444-555555555555"))
         recorder.start(
             sessionID: sessionID,
-            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 900)
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 900, storageFormat: .sqlite3)
         )
 
         let firstMessage = makeLocalBagMessage(sequence: 1, payloadSize: 1_100)
@@ -1623,7 +1623,7 @@ struct MapEverythingTests {
         let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
         recorder.start(
             sessionID: UUID(),
-            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576, storageFormat: .sqlite3)
         )
         let targetDirectoryURL = try #require(recorder.currentArtifactDirectoryURL)
         recorder.stopAndWait()
@@ -1703,7 +1703,7 @@ struct MapEverythingTests {
         let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
         recorder.start(
             sessionID: UUID(),
-            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576, storageFormat: .sqlite3)
         )
 
         recorder.recordPublishedTopic(
@@ -1744,7 +1744,7 @@ struct MapEverythingTests {
         let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
         recorder.start(
             sessionID: UUID(),
-            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576, storageFormat: .sqlite3)
         )
 
         recorder.recordPublishedTopic(

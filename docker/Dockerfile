@@ -6,8 +6,7 @@
 # or simply `docker compose up --build` from the docker/ directory.
 FROM ros:jazzy-ros-base
 
-# rosbridge, rosbag2 with its default storage plugins (sqlite3 is the recorder
-# script's default --storage), the mcap storage plugin, and YAML support.
+# rosbridge and rosbag2 with MCAP (the default) plus legacy SQLite support.
 # build-essential/colcon are already in ros-base images but are listed
 # explicitly so the build keeps working if the base image slims down.
 RUN apt-get update && apt-get install -y --no-install-recommends \

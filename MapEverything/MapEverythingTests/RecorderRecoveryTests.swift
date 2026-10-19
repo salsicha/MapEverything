@@ -16,7 +16,7 @@ struct RecorderRecoveryTests {
             try? FileManager.default.removeItem(at: root)
         }
         let id = UUID()
-        recorder.start(sessionID: id, configuration: .init(isEnabled: true, maxChunkBytes: maxChunkBytes))
+        recorder.start(sessionID: id, configuration: .init(isEnabled: true, maxChunkBytes: maxChunkBytes, storageFormat: .sqlite3))
         let directory = try #require(recorder.currentArtifactDirectoryURL)
         try body(recorder, directory, id)
     }
@@ -182,7 +182,7 @@ struct RecorderRecoveryTests {
             var directories = [firstDirectory]
             record(recorder, timestamp: 0)
             for timestamp in 1...5 {
-                recorder.start(sessionID: id, configuration: .init(isEnabled: true, maxChunkBytes: 8 * 1_048_576))
+                recorder.start(sessionID: id, configuration: .init(isEnabled: true, maxChunkBytes: 8 * 1_048_576, storageFormat: .sqlite3))
                 directories.append(try #require(recorder.currentArtifactDirectoryURL))
                 record(recorder, timestamp: Int64(timestamp))
             }

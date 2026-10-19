@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Convert MapEverything local rosbridge_json SQLite bags to native ROS 2 bags.
+"""Convert MapEverything local rosbridge_json MCAP/SQLite bags to native ROS 2 bags.
 
 Run this inside a sourced ROS 2 workspace that can import rosbag2_py, rclpy,
 and any message packages present in the bag, including mapeverything_msgs.
-Dry-run inspection only needs the Python standard library.
+SQLite inspection uses the standard library; MCAP inspection also requires `pip install mcap`.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import json
 import shutil
 import sqlite3
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -95,6 +96,63 @@ class ChunkReader:
     def close(self) -> None:
         self.cursor.close()
         self.connection.close()
+
+
+def mcap_messages(path: Path, *, ordered: bool = False):
+    try:
+        from mcap.reader import make_reader
+    except ImportError as exc:
+        raise BagConversionError("MCAP input requires the Python mcap package: pip install mcap") from exc
+    try:
+        with path.open("rb") as stream:
+            for schema, channel, message in make_reader(stream).iter_messages(log_time_order=ordered):
+                if channel.message_encoding != "json" or channel.metadata.get("serialization_format") != MAPEVERYTHING_FORMAT:
+                    raise BagConversionError(
+                        f"{path}: expected MapEverything rosbridge JSON MCAP; native ROS2 MCAP can be replayed directly."
+                    )
+                message_type = channel.metadata.get("ros_type") or (schema.name if schema else None)
+                if not message_type:
+                    raise BagConversionError(f"{path}: channel {channel.topic} has no ROS message type")
+                yield channel, message, message_type
+    except BagConversionError:
+        raise
+    except Exception as exc:
+        raise BagConversionError(f"Cannot read MCAP {path}: {exc}") from exc
+
+
+class MCAPChunkReader(ChunkReader):
+    def __init__(self, path: Path, index: int) -> None:
+        self.path, self.index = path, index
+        # App MCAP is unindexed, and its asynchronously published topics may
+        # arrive out of timestamp order. The SDK's ordered fallback retains
+        # every message in RAM. Sort on temporary disk instead, so opening all
+        # chunks for the merge does not load an entire recording into memory.
+        self.temporary = tempfile.TemporaryDirectory(prefix="mapeverything-mcap-")
+        self.connection = None
+        self.cursor = None
+        try:
+            self.connection = sqlite3.connect(str(Path(self.temporary.name) / "ordered.sqlite3"))
+            self.connection.execute("PRAGMA cache_size=-4096")
+            self.connection.execute("PRAGMA temp_store=FILE")
+            self.connection.execute("CREATE TABLE records(timestamp INTEGER, id INTEGER, topic TEXT, type TEXT, data BLOB)")
+            for row_id, (channel, message, message_type) in enumerate(mcap_messages(path), 1):
+                self.connection.execute("INSERT INTO records VALUES(?,?,?,?,?)",
+                    (message.log_time, row_id, channel.topic, message_type, message.data))
+            self.connection.commit()
+            self.connection.execute("CREATE INDEX record_order ON records(timestamp,id)")
+            self.cursor = self.connection.execute("SELECT timestamp,id,topic,type,data FROM records ORDER BY timestamp,id")
+        except Exception:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self.cursor is not None:
+            self.cursor.close()
+            self.cursor = None
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+        self.temporary.cleanup()
 
 
 class MessageHydrator:
@@ -274,11 +332,11 @@ def discover_db_files(inputs: Iterable[Path]) -> list[Path]:
             if metadata_files:
                 db_files.extend(metadata_files)
             else:
-                db_files.extend(sorted(path.glob("*.db3")))
-        elif path.suffix == ".db3":
+                db_files.extend(sorted([*path.glob("*.db3"), *path.glob("*.mcap")]))
+        elif path.suffix in {".db3", ".mcap"}:
             db_files.append(path)
         else:
-            raise BagConversionError(f"Input is not a bag directory or .db3 file: {path}")
+            raise BagConversionError(f"Input is not a bag directory or .db3/.mcap file: {path}")
 
     unique_files: list[Path] = []
     seen: set[Path] = set()
@@ -289,7 +347,7 @@ def discover_db_files(inputs: Iterable[Path]) -> list[Path]:
             seen.add(resolved)
 
     if not unique_files:
-        raise BagConversionError("No .db3 chunks found")
+        raise BagConversionError("No .db3 or .mcap chunks found")
     return unique_files
 
 
@@ -301,7 +359,7 @@ def db_files_from_metadata(directory: Path) -> Iterable[Path]:
     files: list[Path] = []
     for raw_line in metadata.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
-        if not line.startswith("- ") or ".db3" not in line:
+        if not line.startswith("- ") or not any(ext in line for ext in (".db3", ".mcap")):
             continue
         value = line[2:].strip()
         if value.startswith("'") and value.endswith("'"):
@@ -313,6 +371,12 @@ def db_files_from_metadata(directory: Path) -> Iterable[Path]:
 def inspect_topics(db_files: Iterable[Path], type_overrides: dict[str, str]) -> dict[str, TopicDefinition]:
     topics: dict[str, TopicDefinition] = {}
     for db_file in db_files:
+        if db_file.suffix == ".mcap":
+            for channel, _, message_type in mcap_messages(db_file):
+                topic_name = rewrite_legacy_topic_name(channel.topic)
+                final_type = type_overrides.get(topic_name, normalize_message_type(message_type))
+                topics[topic_name] = TopicDefinition(topic_name, final_type, channel.metadata.get("offered_qos_profiles", ""))
+            continue
         try:
             with sqlite3.connect(f"file:{db_file}?mode=ro", uri=True) as connection:
                 for name, message_type, qos in connection.execute(
@@ -327,7 +391,14 @@ def inspect_topics(db_files: Iterable[Path], type_overrides: dict[str, str]) -> 
 
 
 def iter_records(db_files: list[Path]) -> Iterable[BagRecord]:
-    readers = [ChunkReader(path, index) for index, path in enumerate(db_files)]
+    readers = []
+    try:
+        for index, path in enumerate(db_files):
+            readers.append((MCAPChunkReader if path.suffix == ".mcap" else ChunkReader)(path, index))
+    except Exception:
+        for reader in readers:
+            reader.close()
+        raise
     heap: list[tuple[int, int, int, BagRecord]] = []
     try:
         for reader in readers:
@@ -538,6 +609,9 @@ def summarize(db_files: list[Path], type_overrides: dict[str, str]) -> tuple[dic
     topics = inspect_topics(db_files, type_overrides)
     message_count = 0
     for db_file in db_files:
+        if db_file.suffix == ".mcap":
+            message_count += sum(1 for _ in mcap_messages(db_file))
+            continue
         try:
             with sqlite3.connect(f"file:{db_file}?mode=ro", uri=True) as connection:
                 message_count += int(connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
@@ -561,7 +635,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "inputs",
         nargs="+",
         type=Path,
-        help="Bag session directory or one or more .db3 chunk files.",
+        help="Bag session directory or one or more .mcap or legacy .db3 files.",
     )
     parser.add_argument(
         "-o",
@@ -571,8 +645,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--storage-id",
-        default="sqlite3",
-        help="rosbag2 storage plugin for the output bag. Default: sqlite3.",
+        default="mcap",
+        help="rosbag2 storage plugin for the output bag. Default: mcap.",
     )
     parser.add_argument(
         "--topic",

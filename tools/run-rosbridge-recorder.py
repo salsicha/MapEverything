@@ -210,7 +210,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Start rosbridge_server and ros2 bag record for MapEverything, "
-            "rotating rosbag2 SQLite chunks by size."
+            "rotating rosbag2 MCAP files by size."
         )
     )
     parser.add_argument(
@@ -238,8 +238,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--storage",
-        default="sqlite3",
-        help="rosbag2 storage plugin. Default: sqlite3.",
+        default="mcap",
+        help="rosbag2 storage plugin. Default: mcap.",
     )
     parser.add_argument(
         "--address",

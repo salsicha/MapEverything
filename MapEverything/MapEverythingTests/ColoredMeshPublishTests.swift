@@ -5,7 +5,6 @@
 
 import Testing
 import Foundation
-import SQLite3
 import simd
 import RealityKit
 @testable import MapEverything
@@ -70,62 +69,21 @@ struct ColoredMeshPublishTests {
     /// Raw sizes of the recorded rosbridge blobs for a topic — the exact
     /// bytes the payload fitter is supposed to bound.
     private func recordedPayloadSizes(chunkURL: URL, topic: String) throws -> [Int] {
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(chunkURL.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            return []
-        }
-        defer { sqlite3_close(database) }
-
-        let sql = """
-        SELECT length(messages.data) FROM messages
-        JOIN topics ON topics.id = messages.topic_id
-        WHERE topics.name = ?
-        ORDER BY messages.timestamp ASC
-        """
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(statement) }
-        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(statement, 1, topic, -1, transient)
-
         var sizes: [Int] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            sizes.append(Int(sqlite3_column_int64(statement, 0)))
+        try LocalMCAPReader.scan(chunkURL, includePayload: { $0 == topic }) { message in
+            if message.topic == topic { sizes.append(message.data.count) }
         }
         return sizes
     }
 
-    /// Reads every recorded rosbridge publish payload for a topic out of the
-    /// bag chunk (the recorder stores the full {op, topic, msg} JSON blob).
     private func recordedMessages(chunkURL: URL, topic: String) throws -> [[String: Any]] {
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(chunkURL.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            return []
-        }
-        defer { sqlite3_close(database) }
-
-        let sql = """
-        SELECT messages.data FROM messages
-        JOIN topics ON topics.id = messages.topic_id
-        WHERE topics.name = ?
-        ORDER BY messages.timestamp ASC
-        """
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(statement) }
-        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(statement, 1, topic, -1, transient)
-
-        var payloads: [[String: Any]] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard let blob = sqlite3_column_blob(statement, 0) else { continue }
-            let byteCount = Int(sqlite3_column_bytes(statement, 0))
-            let data = Data(bytes: blob, count: byteCount)
-            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                payloads.append(object)
+        var messages: [[String: Any]] = []
+        try LocalMCAPReader.scan(chunkURL, includePayload: { $0 == topic }) { message in
+            if message.topic == topic {
+                messages.append(try #require(JSONSerialization.jsonObject(with: message.data) as? [String: Any]))
             }
         }
-        return payloads
+        return messages
     }
 
     private func makeRecordingBridge() throws -> (ROS2BridgeClient, LocalROS2BagRecorder, URL) {
@@ -152,7 +110,7 @@ struct ColoredMeshPublishTests {
                 (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             }
         )
-        return bagDirectory.appendingPathComponent("mapeverything_0.db3")
+        return bagDirectory.appendingPathComponent("mapeverything_0.mcap")
     }
 
     @Test("Publishing the colored DA mesh records a colored marker and snapshot")

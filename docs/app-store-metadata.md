@@ -35,7 +35,7 @@ for robotics data collection.
 Capture device pose, camera images and intrinsics, LiDAR point clouds, relative
 Depth Anything point clouds and calibration, GPS, satellite imagery, and
 elevation tiles. Publish through rosbridge to a recorder on your local network,
-or enable Local Bags to save shareable SQLite recording chunks on the device.
+or enable Local Bags to save shareable MCAP recording files on the device.
 
 The app includes live mapping status, bounded publishing queues, recorder
 health diagnostics, local bag browsing and sharing, and companion ROS2 message

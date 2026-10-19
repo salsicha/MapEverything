@@ -92,7 +92,7 @@ struct LocalBagStorageTests {
         let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
         recorder.start(
             sessionID: UUID(),
-            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576, storageFormat: .sqlite3)
         )
         let targetDirectoryURL = try #require(recorder.currentArtifactDirectoryURL)
         recorder.stopAndWait()
@@ -140,7 +140,7 @@ struct LocalBagStorageTests {
         let recorder = LocalROS2BagRecorder(fileManager: fileManager, baseDirectoryURL: rootURL)
         recorder.start(
             sessionID: UUID(),
-            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576)
+            configuration: LocalROS2BagRecorderConfiguration(isEnabled: true, maxChunkBytes: 8 * 1_048_576, storageFormat: .sqlite3)
         )
         #expect(recorder.isAcceptingRecords)
 
